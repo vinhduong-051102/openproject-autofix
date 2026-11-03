@@ -842,7 +842,41 @@ def qa_history(display_id=None, build=None, verdict=None):
     return data.get(display_id) if display_id else data
 
 
-def run_all(dry_run=False, only=None):
+def review_watch():
+    """
+    op-watch gọi định kỳ (on_tick): ticket giao cho mình vừa chuyển sang trạng thái qa_review_status_ids (vd Review) mà
+    chưa QA trên bản đang chạy → QA ngay (không deploy). Đang có merge / QA khác, hoặc server không trả lời → bỏ qua lượt
+    này, không báo lỗi (lượt sau / đợt merge theo lịch sẽ làm).
+    """
+    cfg, acfg, dcfg = load()
+    if not dcfg.get("qa_review_status_ids"):
+        return
+    root = os.path.expanduser(acfg["root"])
+    os.makedirs(root, exist_ok=True)
+    lk = open(os.path.join(root, ".review-watch.lock"), "w")
+    try:
+        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return
+    if os.path.exists(QA_ACTIVE) or subprocess.run(["systemctl", "--user", "is-active", "--quiet", "op-merge.service"]
+                                                   ).returncode == 0:
+        return
+    api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    ids = [w.get("displayId") for w in api.my_work_packages(cfg["project"],
+                                                             [str(x) for x in dcfg["qa_review_status_ids"]])]
+    if not ids or not wait_up(dcfg, None, minutes=0.3, revive=False):
+        return
+    fp = fingerprint(dcfg)
+    if not fp.get("fe"):
+        return
+    build = "%s|%s" % (fp.get("fe"), fp.get("be"))
+    cands = sorted(t for t in ids if t and (qa_history(t) or {}).get("build") != build)
+    if cands:
+        log("ticket Review chưa QA trên bản đang chạy: %s" % ", ".join(cands))
+        run_all(only=cands, auto_only=True)
+
+
+def run_all(dry_run=False, only=None, auto_only=False):
     cfg, acfg, dcfg = load()
     root = os.path.expanduser(acfg["root"])
     os.makedirs(root, exist_ok=True)
@@ -853,6 +887,8 @@ def run_all(dry_run=False, only=None):
     auto = set()  # ticket lấy từ OpenProject (Resolved, giao cho mình) — chỉ QA khi bản đang chạy đã có bản sửa
     if only:
         tickets = list(only)
+        if auto_only:  # review_watch: cùng điều kiện như ticket lấy từ OpenProject (có bản sửa trên server, chưa QA)
+            auto = set(only)
     else:
         new = sorted({t for items in commits.values() for _, s in items for t in re.findall(r"\[(SOAR-\d+)\]", s)})
         try:
@@ -1008,9 +1044,15 @@ def main():
     parser = argparse.ArgumentParser(description="Deploy lên server test 86 rồi QA tự động từng ticket.")
     parser.add_argument("--dry-run", action="store_true", help="chỉ liệt kê commit / ticket chưa deploy")
     parser.add_argument("--qa", nargs="+", metavar="TICKET", help="chỉ QA các ticket này trên bản đang chạy")
+    parser.add_argument("--review-watch", action="store_true",
+                        help="QA ngay ticket của mình ở trạng thái qa_review_status_ids chưa QA trên bản đang chạy "
+                             "(op-watch gọi định kỳ)")
     parser.add_argument("--resume", action="store_true",
                         help="QA tiếp hàng chờ (ticket dở do server bị cập nhật); có commit mới thì deploy trước")
     args = parser.parse_args()
+    if args.review_watch:
+        review_watch()
+        return
     run_all(dry_run=args.dry_run, only=args.qa)
 
 
