@@ -193,3 +193,10 @@ Gemini kết luận CẦN XEM / KHÔNG ĐẠT mà không gói nào còn hạn m�
 Theo lịch `REPORT_SCHEDULE` (mặc định 08:00 thứ 2 – thứ 6) tạo `$DAILY_REPORT_DIR/bao-cao-DD-MM-YYYY.txt`:
 "Hôm qua" = mục "Hôm nay" của báo cáo trước; "Hôm nay" = tối đa `DAILY_REPORT_MAX_ITEMS` việc đang giao cho mình.
 `python3 daily_report.py --force` tạo lại báo cáo hôm nay. Cài: `./install.sh op-report`.
+
+### Dọn dữ liệu bug đã chuyển QA (`cleanup.py`)
+op-watch gọi `cleanup.py --every 3600` trong `on_tick` (tối đa 1 lần/giờ). Ticket đang giao cho người QA (`qa_user_id`)
+và không có lượt nào đang chạy thì bị xoá: thư mục lượt chạy + git worktree + nhánh local `auto/<lượt>`, báo cáo trong
+`report_dir`, file trạng thái / khoá, mục trong `qa-history.json` / `qa-fail-count.json` / `qa-pending.json`, các dòng
+inbox chỉ nói về ticket đó. Lượt nào còn commit (không phải merge) chưa có trên remote thì GIỮ LẠI.
+`cleanup.py --dry-run` để xem trước; `cleanup.py SOAR-123` để dọn riêng một ticket.
