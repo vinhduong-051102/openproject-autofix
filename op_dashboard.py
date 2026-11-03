@@ -650,6 +650,18 @@ def action(body):
         _JOB_CACHE["at"] = 0
         d = time.strptime(until, "%Y-%m-%d")
         return "Hoãn các lượt merge + deploy tự động tới hết %s (bấm Chạy ngay vẫn chạy)" % time.strftime("%d/%m", d)
+    if kind == "task_draft":
+        import task_create
+        did = task_create.start_draft(body.get("prompt"), body.get("files") or [], body.get("opts") or {})
+        return {"message": "AI đang soạn mô tả task (khoảng 1 phút)…", "id": did}
+    if kind == "task_create":
+        import task_create
+        r = task_create.create(body.get("id"), body.get("subject"), body.get("description"), body.get("type") or "Bug",
+                               body.get("priority") or "High", body.get("assignee") or "me")
+        msg = "Đã tạo %s trên OpenProject (New%s)" % (r["display_id"], ", %d file" % r["attachments"] if r["attachments"] else "")
+        if r["errors"]:
+            msg += " — lỗi upload: " + "; ".join(r["errors"])[:300]
+        return dict(r, message=msg)
     if kind == "poll_now":
         pid = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "op-watch.service"],
                              capture_output=True, text=True).stdout.strip()
@@ -876,6 +888,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"text": job_log(q.get("key", ""))})
             if url.path == "/api/qa":
                 return self.send(200, {"text": qa_report(q.get("name", ""))})
+            if url.path == "/api/taskdraft":
+                import task_create
+                if q.get("id"):
+                    return self.send(200, task_create.get_draft(q.get("id")))
+                dcfg_ = envconf.deploy_config()
+                return self.send(200, {"drafts": task_create.list_drafts(),
+                                       "qa_user": {"id": dcfg_.get("qa_user_id"), "name": dcfg_.get("qa_user_name")}})
             if url.path == "/api/conflict":
                 return self.send(200, {"text": conflict_report(q.get("name", ""))})
             if url.path == "/api/file":
@@ -891,7 +910,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
-            return self.send(200, {"message": action(body)})
+            res = action(body)
+            return self.send(200, res if isinstance(res, dict) else {"message": res})
         except ValueError as ex:
             return self.send(400, {"error": str(ex)})
         except Exception as ex:  # noqa: BLE001

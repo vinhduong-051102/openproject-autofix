@@ -215,6 +215,28 @@ header { flex-wrap: wrap; min-width: 0; }
 #reviewHint code { font-size: 11.5px; }
 #reviewHint .primary { margin-left: 6px; padding: 2px 10px; font-size: 12px; }
 #pollNow { padding: 4px 10px; font-size: 12.5px; white-space: nowrap; }
+
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: flex-start; justify-content: center; z-index: 20; padding: 5vh 16px; overflow-y: auto; }
+.modal[hidden] { display: none; }
+.modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: min(860px, 100%); padding: 16px 20px 20px; box-shadow: 0 20px 60px rgba(0,0,0,.4); min-width: 0; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.modal-head h3 { margin: 0; font-size: 16px; }
+.modal textarea, .modal input[type=text] { width: 100%; box-sizing: border-box; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: 13.5px/1.5 system-ui, sans-serif; }
+.modal textarea.mono { font: 12.5px/1.55 var(--mono); }
+.tm-label { display: block; font-size: 12.5px; color: var(--text-2); margin: 12px 0 6px; }
+.tm-label .muted, .modal .muted { color: var(--text-3); font-size: 12px; }
+.tm-drop { margin-top: 10px; border: 1px dashed var(--border); border-radius: 8px; padding: 14px; text-align: center; color: var(--text-2); font-size: 13px; }
+.tm-drop.over { border-color: var(--accent, #6aa0ff); background: var(--panel-2); }
+.tm-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.tm-file { display: inline-flex; gap: 6px; align-items: center; background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 6px 2px 10px; font-size: 12px; max-width: 100%; overflow-wrap: anywhere; }
+.tm-file small { color: var(--text-3); }
+.tm-row { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 10px; font-size: 13px; color: var(--text-2); }
+.tm-row label { display: flex; gap: 6px; align-items: center; }
+.tm-actions { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 14px; }
+.tm-q { font-size: 12.5px; color: var(--warn); margin-top: 8px; }
+.tm-q ul { margin: 4px 0 0 18px; padding: 0; }
+#tmPreview { height: auto; max-height: 50vh; border: 1px solid var(--border); border-radius: 8px; }
+#newTask { padding: 4px 10px; font-size: 12.5px; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -222,6 +244,7 @@ header { flex-wrap: wrap; min-width: 0; }
   <h1>Autofix · theo dõi</h1>
   <div class="meta">
     <span class="chips" id="chips"></span>
+    <button id="newTask" class="primary" title="Mô tả task + đính kèm file, AI soạn theo mẫu tester rồi tạo trên OpenProject (New)">+ Tạo task</button>
     <button id="pollNow" title="Hỏi OpenProject ngay (task mới / Reopened / comment, ticket Review chờ QA) — không chờ chu kỳ 2 phút">↻ Kiểm tra ngay</button>
     <span id="updated">—</span>
     <select id="theme" title="Giao diện">
@@ -297,6 +320,34 @@ header { flex-wrap: wrap; min-width: 0; }
   </div>
 </main>
 <div class="toast" id="toast"></div>
+<div class="modal" id="taskModal" hidden role="dialog" aria-modal="true" aria-labelledby="tmTitle">
+  <div class="modal-box">
+    <div class="modal-head"><h3 id="tmTitle">Tạo task trên OpenProject</h3><button class="link" id="tmClose" aria-label="Đóng">✕</button></div>
+    <div id="tmStep1">
+      <label class="tm-label" for="tmPrompt">Mô tả task <span class="muted">— lỗi gì, ở màn nào, tài khoản nào, mong muốn ra sao… (AI sẽ viết lại theo mẫu của tester)</span></label>
+      <textarea id="tmPrompt" rows="6" placeholder="Ví dụ: Màn Quản trị > Giám sát kết nối, đăng nhập admint, cột STT quá rộng làm cột Kết nối bị rớt dòng. Mong muốn STT ~70px, cột Kết nối rộng hơn."></textarea>
+      <div class="tm-drop" id="tmDrop" tabindex="0">Kéo thả file vào đây, dán ảnh (Ctrl+V) hoặc <button class="link" id="tmPick">chọn file</button>
+        <input type="file" id="tmFiles" multiple hidden></div>
+      <div id="tmFileList" class="tm-files"></div>
+      <div class="tm-actions"><button class="primary" id="tmDraft">AI soạn mô tả</button><span class="muted" id="tmStatus"></span></div>
+    </div>
+    <div id="tmStep2" hidden>
+      <label class="tm-label" for="tmSubject">Tiêu đề</label>
+      <input id="tmSubject" type="text">
+      <div class="tm-row">
+        <label>Loại <select id="tmType"><option>Bug</option><option>Task</option></select></label>
+        <label>Ưu tiên <select id="tmPrio"><option>High</option><option>Immediate</option><option>Medium</option><option>Low</option></select></label>
+        <label>Giao cho <select id="tmAssignee"></select></label>
+      </div>
+      <div class="tm-label">Mô tả <button class="link" id="tmTogglePrev">Xem trước</button></div>
+      <textarea id="tmDesc" rows="16" class="mono"></textarea>
+      <div id="tmPreview" class="log md" hidden></div>
+      <div id="tmQuestions" class="tm-q"></div>
+      <div class="tm-actions"><button class="primary" id="tmCreate">Tạo task trên OpenProject (New)</button>
+        <button id="tmBack">Soạn lại</button><span class="muted" id="tmStatus2"></span></div>
+    </div>
+  </div>
+</div>
 <script>
 const STATE_LABEL = {queued: ["Xếp hàng", "warn"], preparing: ["Chuẩn bị", "accent"], running: ["Đang chạy", "accent"],
   shipping: ["Kiểm tra / push", "accent"], done: ["Xong", "ok"], error: ["Lỗi", "crit"], paused: ["Hoãn", "warn"],
@@ -321,7 +372,8 @@ async function post(body) {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.status);
     toast(d.message); refresh();
-  } catch (e) { toast(e.message, true); }
+    return d;
+  } catch (e) { toast(e.message, true); return null; }
 }
 function bar(label, w, limit) {
   if (!w) return `<div class="bar-row"><span>${label}</span><div class="bar"></div><span class="bar-val">—</span></div>`;
@@ -899,6 +951,87 @@ $("addBtn").onclick = async () => {
   $("newToken").value = "";
 };
 refresh(); setInterval(refresh, 3000);
+
+// ---- Tạo task: mô tả + file → AI soạn theo mẫu tester → xem / sửa → tạo trên OpenProject (New) ----
+let tmFiles = [], tmDraftId = null, tmPoll = null;
+const tmFmt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+function tmRenderFiles() {
+  $("tmFileList").innerHTML = tmFiles.map((f, i) => `<span class="tm-file">${esc(f.name)} <small>${tmFmt(f.size)}</small><button class="link" data-tmdel="${i}" aria-label="Bỏ ${esc(f.name)}">✕</button></span>`).join("");
+  document.querySelectorAll("[data-tmdel]").forEach((b) => b.onclick = () => { tmFiles.splice(+b.dataset.tmdel, 1); tmRenderFiles(); });
+}
+function tmAdd(list) {
+  for (const f of list) {
+    if (tmFiles.length >= 10) { toast("Tối đa 10 file", true); break; }
+    tmFiles.push(f.name ? f : new File([f], `anh-dan-${Date.now()}.png`, {type: f.type}));
+  }
+  tmRenderFiles();
+}
+const tmB64 = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
+function tmOpen() {
+  $("taskModal").hidden = false; $("tmStep1").hidden = false; $("tmStep2").hidden = true;
+  $("tmStatus").textContent = ""; $("tmDraft").disabled = false; $("tmPrompt").focus();
+}
+function tmCloseFn() { $("taskModal").hidden = true; if (tmPoll) clearInterval(tmPoll); }
+async function tmShowDraft(st) {
+  const d = st.draft || {};
+  $("tmStep1").hidden = true; $("tmStep2").hidden = false;
+  $("tmSubject").value = d.subject || ""; $("tmDesc").value = d.description || "";
+  $("tmType").value = d.type === "Task" ? "Task" : "Bug";
+  $("tmPrio").value = ["High", "Immediate", "Medium", "Low"].includes(d.priority) ? d.priority : "High";
+  const info = await (await fetch("/api/taskdraft")).json();
+  const qa = info.qa_user || {};
+  $("tmAssignee").innerHTML = `<option value="me">Tôi (autofix sẽ tự sửa)</option><option value="none">Chưa giao</option>`
+    + (qa.id ? `<option value="${qa.id}">${esc(qa.name || "QA")}</option>` : "");
+  $("tmQuestions").innerHTML = (d.questions || []).length ? `<b>AI gợi ý bổ sung:</b><ul>${d.questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ul>` : "";
+  $("tmPreview").hidden = true; $("tmDesc").hidden = false; $("tmTogglePrev").textContent = "Xem trước";
+  $("tmStatus2").textContent = st.files && st.files.length ? `Sẽ đính kèm ${st.files.length} file` : "";
+}
+$("newTask").onclick = tmOpen;
+$("tmClose").onclick = tmCloseFn;
+$("taskModal").onclick = (e) => { if (e.target.id === "taskModal") tmCloseFn(); };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("taskModal").hidden) tmCloseFn(); });
+$("tmPick").onclick = () => $("tmFiles").click();
+$("tmFiles").onchange = (e) => { tmAdd(e.target.files); e.target.value = ""; };
+$("tmDrop").ondragover = (e) => { e.preventDefault(); $("tmDrop").classList.add("over"); };
+$("tmDrop").ondragleave = () => $("tmDrop").classList.remove("over");
+$("tmDrop").ondrop = (e) => { e.preventDefault(); $("tmDrop").classList.remove("over"); tmAdd(e.dataTransfer.files); };
+$("taskModal").addEventListener("paste", (e) => { const fs = [...(e.clipboardData || {}).files || []]; if (fs.length) { e.preventDefault(); tmAdd(fs); } });
+$("tmDraft").onclick = async () => {
+  const prompt = $("tmPrompt").value.trim();
+  if (!prompt && !tmFiles.length) { toast("Nhập mô tả hoặc đính kèm file", true); return; }
+  $("tmDraft").disabled = true; $("tmStatus").textContent = "Đang gửi…";
+  const files = [];
+  for (const f of tmFiles) files.push({name: f.name, type: f.type, data: await tmB64(f)});
+  const r = await post({action: "task_draft", prompt, files});
+  if (!r) { $("tmDraft").disabled = false; $("tmStatus").textContent = ""; return; }
+  tmDraftId = r.id; const t0 = Date.now();
+  if (tmPoll) clearInterval(tmPoll);
+  tmPoll = setInterval(async () => {
+    const st = await (await fetch("/api/taskdraft?id=" + encodeURIComponent(tmDraftId))).json();
+    if (st.state === "drafting") { $("tmStatus").textContent = `AI đang soạn… ${Math.round((Date.now() - t0) / 1000)} giây`; return; }
+    clearInterval(tmPoll); tmPoll = null; $("tmDraft").disabled = false;
+    if (st.state === "ready") { $("tmStatus").textContent = ""; tmShowDraft(st); }
+    else $("tmStatus").textContent = "Lỗi: " + (st.error || st.state);
+  }, 2000);
+};
+$("tmTogglePrev").onclick = () => {
+  const prev = $("tmPreview").hidden;
+  $("tmPreview").hidden = !prev; $("tmDesc").hidden = prev;
+  if (prev) $("tmPreview").innerHTML = renderMd($("tmDesc").value.replace(/\(attachment:([^)\s]+)\)/g, "(#$1)"));
+  $("tmTogglePrev").textContent = prev ? "Sửa" : "Xem trước";
+};
+$("tmBack").onclick = () => { $("tmStep2").hidden = true; $("tmStep1").hidden = false; $("tmStatus").textContent = ""; };
+$("tmCreate").onclick = async () => {
+  if (!$("tmSubject").value.trim()) { toast("Cần tiêu đề", true); return; }
+  if (!confirm(`Tạo task trên OpenProject (trạng thái New)?\n\n${$("tmSubject").value.trim()}`)) return;
+  $("tmCreate").disabled = true; $("tmStatus2").textContent = "Đang tạo…";
+  const r = await post({action: "task_create", id: tmDraftId, subject: $("tmSubject").value, description: $("tmDesc").value,
+                        type: $("tmType").value, priority: $("tmPrio").value, assignee: $("tmAssignee").value});
+  $("tmCreate").disabled = false;
+  if (!r) { $("tmStatus2").textContent = ""; return; }
+  $("tmStatus2").innerHTML = `Đã tạo <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.display_id)}</a>`;
+  tmFiles = []; tmRenderFiles(); $("tmPrompt").value = ""; tmDraftId = null;
+};
 </script>
 </body>
 </html>

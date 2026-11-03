@@ -212,6 +212,15 @@ def run(dry=False, only=None):
             drop_key(os.path.join(root, name), display_id, dry)
         done.append(display_id)
         freed += size
+    # Bản nháp tạo task (trang theo dõi) cũ hơn 14 ngày
+    drafts = os.path.join(root, "task-drafts")
+    if os.path.isdir(drafts):
+        for name in os.listdir(drafts):
+            path = os.path.join(drafts, name)
+            if os.path.isdir(path) and time.time() - os.path.getmtime(path) > 14 * 86400:
+                print("bản nháp tạo task cũ: %s%s" % (name, " — thử" if dry else ""))
+                if not dry:
+                    shutil.rmtree(path, ignore_errors=True)
     lines = clean_inbox(os.path.expanduser(cfg.get("inbox") or ""), done, dry)
     if done:
         msg = "%s %d ticket đã chuyển QA (%s) · %.0f MB · %d dòng inbox" % (

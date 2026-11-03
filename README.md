@@ -215,3 +215,11 @@ Trên trang theo dõi bấm chip "Merge + deploy + QA":
   các giờ vừa thêm mà đã qua trong hôm nay.
 - **Hoãn**: "Hoãn hôm nay" hoặc hoãn tới hết một ngày → `~/autofix/.merge-skip.json`; lượt chạy theo lịch thấy đang hoãn
   thì ghi inbox `MERGE DEV HOÃN` rồi thoát. "Chạy ngay" trên trang và chạy tay `merge_to_dev.py` vẫn chạy.
+
+### Tạo task từ trang theo dõi
+Nút "+ Tạo task": nhập mô tả (lỗi gì, màn nào, tài khoản…) + kéo thả / dán ảnh, file liên quan (tối đa 10 file, 20 MB)
+→ "AI soạn mô tả": Claude headless (gói theo thứ tự dùng gói; chỉ đọc file đính kèm + mã FE/BE, chỉ ghi draft.json)
+soạn tiêu đề + mô tả theo mẫu ticket gần nhất của người QA (ĐIỀU KIỆN BAN ĐẦU / CÁC BƯỚC / KẾT QUẢ MONG ĐỢI / THỰC TẾ /
+MINH CHỨNG), kèm câu hỏi gợi ý bổ sung → xem / sửa tiêu đề, mô tả, loại, ưu tiên, người nhận → "Tạo task trên
+OpenProject (New)": tạo work package, upload file, ảnh trong mô tả trỏ tới file đã upload. Giao cho mình thì op-watch
+coi là task New và autofix tự sửa. Bản nháp ở `~/autofix/task-drafts/` (cleanup.py xoá sau 14 ngày).
