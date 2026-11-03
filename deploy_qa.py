@@ -757,6 +757,43 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
     return verdict, path
 
 
+QA_HISTORY = os.path.join(envconf.autofix_root(), "qa-history.json")
+
+
+def resolved_mine(api, cfg, acfg):
+    """Ticket đang Resolved và giao cho mình: ứng viên QA dù không còn trong hàng chờ / đợt deploy mới."""
+    wps = api.my_work_packages(cfg["project"], [str(acfg["resolved_status_id"])])
+    return sorted(w.get("displayId") or "WP-%s" % w["id"] for w in wps)
+
+
+def be_contains(acfg, be_image, hashes):
+    """Image BE đang chạy (build từ commit ghi trong be-images.json) đã chứa các commit sửa chưa. None = không rõ."""
+    try:
+        with open(os.path.join(os.path.expanduser(acfg["root"]), "be-images.json"), encoding="utf-8") as f:
+            src = json.load(f).get(be_image or "")
+    except (OSError, ValueError):
+        src = None
+    if not src:
+        return None
+    return all(subprocess.run(["git", "merge-base", "--is-ancestor", h, src], cwd=acfg["be_repo"]).returncode == 0
+               for h in hashes)
+
+
+def qa_history(display_id=None, build=None, verdict=None):
+    """Kết quả QA gần nhất theo bản build (fe|be). Có build + verdict thì ghi; không thì trả bản ghi của ticket."""
+    try:
+        with open(QA_HISTORY, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    if display_id and verdict is not None:
+        data[display_id] = {"build": build, "verdict": verdict, "at": datetime.now().isoformat(timespec="seconds")}
+        with open(QA_HISTORY + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(QA_HISTORY + ".tmp", QA_HISTORY)
+    return data.get(display_id) if display_id else data
+
+
 def run_all(dry_run=False, only=None):
     cfg, acfg, dcfg = load()
     root = os.path.expanduser(acfg["root"])
@@ -765,13 +802,19 @@ def run_all(dry_run=False, only=None):
     me_id = api.me()["id"]
     deployed_parts, commits = [], pending(acfg, dcfg)
     waiting = load_pending()
+    auto = set()  # ticket lấy từ OpenProject (Resolved, giao cho mình) — chỉ QA khi bản đang chạy đã có bản sửa
     if only:
         tickets = list(only)
     else:
         new = sorted({t for items in commits.values() for _, s in items for t in re.findall(r"\[(SOAR-\d+)\]", s)})
-        tickets = sorted(set(new) | set(waiting))
-        log("chưa deploy: FE %d commit, BE %d commit · ticket mới: %s · hàng chờ QA: %s" % (
-            len(commits["FE"]), len(commits["BE"]), ", ".join(new) or "không có", ", ".join(waiting) or "trống"))
+        try:
+            auto = set(resolved_mine(api, cfg, acfg)) - set(new) - set(waiting)
+        except Exception as ex:  # noqa: BLE001 — không đọc được OpenProject thì vẫn QA như cũ
+            log("không lấy được danh sách Resolved: %s" % ex)
+        tickets = sorted(set(new) | set(waiting) | auto)
+        log("chưa deploy: FE %d commit, BE %d commit · ticket mới: %s · hàng chờ QA: %s · Resolved chưa QA: %s" % (
+            len(commits["FE"]), len(commits["BE"]), ", ".join(new) or "không có", ", ".join(waiting) or "trống",
+            ", ".join(sorted(auto)) or "không có"))
         if dry_run or not tickets:
             return
     fe_version = None
@@ -815,14 +858,14 @@ def run_all(dry_run=False, only=None):
     open(QA_ACTIVE, "w").close()
     try:
         _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
-                 waiting, remaining, done)
+                 waiting, remaining, done, auto=auto)
     finally:
         if os.path.exists(QA_ACTIVE):
             os.remove(QA_ACTIVE)
 
 
 def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
-             waiting, remaining, done):
+             waiting, remaining, done, auto=()):
     """QA các ticket, tối đa qa_parallel ticket cùng lúc (Gemini); server đổi giữa chừng thì dừng tất cả."""
     mu = threading.Lock()
     stop = {"msg": None}
@@ -837,13 +880,34 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
                                           ("BE", acfg["be_repo"], acfg["be_upstream"]))]
         hashes = [x for x in hashes if x[2]]
         fe_hashes = [h for label, _, hs in hashes if label == "FE" for h in hs]
-        if not deployed_parts and fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is False:
+        be_hashes = [h for label, _, hs in hashes if label == "BE" for h in hs]
+        build = "%s|%s" % (baseline.get("fe"), baseline.get("be"))
+        if display_id in auto:
+            # Ticket Resolved lấy từ OpenProject: chỉ QA khi chắc bản đang chạy có bản sửa, và chưa QA trên bản này.
+            def drop(why):
+                log("%s: %s — chưa QA" % (display_id, why))
+                with mu:
+                    remaining.remove(display_id)
+            if not hashes:
+                return drop("không thấy commit [%s] trên %s / %s" % (display_id, acfg["fe_upstream"], acfg["be_upstream"]))
+            if (fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is not True) or \
+                    (be_hashes and be_contains(acfg, baseline["be"], be_hashes) is not True):
+                return drop("bản đang chạy (FE %s, BE %s) chưa chắc có bản sửa" % (baseline["fe"], baseline["be"]))
+            last = qa_history(display_id)
+            if last and last.get("build") == build:
+                return drop("đã QA trên bản này (%s)" % last.get("verdict"))
+        elif fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is False:
             log("%s: bản FE %s trên server chưa có bản sửa — để lại hàng chờ" % (display_id, baseline["fe"]))
+            return
+        elif be_hashes and be_contains(acfg, baseline["be"], be_hashes) is False:
+            log("%s: bản BE %s trên server chưa có bản sửa — để lại hàng chờ" % (display_id, baseline["be"]))
             return
         slot = af.acquire_slot(os.path.expanduser(acfg["root"]), acfg) if dcfg["qa_engine"] != "gemini" else None
         try:
             verdict, path = qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, hashes, deployed, guard)
             log("%s: %s" % (display_id, verdict or "bỏ qua (không phải của mình / không ở Resolved)"))
+            if verdict:
+                qa_history(display_id, build, verdict)
         except ServerChanged as ex:
             with mu:
                 if not stop["msg"]:
