@@ -84,6 +84,14 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.primary:hover { filter: brightness(1.08); color: #fff; }
 button.link { border: 0; background: none; padding: 0; color: var(--text-3); font-size: 12px; }
 button:disabled { opacity: .45; cursor: default; }
+/* Nút đang gửi thao tác: vòng xoay + khoá; xong thì ✓ / ✕ thoáng qua. */
+button.busy, button.busy:disabled { opacity: .85; cursor: progress; }
+button.busy::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: btnspin .7s linear infinite; }
+button.done::before { content: "✓"; margin-right: 5px; color: var(--ok, #3fb950); }
+button.primary.done::before { color: #fff; }
+button.fail::before { content: "✕"; margin-right: 5px; color: var(--crit, #f85149); }
+@keyframes btnspin { to { transform: rotate(360deg); } }
 select, input { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
 .switch { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--text); font-weight: 400; }
 .switch input { display: none; }
@@ -368,14 +376,58 @@ function toast(msg, err) {
   const t = $("toast"); t.textContent = msg; t.className = "toast show" + (err ? " err" : "");
   clearTimeout(toast.t); toast.t = setTimeout(() => t.className = "toast", 4500);
 }
-async function post(body) {
+// ---- Trạng thái chờ cho nút: nút vừa bấm (trong 15 giây) là nút của thao tác post() kế tiếp.
+// Trang tự làm mới thì các nút được dựng lại: nhớ nút theo id / data-* rồi gắn lại trạng thái chờ cho nút mới.
+let lastClick = null;
+document.addEventListener("click", (e) => {
+  const b = e.target.closest && e.target.closest("button");
+  lastClick = b ? {b, t: Date.now()} : null;
+}, true);
+const busyKeys = new Map();
+function btnKey(b) {
+  if (b.id) return "#" + CSS.escape(b.id);
+  const attrs = [...b.attributes].filter((a) => a.name.startsWith("data-")).map((a) => `[${a.name}="${CSS.escape(a.value)}"]`).join("");
+  return attrs ? "button" + attrs : null;
+}
+function setBusy(b, on) {
+  if (on && !b.classList.contains("busy")) {
+    b.dataset.preBusy = b.disabled ? "1" : "";
+    b.classList.remove("done", "fail"); b.classList.add("busy"); b.disabled = true; b.setAttribute("aria-busy", "true");
+  } else if (!on && b.classList.contains("busy")) {
+    b.classList.remove("busy"); b.disabled = b.dataset.preBusy === "1"; b.removeAttribute("aria-busy"); delete b.dataset.preBusy;
+  }
+}
+function applyBusy() {
+  for (const k of busyKeys.keys()) document.querySelectorAll(k).forEach((b) => setBusy(b, true));
+}
+new MutationObserver(() => { if (busyKeys.size) applyBusy(); }).observe(document.documentElement, {childList: true, subtree: true});
+function flash(b, cls) {
+  b.classList.add(cls); clearTimeout(b._flash); b._flash = setTimeout(() => b.classList.remove(cls), 1500);
+}
+async function post(body, btn) {
+  // btn: nút gắn trạng thái chờ; null = nút tự quản lý (thao tác chạy lâu hơn lời gọi này); bỏ trống = nút vừa bấm.
+  const src = btn !== undefined ? btn
+    : (lastClick && Date.now() - lastClick.t < 15000 && document.contains(lastClick.b) ? lastClick.b : null);
+  lastClick = null;
+  const key = src && btnKey(src);
+  if (src) { setBusy(src, true); if (key) busyKeys.set(key, (busyKeys.get(key) || 0) + 1); }
+  let ok = false;
   try {
     const r = await fetch("/api/action", {method: "POST", headers: {"Content-Type": "application/json", "X-Autofix": "1"}, body: JSON.stringify(body)});
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.status);
+    ok = true;
     toast(d.message); refresh();
     return d;
   } catch (e) { toast(e.message, true); return null; }
+  finally {
+    if (src) {
+      if (key) { const n = (busyKeys.get(key) || 1) - 1; if (n > 0) busyKeys.set(key, n); else busyKeys.delete(key); }
+      // Nút có thể đã được dựng lại trong lúc chờ: bỏ trạng thái chờ ở cả nút cũ lẫn nút mới.
+      const targets = new Set([src, ...(key && !busyKeys.has(key) ? document.querySelectorAll(key) : [])]);
+      targets.forEach((b) => { setBusy(b, false); if (document.contains(b)) flash(b, ok ? "done" : "fail"); });
+    }
+  }
 }
 function bar(label, w, limit) {
   if (!w) return `<div class="bar-row"><span>${label}</span><div class="bar"></div><span class="bar-val">—</span></div>`;
@@ -1011,17 +1063,17 @@ $("taskModal").addEventListener("paste", (e) => { const fs = [...(e.clipboardDat
 $("tmDraft").onclick = async () => {
   const prompt = $("tmPrompt").value.trim();
   if (!prompt && !tmFiles.length) { toast("Nhập mô tả hoặc đính kèm file", true); return; }
-  $("tmDraft").disabled = true; $("tmStatus").textContent = "Đang gửi…";
+  setBusy($("tmDraft"), true); $("tmStatus").textContent = "Đang gửi…";
   const files = [];
   for (const f of tmFiles) files.push({name: f.name, type: f.type, data: await tmB64(f)});
-  const r = await post({action: "task_draft", prompt, files});
-  if (!r) { $("tmDraft").disabled = false; $("tmStatus").textContent = ""; return; }
+  const r = await post({action: "task_draft", prompt, files}, null);
+  if (!r) { setBusy($("tmDraft"), false); flash($("tmDraft"), "fail"); $("tmStatus").textContent = ""; return; }
   tmDraftId = r.id; const t0 = Date.now();
   if (tmPoll) clearInterval(tmPoll);
   tmPoll = setInterval(async () => {
     const st = await (await fetch("/api/taskdraft?id=" + encodeURIComponent(tmDraftId))).json();
     if (st.state === "drafting") { $("tmStatus").textContent = `AI đang soạn… ${Math.round((Date.now() - t0) / 1000)} giây`; return; }
-    clearInterval(tmPoll); tmPoll = null; $("tmDraft").disabled = false;
+    clearInterval(tmPoll); tmPoll = null; setBusy($("tmDraft"), false); flash($("tmDraft"), st.state === "ready" ? "done" : "fail");
     if (st.state === "ready") { $("tmStatus").textContent = ""; tmShowDraft(st); }
     else $("tmStatus").textContent = "Lỗi: " + (st.error || st.state);
   }, 2000);

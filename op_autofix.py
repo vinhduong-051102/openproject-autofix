@@ -411,6 +411,9 @@ def fetch_ticket(api, wp_id, out_dir):
 
 # Danh sách include Liquibase chỉ thêm dòng ở cuối: hai nhánh cùng thêm changelog thì giữ cả hai là đúng.
 UNION_MERGE_FILES = re.compile(r"(^|/)db/master[\w-]*\.xml$")  # master.xml, master-prod.xml… (danh sách include)
+# File thông báo i18n: mỗi ticket thường thêm khoá mới ở cuối → giữ dòng của cả hai bên (trùng khoá khác nội dung
+# thì không tự gộp, để Claude gỡ).
+UNION_PROPERTIES = re.compile(r"(^|/)i18n/messages[\w-]*\.properties$")
 CONFLICT_BLOCK = re.compile(r"<<<<<<< [^\n]*\n(.*?)(?:\|\|\|\|\|\|\| [^\n]*\n.*?)?=======\n(.*?)>>>>>>> [^\n]*\n",
                             re.S)
 
@@ -462,6 +465,30 @@ Sau đó: từng file → mỗi phía đổi gì → đã gộp thế nào (ho�
 """
 
 
+def union_properties(text):
+    """Gộp các khối xung đột của file .properties: giữ dòng của cả hai bên, bỏ dòng trùng. None nếu cùng một khoá mà
+    hai bên đặt giá trị khác nhau (không đoán được bên nào đúng)."""
+    clash = []
+
+    def block(m):
+        out, seen = [], {}
+        for line in (m.group(1) + m.group(2)).splitlines(True):
+            key = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith(("#", "!")) else None
+            if key:
+                if key in seen:
+                    if seen[key] != line.strip():
+                        clash.append(key)
+                    continue
+                seen[key] = line.strip()
+            elif line in out and line.strip():
+                continue
+            out.append(line)
+        return "".join(out)
+
+    merged = CONFLICT_BLOCK.sub(block, text)
+    return None if clash or CONFLICT_MARKER.search(merged) else merged
+
+
 def resolve_conflicts(acfg, work, what):
     """
     Gọi ngay sau khi `git merge` trong `work` bị xung đột. Xung đột chỉ ở db/master*.xml → giữ include của cả hai bên;
@@ -472,17 +499,26 @@ def resolve_conflicts(acfg, work, what):
     if not conflicted:
         subprocess.run(["git", "merge", "--abort"], cwd=work, check=False)
         raise RuntimeError("%s lỗi (không có file xung đột)" % what)
-    union = [f for f in conflicted if UNION_MERGE_FILES.search(f)]
-    for f in union:
+    union = []
+    for f in conflicted:
+        if not (UNION_MERGE_FILES.search(f) or UNION_PROPERTIES.search(f)):
+            continue
         file_path = os.path.join(work, f)
-        with open(file_path, encoding="utf-8") as fh:
-            text = CONFLICT_BLOCK.sub(r"\1\2", fh.read())
+        try:
+            with open(file_path, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue  # file bị xoá ở một phía / không đọc được: để Claude gỡ
+        merged = union_properties(text) if UNION_PROPERTIES.search(f) else CONFLICT_BLOCK.sub(r"\1\2", text)
+        if merged is None:
+            continue
         with open(file_path, "w", encoding="utf-8") as fh:
-            fh.write(text)
+            fh.write(merged)
+        union.append(f)
     if union:
         run(["git", "add"] + union, cwd=work)
     rest = [f for f in conflicted if f not in union]
-    notes = ["tự gộp %s (giữ include của cả hai nhánh)" % ", ".join(union)] if union else []
+    notes = ["tự gộp %s (giữ dòng của cả hai nhánh)" % ", ".join(union)] if union else []
     if rest:
         fail = None
         if not acfg or not acfg.get("claude_resolve_conflicts", True):
@@ -753,6 +789,105 @@ def _push(repo_dir, base):
     run(["git", "push", "-q", "origin", "HEAD:refs/heads/" + base], cwd=repo_dir)
 
 
+def merge_remote(acfg, repo_dir, base, what):
+    """
+    Gộp origin/<base> mới (lượt chạy song song khác vừa push) vào HEAD, ngoài khoá push để không chặn lượt khác.
+    Xung đột → resolve_conflicts (danh sách include Liquibase tự gộp, còn lại Claude gỡ). Trả ghi chú; "" nếu
+    không cần gộp. Gỡ không được → RuntimeError (merge đã được huỷ).
+    """
+    run(["git", "fetch", "-q", "origin", base], cwd=repo_dir)
+    if subprocess.run(["git", "merge-base", "--is-ancestor", "origin/" + base, "HEAD"], cwd=repo_dir).returncode == 0:
+        return ""
+    res = subprocess.run(["git", "merge", "-q", "-m", "Merge branch '%s' of origin into %s" % (base, base),
+                          "origin/" + base], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         universal_newlines=True)
+    if res.returncode == 0:
+        return "gộp origin/%s" % base
+    return resolve_conflicts(acfg, repo_dir, what)
+
+
+ALREADY_FIXED_NOTE = """
+
+## LƯU Ý: lượt này KHÔNG có commit mới
+Claude kết luận lỗi ĐÃ ĐƯỢC SỬA SẴN trong code hiện tại (bởi commit có từ trước, xem báo cáo của Claude và mục DIFF nếu
+có). Hãy kiểm tra trên CODE HIỆN TẠI của worktree ({run_dir}/fe, {run_dir}/be): đi lại từng bước tái hiện của ticket và
+đối chiếu từng kết quả mong đợi — ĐẠT chỉ khi code hiện tại thực sự đã đáp ứng, không dựa vào lời của Claude.
+"""
+
+
+def referenced_commits(report_text, dirs):
+    """Commit Claude nêu trong báo cáo (lỗi đã được sửa sẵn): [(nhãn, worktree, [hash])] — chỉ hash có thật trong nhánh."""
+    hashes = list(dict.fromkeys(re.findall(r"\b[0-9a-f]{7,40}\b", report_text)))
+    out = []
+    for label, d, _ in dirs:
+        found = [h for h in hashes if subprocess.run(["git", "merge-base", "--is-ancestor", h, "HEAD"], cwd=d,
+                                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0]
+        if found:
+            out.append((label, d, found[:5]))
+    return out
+
+
+def comment_and_status(api, wp_id, lines, status_id):
+    op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join(lines)}})
+    if status_id:
+        set_wp_status(api, wp_id, status_id)
+
+
+def tester_body(report_text, *headings):
+    for h in headings:
+        body = report_section(report_text, h)
+        if body and not re.fullmatch(r"[-*\s]*(Không có|Không)\.?[^\n]*", body, re.I):
+            return for_tester(body)[:3000]
+    return ""
+
+
+def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, report_text):
+    """
+    ĐÃ SỬA mà không có commit mới (lỗi đã được sửa sẵn trong code hiện tại): Gemini kiểm tra code hiện tại theo
+    ticket. ĐẠT → comment cho tester + Resolved; còn lại (hoặc Gemini tắt / không chạy được) → comment + UNREVIEWED.
+    Trả mô tả.
+    """
+    dirs = (("FE", fe_dir, acfg["fe_branch"]), ("BE", be_dir, acfg["be_branch"]))
+    review_id = acfg.get("review_status_id")
+    verdict = ""
+    if acfg.get("gemini_enabled"):
+        log("%s: không có commit mới (đã sửa sẵn) — Gemini kiểm tra code hiện tại" % display_id)
+        notify("[GEMINI TEST] %s" % display_id, "Đã sửa sẵn — Gemini kiểm tra code hiện tại: " + wp.get("subject", ""))
+        verdict, _ = gemini_review(acfg, run_dir, referenced_commits(report_text, dirs),
+                                   note=ALREADY_FIXED_NOTE.format(run_dir=run_dir))
+        shown = verdict or "không chạy được"
+        log("%s: Gemini %s" % (display_id, shown))
+        inbox(cfg, "**GEMINI TEST** %s — %s (đã sửa sẵn) · %s" % (display_id, shown, os.path.join(run_dir, "gemini.md")))
+    body = tester_body(report_text, "Comment cho tester", "Đề xuất")
+    if verdict == "ĐẠT":
+        lines = ["**[Autofix] Đã được sửa sẵn** — lỗi này đã được xử lý trong bản code hiện tại (bản sửa trước đó); "
+                 "AI kiểm tra lại xác nhận đạt. Cần test trên bản deploy mới nhất."]
+        if body:
+            lines += ["", body]
+        comment_and_status(api, wp_id, lines, acfg["resolved_status_id"])
+        return "Gemini ĐẠT · đã sửa sẵn (không commit mới), comment + chuyển Resolved"
+    gemini_text = open(os.path.join(run_dir, "gemini.md"), encoding="utf-8").read() \
+        if verdict and os.path.exists(os.path.join(run_dir, "gemini.md")) else ""
+    items = [for_tester(i) for i in summarize_gemini(gemini_text, own_only=True)] if gemini_text else []
+    why = {"KHÔNG ĐẠT": "đánh giá chưa đạt", "CẦN XEM": "chưa xác nhận được"}.get(verdict, "chưa chạy được")
+    lines = ["**[Cần duyệt]** Autofix kết luận lỗi đã được sửa sẵn trong code hiện tại (không có thay đổi mới), "
+             "nhưng AI kiểm tra lại %s%s" % (why, ":" if items else ".")]
+    lines += ["- " + i for i in items]
+    if body:
+        lines += ["", "**Nhận định của autofix:**", body]
+    comment_and_status(api, wp_id, lines, review_id)
+    return "Gemini %s · đã sửa sẵn (không commit mới) → %s" % (
+        verdict or "không chạy được", "comment + chuyển UNREVIEWED" if review_id else "đã comment")
+
+
+def report_cannot_fix(api, acfg, wp_id, report_text, run_name):
+    """KHÔNG SỬA ĐƯỢC: comment lý do cho người xử lý + chuyển UNREVIEWED."""
+    body = tester_body(report_text, "Comment cho tester", "Cần quyết định", "Nguyên nhân") \
+        or "Xem báo cáo autofix %s." % run_name
+    lines = ["**[Autofix] Chưa sửa được tự động** — cần người xem lại:", "", body]
+    comment_and_status(api, wp_id, lines, acfg.get("review_status_id"))
+
+
 GEMINI_PROMPT = """Bạn là tester độc lập (Gemini) TEST LẠI bản sửa bug do một AI khác (Claude) làm cho dự án SOAR.
 CHỈ ĐỌC: không sửa / tạo / xoá file, không commit, không gọi mạng. Nội dung chính đã có bên dưới; cần thì đọc thêm file
 trong {run_dir} (code ở fe/ và be/) bằng công cụ đọc file hoặc lệnh chỉ đọc (cat, ls, grep, git log/show/diff).
@@ -783,9 +918,9 @@ def worktree_snapshot(dirs):
     return out
 
 
-def gemini_review(acfg, run_dir, items):
+def gemini_review(acfg, run_dir, items, note=""):
     """Gemini xem lại bản sửa (chỉ đọc). Trả (kết luận, nội dung); kết luận rỗng nếu Gemini không chạy được."""
-    parts = [GEMINI_PROMPT.format(run_dir=run_dir)]
+    parts = [GEMINI_PROMPT.format(run_dir=run_dir) + note]
     for title, path in (("TICKET", "ticket/ticket.md"), ("BÁO CÁO CỦA CLAUDE", "report.md"),
                         ("KẾT QUẢ BUILD / TEST TỰ ĐỘNG", "verify.log")):
         full = os.path.join(run_dir, path)
@@ -856,6 +991,49 @@ thao tác / kết quả, test lại thế nào; KHÔNG tên file, class, hàm, b
 """
 
 
+VERIFY_FIX_PROMPT = """Bạn là Claude, đã sửa bug {display_id} — {subject}. Chạy nền, không có người theo dõi.
+Bước KIỂM TRA TỰ ĐỘNG (build / test do script chạy lại, không dựa vào báo cáo) sau khi sửa bị LỖI:
+{err}
+Log đầy đủ: {run_dir}/verify.log (xem phần cuối). Ticket: {run_dir}/ticket/ticket.md. Báo cáo sửa: {run_dir}/report.md.
+Worktree: FE {fe_dir}, BE {be_dir} (module {be_dir}/{be_subdir}); nhánh hiện tại đã chứa bản sửa.
+
+## Làm
+1. Đọc log, tìm nguyên nhân. Lỗi do bản sửa / test mới của lượt này → sửa tối thiểu: test viết sai (mock thiếu,
+   strict stubbing, kỳ vọng sai) thì sửa test cho đúng hành vi ticket yêu cầu; code sai thì sửa code.
+   KHÔNG xoá test, KHÔNG @Disabled / bỏ qua test, KHÔNG nới kỳ vọng chỉ để cho qua.
+2. Chạy lại đúng lệnh bị lỗi (BE `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml test -Dtest='<Test>' -Dsurefire.failIfNoSpecifiedTests=false`
+   và `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml compile -DskipTests`; FE `npm run build`). Qua rồi commit bằng
+   `git -C <worktree> add …` + `git -C <worktree> commit …`, message `[{display_id}] - {subject}` + dòng trống +
+   mô tả ngắn tiếng Việt không dấu (bắt đầu bằng "Sua loi kiem tra tu dong: ") + dòng trống +
+   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+3. Lỗi không do lượt này (test cũ lỗi sẵn trên nhánh chung, môi trường / mạng) → KHÔNG sửa, ghi rõ bằng chứng.
+KHÔNG dùng `cd … && …`; git luôn `git -C`, Maven `-f`. Không push, không fetch/pull/checkout, không gọi mạng.
+
+## Báo cáo (bắt buộc)
+Ghi {run_dir}/verify-fix.md tiếng Việt. Dòng đầu đúng một trong: `SỬA KIỂM TRA: ĐÃ SỬA` | `SỬA KIỂM TRA: KHÔNG SỬA`.
+Sau đó: ## Nguyên nhân; ## Đã sửa (file, commit); ## Kiểm tra (lệnh + kết quả).
+"""
+
+
+def claude_fix_verify(acfg, display_id, wp, run_dir, fe_dir, be_dir, err):
+    """Kiểm tra tự động lỗi: Claude một lượt sửa trong worktree (commit). Trả ghi chú; "" nếu không chạy được."""
+    root = os.path.expanduser(acfg["root"])
+    prof, why = choose_profile(root, acfg, acfg.get("_profile"))
+    if prof is None:
+        return ""
+    use_profile(acfg, prof)
+    prompt = VERIFY_FIX_PROMPT.format(display_id=display_id, subject=wp.get("subject", ""), err=err[:2000],
+                                      run_dir=run_dir, fe_dir=fe_dir, be_dir=be_dir, be_subdir=acfg["be_subdir"])
+    with open(os.path.join(run_dir, "verify-fix-prompt.md"), "w", encoding="utf-8") as f:
+        f.write(prompt)
+    log("%s: kiểm tra tự động lỗi → Claude sửa (%s)" % (display_id, prof["name"]))
+    notify("[AUTOFIX SỬA KIỂM TRA] %s" % display_id, err[:200])
+    run_claude(acfg, prompt, run_dir, fe_dir, be_dir, append=True)
+    path = os.path.join(run_dir, "verify-fix.md")
+    first = open(path, encoding="utf-8").readline().strip() if os.path.exists(path) else ""
+    return "Claude sửa lỗi kiểm tra: " + (first.replace("SỬA KIỂM TRA:", "").strip() or "không có báo cáo")
+
+
 def claude_cmd(acfg, prompt, run_dir, be_dir):
     cmd = [acfg["claude"], "-p", prompt,
            "--permission-mode", "dontAsk",
@@ -918,17 +1096,52 @@ def deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, repo
     log_path = os.path.join(run_dir, "verify.log")
 
     def verify_all():
+        # Kiểm tra phải chạy đúng trên code sẽ được push: còn thay đổi chưa commit (vd Claude sửa mà không commit
+        # được) thì build / test có thể qua nhờ working tree trong khi commit push lên vẫn lỗi.
+        for label, d, _ in dirs:
+            dirty = run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=d, check=False).strip()
+            if dirty:
+                files = ", ".join(line[3:] for line in dirty.splitlines()[:5])
+                return "%s còn thay đổi chưa commit (%s)" % (label, files)
         for label, d, commits in current():
             err = verify(acfg, label, d, commits, log_path)
             if err:
                 return err
         return ""
 
+    fix_notes = []
+
+    def verify_or_fix(check=None):
+        """Kiểm tra lại; lỗi thì Claude một lượt sửa (mỗi lần giao tối đa một lượt) rồi kiểm tra lại."""
+        check = check or verify_all
+        err = check()
+        if err and not fix_notes:
+            note = claude_fix_verify(acfg, display_id, wp, run_dir, fe_dir, be_dir, err)
+            fix_notes.append(note or "Claude sửa lỗi kiểm tra: không có gói dùng được")
+            if note:
+                err = check()
+        return err
+
+    def verify_failed(prefix, err):
+        # Vẫn lỗi sau khi Claude sửa: không push; ticket → UNREVIEWED kèm comment để dev xem.
+        msg = " · ".join([n for n in [prefix] + fix_notes if n] + ["chưa push: " + err])
+        # Test lại bản đã push trước đây (review_of): bản cũ vẫn trên môi trường, chỉ phần sửa thêm chưa push —
+        # không đổi trạng thái ticket.
+        if review_of is None and acfg.get("review_status_id"):
+            try:
+                comment_and_status(api, wp_id, [
+                    "**[Cần duyệt]** Autofix đã sửa nhưng bản sửa chưa qua kiểm tra tự động (build / test) nên chưa "
+                    "được đưa lên môi trường. Cần dev xem lại."], acfg["review_status_id"])
+                msg += " → đã comment, chuyển UNREVIEWED"
+            except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+                msg += " (chuyển UNREVIEWED lỗi: %s)" % ex
+        return False, msg
+
     acfg["_verify_notes"] = []
-    err = verify_all()
+    err = verify_or_fix()
     if err:
-        return False, "chưa push: " + err
-    notes, gemini_verdict, followup_text = list(acfg.get("_verify_notes") or []), "", ""
+        return verify_failed("", err)
+    notes, gemini_verdict, followup_text = list(acfg.get("_verify_notes") or []) + fix_notes, "", ""
     if gemini_from:
         src = os.path.join(gemini_from, "gemini.md")
         if os.path.realpath(src) != os.path.realpath(os.path.join(run_dir, "gemini.md")):
@@ -1004,9 +1217,9 @@ def deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, repo
                 return False, " · ".join(notes) + " → đã chuyển UNREVIEWED, chưa push phần mới"
             return False, " · ".join(notes) + " → chờ quyết định, chưa push"
         if decision == "SỬA THÊM":
-            err = verify_all()
+            err = verify_or_fix()
             if err:
-                return False, " · ".join(notes) + " → chưa push: " + err
+                return verify_failed(" · ".join(notes), err)
         elif not decision and gemini_verdict == "KHÔNG ĐẠT" and acfg.get("gemini_block_on_fail"):
             return False, " · ".join(notes) + " → chưa push"
     elif gemini_verdict == "KHÔNG ĐẠT" and acfg.get("gemini_block_on_fail"):
@@ -1026,12 +1239,44 @@ def deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, repo
     # Hash lấy trước khi push (sau push origin/<base> đã chứa chúng).
     hashes = {label: [h[:8] for h in fix_commits(d, b)] for label, d, b in to_push}
     pushed = []
+
+    def unresolved(label, ex):
+        # Gỡ xung đột không được: ticket → UNREVIEWED kèm comment, bản sửa nằm lại worktree chờ gộp tay.
+        done = (" (đã push %s)" % ", ".join(pushed)) if pushed else ""
+        msg = "push %s lỗi: %s%s" % (label, str(ex).splitlines()[0][:200], done)
+        if acfg.get("review_status_id"):
+            try:
+                comment_and_status(api, wp_id, [
+                    "**[Cần duyệt]** Autofix đã sửa và kiểm tra đạt, nhưng chưa đưa được bản sửa lên vì trùng chỗ với "
+                    "một thay đổi khác vừa được đưa lên cùng lúc. Cần gộp tay rồi mới test được."], acfg["review_status_id"])
+                msg += " → đã comment, chuyển UNREVIEWED"
+            except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex2:
+                msg += " (chuyển UNREVIEWED lỗi: %s)" % ex2
+        return False, " · ".join(notes + [msg])
+
     for label, d, b in to_push:
-        try:
-            push(d, b)
-        except (RuntimeError, OSError) as ex:
-            done = (" (đã push %s)" % ", ".join(pushed)) if pushed else ""
-            return False, " · ".join(notes + ["push %s lỗi: %s%s" % (label, str(ex).splitlines()[0][:200], done)])
+        for attempt in range(3):
+            # Gộp origin mới ngoài khoá push (Claude gỡ xung đột nếu cần), có gộp thì build / test lại bản đã gộp.
+            try:
+                note = merge_remote(acfg, d, b, "merge origin/%s vào bản sửa %s" % (b, display_id))
+            except (RuntimeError, OSError) as ex:
+                return unresolved(label, ex)
+            if note:
+                notes.append(note)
+                err = verify_or_fix(lambda: verify(acfg, label, d, fix_commits(d, b), log_path))
+                if err:
+                    return verify_failed(" · ".join(notes + ["sau khi gộp origin/%s" % b]), err)
+            try:
+                push(d, b)
+                break
+            except RuntimeError as ex:
+                # Trong lúc build lại có lượt khác push tiếp và xung đột: gộp lại (tối đa 3 lần).
+                if "xung đột" not in str(ex) or attempt == 2:
+                    return unresolved(label, ex)
+                log("%s: origin/%s lại có commit mới xung đột, gộp lại" % (display_id, b))
+            except OSError as ex:
+                done = (" (đã push %s)" % ", ".join(pushed)) if pushed else ""
+                return False, " · ".join(notes + ["push %s lỗi: %s%s" % (label, str(ex).splitlines()[0][:200], done)])
         pushed.append(label)
 
     commit_line = ", ".join("%s commit %s (%s)" % (label, ", ".join("`%s`" % h for h in hashes[label]), b)
@@ -1636,11 +1881,11 @@ def ship_run(cfg, acfg, run_name, profile=None):
     display_id = m.group(1)
     report_path = os.path.join(run_dir, "report.md")
     report_text = open(report_path, encoding="utf-8").read() if os.path.exists(report_path) else ""
-    if not report_text.lstrip().startswith("KẾT QUẢ: ĐÃ SỬA"):
-        sys.exit("%s: báo cáo không phải ĐÃ SỬA — không giao lại" % run_name)
+    kind = next((k for k in ("ĐÃ SỬA", "KHÔNG SỬA ĐƯỢC") if report_text.lstrip().startswith("KẾT QUẢ: " + k)), None)
+    if not kind:
+        sys.exit("%s: báo cáo không phải ĐÃ SỬA / KHÔNG SỬA ĐƯỢC — không giao lại" % run_name)
     fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
-    if not (fix_commits(fe_dir, acfg["fe_branch"]) or fix_commits(be_dir, acfg["be_branch"])):
-        sys.exit("%s: không có commit sửa để push" % run_name)
+    has_fix = bool(fix_commits(fe_dir, acfg["fe_branch"]) or fix_commits(be_dir, acfg["be_branch"]))
     ticket_lock = open(os.path.join(root, ".%s.lock" % display_id), "w")
     try:
         fcntl.flock(ticket_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1656,12 +1901,21 @@ def ship_run(cfg, acfg, run_name, profile=None):
     try:
         set_status(root, display_id, state="shipping", run_dir=run_dir, run_name=run_name, wp_id=wp_id,
                    pid=os.getpid(), event="SHIP")
-        log("%s: giao lại %s (kiểm tra lại + push)" % (display_id, run_name))
+        log("%s: giao lại %s (%s)" % (display_id, run_name, "kiểm tra lại + push" if has_fix else kind.lower()))
         try:
-            shipped, ship_msg = deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, report_text)
+            if kind == "KHÔNG SỬA ĐƯỢC":
+                report_cannot_fix(api, acfg, wp_id, report_text, run_name)
+                shipped, ship_msg = False, "đã comment, chuyển UNREVIEWED"
+            elif not has_fix:
+                shipped, ship_msg = False, deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir,
+                                                                 fe_dir, be_dir, report_text)
+            else:
+                shipped, ship_msg = deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir,
+                                            report_text)
         except Exception as ex:  # noqa: BLE001
             shipped, ship_msg = False, "ship lỗi: %s" % str(ex).splitlines()[0][:200]
-        verdict = "ĐÃ SỬA → " + ship_msg + ("" if shipped or "UNREVIEWED" in ship_msg else " (sửa tay rồi push)")
+        manual = has_fix and not shipped and "UNREVIEWED" not in ship_msg
+        verdict = kind + " → " + ship_msg + (" (sửa tay rồi push)" if manual else "")
         set_status(root, display_id, state="done", verdict=verdict)
         inbox(cfg, "**AUTOFIX** %s — giao lại %s: %s" % (display_id, run_name, verdict))
         notify("[AUTOFIX] %s: %s" % (display_id, verdict[:120]), wp.get("subject", ""))
@@ -1977,7 +2231,8 @@ def main():
     parser.add_argument("--clean", metavar="RUN", help="xoá worktree + nhánh auto của một lượt chạy (tên thư mục)")
     parser.add_argument("--ship", metavar="RUN",
                         help="giao lại lượt đã sửa mà chưa push (tên thư mục, vd SOAR-2797-1103-1515): kiểm tra lại, "
-                             "Gemini xem lại, push, comment, Resolved")
+                             "Gemini xem lại, push, comment, Resolved; ĐÃ SỬA không commit mới → Gemini kiểm code hiện "
+                             "tại rồi Resolved / UNREVIEWED; KHÔNG SỬA ĐƯỢC → comment + UNREVIEWED")
     parser.add_argument("--status", action="store_true", help="xem các lượt đang chờ / đang chạy / vừa xong")
     parser.add_argument("--follow", nargs="?", const="", metavar="TICKET",
                         help="xem trực tiếp thao tác của lượt đang chạy (hoặc của TICKET)")
@@ -2250,6 +2505,20 @@ def main():
             verdict += " → " + ship_msg
             if not shipped and "UNREVIEWED" not in ship_msg:
                 verdict += " (sửa tay rồi push)"
+        elif verdict.startswith("ĐÃ SỬA") and not has_fix and acfg.get("auto_ship"):
+            # Lỗi đã được sửa sẵn (không commit mới): Gemini kiểm tra code hiện tại rồi mới cập nhật ticket.
+            set_status(root, display_id, state="shipping")
+            try:
+                verdict += " → " + deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir,
+                                                         be_dir, report_text)
+            except Exception as ex:  # noqa: BLE001
+                verdict += " → cập nhật ticket lỗi: %s" % str(ex).splitlines()[0][:200]
+        elif verdict.startswith("KHÔNG SỬA ĐƯỢC") and acfg.get("review_status_id"):
+            try:
+                report_cannot_fix(api, acfg, wp_id, report_text, run_name)
+                verdict += " → đã comment, chuyển UNREVIEWED"
+            except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+                verdict += " (comment / chuyển UNREVIEWED lỗi: %s)" % ex
         minutes = int((time.time() - started) / 60)
         summary = "%s — %s%s (%d phút) · báo cáo: %s" % (
             display_id, verdict, (" · commit " + ", ".join(commits)) if commits else "", minutes, report)
