@@ -48,6 +48,8 @@ DEFAULTS = {
     "qa_user_id": 0,           # id người QA trên OpenProject — đặt QA_USER_ID trong .env
     "qa_user_name": "QA",
     "wait_minutes": 15,
+    "alive_wait_minutes": 5,   # chưa deploy gì: chờ server sống tối đa N phút trước khi QA
+    "be_restart_tries": 3,     # BE thoát sau compose up (DB chưa sẵn sàng) → docker start lại tối đa N lần
     # QA bằng Gemini (agy, chỉ đọc): mỗi vòng Gemini trả JSON các request cần gọi, tool gọi qua soar_api.py rồi gửi
     # kết quả lại. "claude" = Claude headless tự gọi soar_api.py (tốn hạn mức Claude).
     "qa_engine": "gemini",
@@ -526,10 +528,34 @@ def deploy_be(acfg, dcfg, root, logf):
         subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo, check=False)
 
 
-def wait_up(dcfg, fe_version):
-    """Chờ FE trả đúng version (nếu deploy FE) và API trả lời (401 khi chưa đăng nhập = đã sống)."""
-    deadline = time.time() + dcfg["wait_minutes"] * 60
+def revive_be(dcfg, logf=None):
+    """BE thoát (vd. lúc compose up Postgres chưa nhận kết nối → Liquibase lỗi, exit 1) thì start lại.
+    Trả về True nếu đã start lại."""
+    try:
+        st = remote(dcfg, "docker inspect -f '{{.State.Status}}' %s" % dcfg["be_container"], timeout=60).strip()
+    except (RuntimeError, subprocess.TimeoutExpired):
+        return False
+    if st not in ("exited", "dead", "created"):
+        return False
+    log("BE container %s đang %s → docker start lại" % (dcfg["be_container"], st))
+    try:
+        remote(dcfg, "docker start %s" % dcfg["be_container"], logf, timeout=120)
+        return True
+    except (RuntimeError, subprocess.TimeoutExpired) as ex:
+        log("docker start %s lỗi: %s" % (dcfg["be_container"], ex))
+        return False
+
+
+def wait_up(dcfg, fe_version, minutes=None, revive=True):
+    """Chờ FE trả đúng version (nếu deploy FE) và API trả lời (401 khi chưa đăng nhập = đã sống).
+    BE thoát giữa chừng thì start lại (tối đa be_restart_tries lần)."""
+    deadline = time.time() + (dcfg["wait_minutes"] if minutes is None else minutes) * 60
+    tries, last_check = int(dcfg.get("be_restart_tries", 3)), 0
     while time.time() < deadline:
+        if revive and tries > 0 and time.time() - last_check >= 30:
+            last_check = time.time()
+            if revive_be(dcfg):
+                tries -= 1
         ok_fe = ok_api = False
         try:
             html = urllib.request.urlopen(dcfg["fe_url"] + "/", timeout=15).read().decode("utf-8", "replace")
@@ -846,7 +872,20 @@ def run_all(dry_run=False, only=None):
         af.inbox(cfg, "**DEPLOY 86** " + msg)
         af.notify("[DEPLOY 86]", msg)
 
+    if not deployed_parts and not wait_up(dcfg, None, minutes=dcfg.get("alive_wait_minutes", 5)):
+        msg = "server không trả lời (FE %s / API %s) — chưa QA, giữ hàng chờ" % (dcfg["fe_url"], dcfg["api_url"])
+        log(msg)
+        save_pending(tickets, "server không sống")
+        af.inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
+        af.notify("[DEPLOY 86 LỖI]", msg)
+        return
     baseline = fingerprint(dcfg)
+    if not baseline.get("fe"):
+        msg = "không đọc được version FE trên %s — chưa QA, giữ hàng chờ" % dcfg["fe_url"]
+        log(msg)
+        save_pending(tickets, "không đọc được version FE")
+        af.inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
+        return
     deployed = ", ".join(deployed_parts) or "bản đang chạy: FE %s, BE %s" % (baseline["fe"], baseline["be"])
     log("dấu server: %s" % baseline)
 
