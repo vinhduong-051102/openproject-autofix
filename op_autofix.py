@@ -1,0 +1,1824 @@
+#!/usr/bin/env python3
+"""
+op-autofix: chạy Claude Code (headless) để tự sửa một bug OpenProject tới bước COMMIT — không push, không
+comment, không đổi trạng thái. Được op-watch gọi qua "on_change" khi có sự kiện NEW / REOPENED.
+
+Một lượt chạy:
+  1. Khoá (mỗi lúc chỉ một phiên; phiên sau xếp hàng chờ). Bỏ qua nếu ticket đó đang được xử lý.
+  2. Tải ticket: mô tả, comment, ảnh đính kèm → ~/autofix/<SOAR-xxxx>-<giờ>/ticket/ (Claude không cần mạng / API key).
+  3. Tạo worktree riêng: fe/ (nhánh auto/<SOAR-xxxx>-<giờ> từ FE_BRANCH + merge origin/FE_UPSTREAM) và
+     be/ (từ BE_BRANCH + merge origin/BE_UPSTREAM). Xung đột chỉ ở danh sách include Liquibase (master.xml)
+     → tự gộp cả hai bên; xung đột khác → bỏ merge, sửa trên nhánh của mình và ghi chú trong prompt / báo cáo.
+  4. Chạy `claude -p` với quyền tối thiểu (dontAsk + danh sách cho phép, chặn push / mạng), giới hạn chi phí.
+  5. Claude ghi report.md; script ghi 1 dòng vào inbox + thông báo desktop.
+
+Dùng:
+  op_autofix.py --wp 72107                 # chạy cho work package id 72107
+  op_autofix.py --wp 72107 --dry-run       # chỉ chuẩn bị ticket + worktree + prompt, không gọi Claude
+  op_autofix.py --clean SOAR-2789-1030-1205  # xoá worktree + nhánh auto của một lượt chạy
+  op_autofix.py --status                   # các lượt đang chờ / đang chạy / vừa xong + thao tác gần nhất
+  op_autofix.py --follow [SOAR-2789]       # xem trực tiếp từng thao tác của phiên đang chạy
+"""
+
+import argparse
+import fcntl
+import getpass
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import envconf  # noqa: E402  (nạp .env)
+import op_watch  # noqa: E402  (dùng chung cấu hình + client OpenProject)
+
+# systemd có thể khởi động service trước khi PATH người dùng có ~/.local/bin (claude, agy): thêm vào đầu PATH.
+for _bin in reversed(envconf.extra_path()):
+    if _bin not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
+
+AUTOFIX_DEFAULTS = {
+    "enabled": True,
+    "events": ["NEW", "REOPENED"],
+    "root": "~/autofix",
+    # Repo + nhánh: đặt trong .env (FE_REPO, FE_BRANCH…) — giá trị dưới chỉ là mặc định khi chưa cấu hình.
+    "fe_repo": os.path.expanduser("~/soar-fe"),
+    "fe_branch": "dev-ss-%s" % getpass.getuser(),
+    "fe_upstream": "dev-ss",
+    "be_repo": os.path.expanduser("~/SOAR_BE"),
+    "be_branch": "develop-ss-%s" % getpass.getuser(),
+    "be_upstream": "develop-ss",
+    "be_subdir": "SOAR",
+    "max_budget_usd": 5,
+    # Hạn mức 5 giờ của gói đã dùng quá mức này thì hoãn (không chạy Claude), để dành cho làm việc trực tiếp.
+    "pause_above_utilization": 0.8,
+    # Kết quả CẦN QUYẾT ĐỊNH: comment lý do lên ticket và chuyển sang trạng thái này (94 = UNREVIEWED) để chờ duyệt.
+    # Đặt null để không đụng vào OpenProject.
+    "review_status_id": 94,
+    "model": "",
+    "claude": "claude",
+    # Chỉ tự sửa ticket có số SOAR-<n> từ mức này trở lên (ticket cũ hơn bỏ qua; chạy tay MANUAL vẫn được).
+    "min_ticket_number": 1900,
+    # Số lượt autofix / test lại (Claude + Gemini) chạy cùng lúc. Mỗi lượt có worktree riêng; fetch / tạo worktree /
+    # push vào nhánh chung được khoá riêng nên không giẫm lên nhau.
+    "max_parallel": 3,
+    "node_bin": "~/.nvm/versions/node/v22.23.4/bin",
+    # Kết quả ĐÃ SỬA: tool tự build / test lại, push lên fe_branch / be_branch, comment + chuyển trạng thái này
+    # (95 = Resolved). Claude trong lượt chạy vẫn không được push; chỉ tool làm sau khi tự kiểm tra lại.
+    "auto_ship": True,
+    "resolved_status_id": 95,
+    # Gemini (Antigravity CLI `agy`, chế độ plan = chỉ đọc) kiểm tra lại bản sửa sau khi build/test qua, trước khi push.
+    # KHÔNG ĐẠT → không push (gemini_block_on_fail). Gemini lỗi / hết hạn mức → vẫn push, ghi chú trong báo cáo.
+    "gemini_enabled": True,
+    "gemini_cmd": "~/.local/bin/agy",
+    "gemini_model": "gemini-3.8-flash-high",
+    "gemini_timeout": 900,
+    "gemini_block_on_fail": True,
+    # Gemini kết luận thế này → Claude xem lại từng ý, tự quyết sửa thêm / giữ nguyên / cần người quyết định.
+    "followup_on": ["KHÔNG ĐẠT", "CẦN XEM"],
+    # Hạn mức 7 ngày đã dùng quá mức này thì bỏ bước Claude xem lại (giữ hạn mức cho làm việc trực tiếp).
+    "followup_skip_above_7d": 0.95,
+    # Bỏ bước Claude xem lại vì hết hạn mức → ticket vào hàng chờ và chuyển trạng thái này (97 = TO DO) cho tới khi
+    # Claude xem lại xong (khi đó chuyển Resolved, hoặc UNREVIEWED nếu cần quyết định). null = không đổi trạng thái.
+    "followup_status_id": 97,
+    # Báo cáo tổng hợp mỗi lượt (Claude + build/test + Gemini) để mở nhanh.
+    "report_dir": "~/Downloads/autofix-reports",
+    # Các gói Claude: mỗi gói một thư mục cấu hình đã /login bằng tài khoản riêng (CLAUDE_CONFIG_DIR).
+    # Gói đang dùng do trang theo dõi (op_dashboard.py) chọn, lưu ở <root>/.profile.json.
+    "profiles": [{"name": "Gói chính", "config_dir": "~/.claude"}],
+    # Gói đang dùng chạm ngưỡng (5 giờ ≥ pause_above_utilization, 7 ngày ≥ switch_above_7d, hoặc bị chặn) thì tự
+    # chuyển sang gói khác còn hạn mức; tắt thì hoãn như cũ.
+    "auto_switch": True,
+    "switch_above_7d": 0.95,
+}
+
+ALLOWED_TOOLS = [
+    "Read", "Glob", "Grep",
+    "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)", "Bash(git add*)",
+    "Bash(git commit*)", "Bash(git branch --show-current)", "Bash(git rev-parse*)", "Bash(git blame*)",
+    "Bash(git grep*)", "Bash(npm run build*)", "Bash(npm run lint*)", "Bash(npx tsc*)", "Bash(npx eslint*)",
+    "Bash(mvn *)", "Bash(cd *)", "Bash(ls *)", "Bash(grep *)", "Bash(wc *)", "Bash(head *)", "Bash(tail *)",
+]
+DISALLOWED_TOOLS = [
+    # Dạng `git -C <dir> <lệnh>` cũng phải chặn (quy tắc cho phép git -C bên dưới chỉ để đọc lịch sử).
+    "Bash(git -C* push*)", "Bash(git -C* fetch*)", "Bash(git -C* pull*)", "Bash(git -C* remote*)",
+    "Bash(git -C* checkout*)", "Bash(git -C* switch*)", "Bash(git -C* branch*)", "Bash(git -C* reset*)",
+    "Bash(git -C* worktree*)",
+    "Bash(git push*)", "Bash(git remote*)", "Bash(git fetch*)", "Bash(git pull*)", "Bash(git reset --hard*)",
+    "Bash(git checkout*)", "Bash(git switch*)", "Bash(git worktree*)",
+    "Bash(curl*)", "Bash(wget*)", "Bash(ssh*)", "Bash(scp*)", "Bash(rm -rf*)", "Bash(docker*)",
+    "WebFetch", "WebSearch",
+]
+
+PROMPT = """Bạn đang tự động sửa một bug OpenProject của dự án SOAR, chạy nền không có người theo dõi.
+
+## Ticket
+{display_id} (#{wp_id}, trạng thái {status}, sự kiện {event}) — {subject}
+Toàn bộ mô tả + comment: {run_dir}/ticket/ticket.md ; ảnh đính kèm: {run_dir}/ticket/images/ (đọc bằng Read).
+Đọc hết comment: ticket Reopened thì comment gần nhất của tester là yêu cầu cần làm.
+Nếu đã có comment **[Cần duyệt]** (autofix lần trước nêu các phương án) và SAU đó có comment của Vinh Duong
+(người được giao) chọn phương án / đưa hướng xử lý, thì đó là QUYẾT ĐỊNH ĐÃ DUYỆT: làm đúng theo quyết định đó, không
+hỏi lại, không kết luận "CẦN QUYẾT ĐỊNH" cho cùng vấn đề nữa (chỉ khi quyết định đó tự nó gây vấn đề mới).
+
+## Code (đã sẵn sàng, đã merge code mới nhất của nhánh dev chung){merge_note}
+- FE (React/Vite/TS): {fe_dir} — nhánh {fe_auto}. Đọc {fe_dir}/AGENTS.md và docs/ui-v2/README.md nếu sửa giao diện.
+- BE (Spring Boot/Java): {be_dir} — nhánh {be_auto}; module chính ở {be_dir}/{be_subdir}.
+Chỉ sửa trong 2 thư mục này. Không tạo nhánh / worktree khác, không checkout, không fetch/pull/push.
+
+## Làm
+1. Tìm nguyên nhân gốc trong code (không đoán). Ticket nhắc tới API/màn hình nào thì tìm đúng chỗ đó.
+2. Sửa tối thiểu, đúng phạm vi ticket, theo phong cách code xung quanh (FE: chỉ dùng token --t-*, sửa primitive
+   dùng chung trước; BE: thêm/sửa unit test khi sửa logic).
+3. Kiểm tra: FE `npm run build` (+ `npx tsc --noEmit -p tsconfig.app.json` lọc theo file đã sửa, chỉ lỗi mới mới tính);
+   BE `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml test -Dtest='<Test liên quan>' -Dsurefire.failIfNoSpecifiedTests=false`
+   rồi `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml compile -DskipTests`.
+   KHÔNG dùng `cd … && …` (bị chặn): git luôn dùng `git -C {fe_dir} …` / `git -C {be_dir} …`, Maven dùng `-f`.
+4. Commit trên nhánh hiện tại của worktree (`git -C <worktree> add …` rồi `git -C <worktree> commit …`), mỗi ticket một
+   commit mỗi repo, message:
+   `[{display_id}] - {subject}` + dòng trống + mô tả ngắn tiếng Việt không dấu + dòng trống +
+   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+
+## Không được
+- Không push, không gọi mạng, không sửa OpenProject, không đăng nhập bằng tài khoản của người khác.
+- Nếu ticket cần một QUYẾT ĐỊNH (trái với code/thiết kế người khác cố ý làm, đổi hành vi sản phẩm, thiếu thông tin
+  để tái hiện, cần dữ liệu môi trường thật) thì KHÔNG commit phần đó — chỉ ghi rõ vào báo cáo.
+
+## Báo cáo (bắt buộc, kể cả khi không sửa được)
+Ghi {run_dir}/report.md bằng tiếng Việt:
+- Dòng đầu: `KẾT QUẢ: ĐÃ SỬA` | `KẾT QUẢ: CẦN QUYẾT ĐỊNH` | `KẾT QUẢ: KHÔNG SỬA ĐƯỢC` (| `KẾT QUẢ: QA SAI` khi có mục QA bên dưới)
+- Nguyên nhân; Đã sửa (file, cách sửa); Commit (repo + hash); Kiểm tra (lệnh + kết quả thật);
+  Cần quyết định / rủi ro;
+  `## Comment cho tester` — đoạn này được đăng nguyên văn lên ticket cho TESTER (không phải dev) đọc: tiếng Việt, ngắn,
+  nói theo màn hình / thao tác / kết quả nhìn thấy (đã sửa gì, test lại thế nào, lưu ý). KHÔNG tên file, class, hàm,
+  biến, commit, stack trace hay giải thích code. API thì chỉ nêu endpoint + mã HTTP + thông báo trả về.
+"""
+
+
+RESUME_NOTE = """
+
+## Chạy tiếp (lượt trước bị dừng giữa chừng vì hết hạn mức)
+Worktree có thể đã có thay đổi / commit dở của lượt trước: xem `git -C <worktree> status` và
+`git -C <worktree> log --oneline -3` trước, làm tiếp từ đó (không làm lại từ đầu, không commit trùng).
+"""
+
+
+QA_FAIL_NOTE = """
+
+## QA trên server test KHÔNG ĐẠT (lý do lượt chạy này)
+Bản sửa trước của ticket đã deploy lên server test và QA tự động (Gemini) kết luận KHÔNG ĐẠT.
+- Báo cáo QA: {qa_report}
+- Từng request QA đã gửi + response thật: {qa_rounds}
+- Bản đang chạy trên server + commit sửa đã có trong bản đó chưa (kiểm tra bằng git, đây là SỰ THẬT): {deploy_check}
+1. Kiểm chứng báo cáo QA với ticket + code (`git -C <worktree> log --grep='[{display_id}]'` để xem các commit đã sửa):
+   QA có test đúng yêu cầu ticket, đúng chỗ, hiểu đúng kết quả mong đợi không? QA có thể sai.
+2. Xem request QA THỰC GỬI trong file request (dòng đầu mỗi kết quả mô tả đúng thứ công cụ đã gửi): công cụ gửi khác ý
+   định của QA (tên file, nội dung, tham số bị đổi / cắt) → lỗi ở công cụ QA.
+3. KHÔNG được kết luận "server chưa có bản sửa / chưa deploy" khi file deploy-check ghi commit sửa là **CÓ**. Khi đó
+   kết quả sai trên server phải có nguyên nhân khác: bản sửa chưa phủ hết luồng thật (nhánh code khác, lớp khác,
+   cấu hình server, dữ liệu cũ), hoặc công cụ QA gửi sai. Chỉ kết luận do môi trường khi deploy-check ghi CHƯA.
+4. QA đúng → sửa phần còn thiếu / sai, commit như hướng dẫn ở trên; report.md dòng đầu `KẾT QUẢ: ĐÃ SỬA`.
+5. QA sai (test sai cách, hiểu sai ticket, công cụ QA gửi sai, deploy-check ghi CHƯA) → KHÔNG sửa; report.md dòng
+   đầu `KẾT QUẢ: QA SAI`, nêu rõ nguyên nhân thuộc loại nào + bằng chứng (request thực gửi / dòng deploy-check), kèm đề
+   xuất cách test đúng cho tester.
+6. Phần cần người quyết định → `KẾT QUẢ: CẦN QUYẾT ĐỊNH` như thường.
+"""
+
+
+def write_rules(run_dir):
+    scope = "/" + os.path.abspath(run_dir) + "/**"
+    base = os.path.abspath(run_dir)
+    # git của 2 worktree chạy bằng `git -C <worktree>` (lệnh dạng `cd … && …` không qua được kiểm tra quyền).
+    # Chỉ đúng 2 worktree của lượt chạy; push/fetch/checkout/branch/reset… vẫn bị chặn ở DISALLOWED_TOOLS.
+    read_git = ["Bash(git -C %s/%s %s*)" % (base, sub, cmd)
+                for sub in ("fe", "be") for cmd in ("log", "show", "diff", "status", "blame", "add", "commit", "grep")]
+    return ["Edit(%s)" % scope, "Write(%s)" % scope] + read_git
+
+
+def log(msg):
+    op_watch.log("[autofix] " + msg)
+
+
+def run(cmd, cwd=None, check=True):
+    res = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    if check and res.returncode != 0:
+        raise RuntimeError("%s → %s" % (" ".join(cmd), res.stdout.strip()[-800:]))
+    return res.stdout
+
+
+def notify(title, body):
+    try:
+        subprocess.run(["notify-send", "-a", "OpenProject", "-u", "normal", title, body], timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def inbox(cfg, line):
+    if cfg.get("inbox"):
+        with open(os.path.expanduser(cfg["inbox"]), "a", encoding="utf-8") as f:
+            f.write("- [ ] %s %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M"), line))
+
+
+def for_tester(text):
+    """Bỏ chi tiết dành cho dev khỏi nội dung đăng lên ticket: link / đường dẫn file, tên class đầy đủ, hash commit."""
+    text = re.sub(r"\[([^\]]*)\]\((?:file://)?/[^)]*\)", r"\1", text)
+    text = re.sub(r"`?(?:[\w.-]+/)*[\w-]+\.(?:java|tsx?|jsx?|py|xml|ya?ml|css|scss)\b(?::[\d-]+|#L[\d-]+)?`?", "", text)
+    text = re.sub(r"`?\b(?:com|org|net)\.[a-z]\w*(?:\.[a-z]\w*)+\.([A-Z]\w+)`?", r"`\1`", text)
+    text = re.sub(r"`?\b[0-9a-f]{7,40}\b`?(?=[\s,.)]|$)", "", text)
+    text = re.sub(r"\((?:dev-ss|develop-ss)[\w-]*\)", "", text)
+    text = re.sub(r"[ \t]+([,.)])", r"\1", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def plain_md(text):
+    """Bỏ link file / định dạng nhấn mạnh để đưa vào comment OpenProject; giữ `code`."""
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\*\*|(?<![\w`])[*_](?=\S)|(?<=\S)[*_](?![\w`])", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def first_sentence(text, limit=220):
+    text = plain_md(text)
+    m = re.match(r"(.+?[.!?])(\s|$)", text)
+    text = m.group(1) if m and len(m.group(1)) > 30 else text
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def summarize_gemini(text, limit=4, own_only=False):
+    """
+    Các lý do Gemini kết luận CẦN XEM / KHÔNG ĐẠT, mỗi lý do một dòng ngắn cho comment ticket.
+    Ưu tiên mục "Tóm tắt lý do" Gemini tự viết; không có thì rút từ "Lỗi / rủi ro": mức độ + hậu quả (hoặc chi tiết).
+    """
+    own = report_section(text, "Tóm tắt")
+    if own:
+        items = [plain_md(re.sub(r"^\s*([-*]|\d+[.)])\s+", "", line)) for line in own.splitlines()
+                 if re.match(r"^\s*([-*]|\d+[.)])\s+", line)]
+        if items:
+            return items[:limit]
+    if own_only:
+        return []
+    body = report_section(text, "Lỗi")
+    out = []
+    for block in re.split(r"\n(?=\d+[.)]\s)", body):
+        head = block.strip().splitlines()[0] if block.strip() else ""
+        if not re.match(r"\d+[.)]\s", head):
+            continue
+        sev = re.search(r"Mức độ:\s*([^*\n]+)", head)
+        parts = {}
+        for m in re.finditer(r"^\s*[-*]\s*\*?([^*:\n]+):\*?\s*(.+)$", block, re.M):
+            parts[m.group(1).strip().lower()] = m.group(2)
+        detail = parts.get("hậu quả") or parts.get("chi tiết") or re.sub(r"^\d+[.)]\s*", "", head)
+        line = first_sentence(detail)
+        if sev:
+            line = "%s: %s" % (plain_md(sev.group(1)), line)
+        out.append(line)
+    # Lý do chính Gemini ghi ở "Lý do kết luận / đánh dấu …:" — cùng dòng, hoặc gạch đầu dòng ngay sau đó.
+    m = re.search(r"Lý do (?:kết luận|đánh dấu)[^:\n]*:\**[ \t]*(.*)\n?(?:[ \t]*[-*][ \t]*(.+))?", text)
+    if m:
+        main = m.group(1).strip() or (m.group(2) or "")
+        if plain_md(main):
+            out.insert(0, "Lý do chính: " + first_sentence(main.rstrip(":"), 260))
+    return out[:limit]
+
+
+def waiting_comment(run_dir, pushed):
+    """Các dòng comment cho ticket chờ Claude xem lại: tóm tắt lý do Gemini thay vì chỉ ghi kết luận."""
+    path = os.path.join(run_dir, "gemini.md")
+    text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+    m = re.search(r"KẾT LUẬN:\s*(KHÔNG ĐẠT|ĐẠT|CẦN XEM)", text[:500])
+    verdict = {"KHÔNG ĐẠT": "chưa đạt", "CẦN XEM": "cần xem lại"}.get(m.group(1) if m else "", "cần xem lại")
+    head = "**[Autofix] Chờ xem lại** — " if not pushed else "**Chờ xem lại** — "
+    # Chỉ dùng "Tóm tắt lý do" Gemini viết cho tester; lượt cũ không có mục này thì không liệt kê chi tiết kỹ thuật.
+    items = [for_tester(i) for i in summarize_gemini(text, own_only=True)]
+    lines = [head + "AI kiểm tra lại và đánh giá bản sửa %s%s" % (verdict, ":" if items else ".")]
+    lines += ["- " + item for item in items]
+    lines += ["", "Bản sửa sẽ được rà lại %s(sửa thêm nếu cần), xong sẽ chuyển ticket về Resolved. "
+              "Trong lúc chờ ticket để TO DO." % ("các điểm trên " if items else "")]
+    if not pushed:
+        lines[-1] = "Bản sửa chưa được đưa lên môi trường. " + lines[-1]
+    return lines
+
+
+def report_section(text, heading):
+    """Nội dung một mục "## <heading>..." trong report.md (tới mục ## kế tiếp)."""
+    m = re.search(r"^##\s*" + re.escape(heading) + r"[^\n]*\n(.*?)(?=^##\s|\Z)", text, re.S | re.M)
+    return m.group(1).strip() if m else ""
+
+
+def op_write(api, method, path, body):
+    req = op_watch.urllib.request.Request(api.url + path, data=json.dumps(body).encode("utf-8"), method=method,
+                                          headers=dict(api.headers, **{"Content-Type": "application/json"}))
+    with op_watch.urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8") or "{}")
+
+
+def set_wp_status(api, wp_id, status_id):
+    lock_version = api.get("/api/v3/work_packages/%s" % wp_id)["lockVersion"]
+    op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp_id, {
+        "lockVersion": lock_version, "_links": {"status": {"href": "/api/v3/statuses/%s" % status_id}}})
+
+
+def wp_status_id(api, wp_id):
+    href = api.get("/api/v3/work_packages/%s" % wp_id)["_links"]["status"]["href"]
+    return int(href.rstrip("/").split("/")[-1])
+
+
+def mark_for_review(api, wp_id, status_id, report_text, run_name):
+    """Ticket cần người duyệt: comment lý do (mục "Cần quyết định" của báo cáo) + chuyển trạng thái chờ duyệt."""
+    reason = report_section(report_text, "Cần quyết định") or report_section(report_text, "Nguyên nhân") \
+        or "Xem báo cáo autofix %s." % run_name
+    if len(reason) > 4000:
+        reason = reason[:4000] + "\n…"
+    comment = "**[Cần duyệt]** Ticket cần quyết định trước khi sửa:\n\n" + for_tester(reason)
+    op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": comment}})
+    lock_version = api.get("/api/v3/work_packages/%s" % wp_id)["lockVersion"]
+    op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp_id, {
+        "lockVersion": lock_version, "_links": {"status": {"href": "/api/v3/statuses/%s" % status_id}}})
+
+
+def fetch_ticket(api, wp_id, out_dir):
+    """Mô tả + toàn bộ comment/thay đổi + ảnh đính kèm, để Claude đọc offline."""
+    os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
+    wp = api.get("/api/v3/work_packages/%s" % wp_id)
+    acts = api.activities(wp_id)
+    image_ids = set()
+
+    def localize(text):
+        def repl(m):
+            image_ids.add(m.group(1))
+            return "![ảnh %s](images/%s.png)" % (m.group(1), m.group(1))
+        return re.sub(r'<img[^>]*src="/api/v3/attachments/(\d+)/content"[^>]*>', repl, text or "")
+
+    lines = ["# %s — %s" % (wp.get("displayId"), wp.get("subject")), "",
+             "- Trạng thái: %s · Ưu tiên: %s · Tác giả: %s" % (
+                 wp["_links"]["status"].get("title"), wp["_links"].get("priority", {}).get("title"),
+                 (wp["_links"].get("author", {}).get("title") or "").strip()),
+             "", "## Mô tả", "", localize((wp.get("description") or {}).get("raw")), "", "## Lịch sử"]
+    for act in acts:
+        who = api.user_name(act.get("_links", {}).get("user", {}).get("href", ""))
+        details = [d.get("raw", "") for d in act.get("details", []) if d.get("raw")]
+        comment = (act.get("comment") or {}).get("raw")
+        if not comment and not details:
+            continue
+        lines += ["", "### %s — %s" % (act.get("createdAt", "")[:16].replace("T", " "), who)]
+        lines += ["- " + d for d in details]
+        if comment:
+            lines += ["", localize(comment)]
+    with open(os.path.join(out_dir, "ticket.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    for att in image_ids:
+        req = op_watch.urllib.request.Request(api.url + "/api/v3/attachments/%s/content" % att, headers=api.headers)
+        try:
+            with op_watch.urllib.request.urlopen(req, timeout=60) as resp, \
+                    open(os.path.join(out_dir, "images", att + ".png"), "wb") as f:
+                shutil.copyfileobj(resp, f)
+        except (op_watch.urllib.error.URLError, OSError) as ex:
+            log("không tải được ảnh %s: %s" % (att, ex))
+    return wp
+
+
+# Danh sách include Liquibase chỉ thêm dòng ở cuối: hai nhánh cùng thêm changelog thì giữ cả hai là đúng.
+UNION_MERGE_FILES = re.compile(r"(^|/)db/master[\w-]*\.xml$")  # master.xml, master-prod.xml… (danh sách include)
+CONFLICT_BLOCK = re.compile(r"<<<<<<< [^\n]*\n(.*?)(?:\|\|\|\|\|\|\| [^\n]*\n.*?)?=======\n(.*?)>>>>>>> [^\n]*\n",
+                            re.S)
+
+
+def build_env(acfg):
+    """Node mặc định của máy (v8) không chạy được vite/tsc: đưa bản Node ở `node_bin` lên đầu PATH."""
+    env = dict(os.environ)
+    node_bin = os.path.expanduser(acfg.get("node_bin", ""))
+    if node_bin and os.path.isdir(node_bin):
+        env["PATH"] = node_bin + os.pathsep + env.get("PATH", "")
+    # Gói Claude: lượt chạy đã chọn gói (use_profile) thì dùng gói đó, không thì gói đang chọn trên trang theo dõi.
+    if "_config_dir" in acfg:
+        config_dir, token_file = acfg["_config_dir"], acfg.get("_token_file")
+    else:
+        prof = find_profile(acfg, profile_prefs(os.path.expanduser(acfg["root"])).get("active")) or {}
+        config_dir, token_file = prof.get("config_dir", ""), prof.get("token_file")
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    # Thư mục mặc định thì không đặt biến: CLAUDE_CONFIG_DIR=~/.claude đọc ~/.claude/.claude.json chứ không phải
+    # ~/.claude.json như khi chạy bình thường.
+    if config_dir and os.path.realpath(config_dir) != os.path.realpath(os.path.expanduser("~/.claude")):
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    # Gói thêm bằng `claude setup-token`: token của gói được ưu tiên hơn tài khoản đăng nhập trong thư mục cấu hình.
+    token = read_token(token_file)
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    return env
+
+
+CONFLICT_MARKER = re.compile(r"^(<<<<<<< |>>>>>>> |=======$)", re.M)
+
+CONFLICT_PROMPT = """Bạn đang gỡ xung đột merge git, chạy nền không có người theo dõi.
+Worktree: {work} — đang giữa lệnh merge: {what}.
+File còn xung đột: {files}
+
+Việc cần làm:
+1. Với từng file: đọc toàn bộ đoạn <<<<<<< / ======= / >>>>>>>, xem lịch sử hai phía
+   (`git -C {work} log --oneline -5 HEAD -- <file>`, `git -C {work} log --oneline -5 MERGE_HEAD -- <file>`,
+   `git -C {work} diff`, `git -C {work} show <commit>`) để hiểu mỗi bên đổi gì và vì sao.
+2. Sửa file sao cho GIỮ ĐỦ thay đổi của CẢ HAI phía (gộp logic, không bỏ bên nào), code phải biên dịch được.
+   Xoá hết dấu xung đột. Không sửa file nào khác ngoài các file trên.
+3. Không git add / commit / merge / checkout / reset — script sẽ tự kiểm tra và commit.
+4. Nếu hai phía mâu thuẫn thật về ý đồ (không thể gộp mà không chọn bỏ một bên) → KHÔNG đoán: để nguyên file đó.
+
+Ghi {report} bằng tiếng Việt. Dòng đầu đúng một trong:
+`KẾT QUẢ: ĐÃ GỠ` | `KẾT QUẢ: KHÔNG GỠ ĐƯỢC`
+Sau đó: từng file → mỗi phía đổi gì → đã gộp thế nào (hoặc vì sao không gộp được).
+"""
+
+
+def resolve_conflicts(acfg, work, what):
+    """
+    Gọi ngay sau khi `git merge` trong `work` bị xung đột. Xung đột chỉ ở db/master*.xml → giữ include của cả hai bên;
+    còn lại → Claude headless gỡ (nếu acfg có và còn gói dùng được). Gỡ xong thì commit merge, trả ghi chú.
+    Không gỡ được → merge --abort và raise RuntimeError.
+    """
+    conflicted = run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=work).split()
+    if not conflicted:
+        subprocess.run(["git", "merge", "--abort"], cwd=work, check=False)
+        raise RuntimeError("%s lỗi (không có file xung đột)" % what)
+    union = [f for f in conflicted if UNION_MERGE_FILES.search(f)]
+    for f in union:
+        file_path = os.path.join(work, f)
+        with open(file_path, encoding="utf-8") as fh:
+            text = CONFLICT_BLOCK.sub(r"\1\2", fh.read())
+        with open(file_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    if union:
+        run(["git", "add"] + union, cwd=work)
+    rest = [f for f in conflicted if f not in union]
+    notes = ["tự gộp %s (giữ include của cả hai nhánh)" % ", ".join(union)] if union else []
+    if rest:
+        fail = None
+        if not acfg or not acfg.get("claude_resolve_conflicts", True):
+            fail = "chưa bật gỡ xung đột bằng Claude"
+        else:
+            root = os.path.expanduser(acfg["root"])
+            prof, why = choose_profile(root, acfg, acfg.get("_profile"))
+            if prof is None:
+                fail = "không có gói Claude dùng được (%s)" % why
+        report_dir = None
+        if not fail:
+            sub = dict(acfg)
+            use_profile(sub, prof)
+            report_dir = os.path.join(root, "conflict-%s" % time.strftime("%m%d-%H%M%S"))
+            os.makedirs(report_dir, exist_ok=True)
+            report = os.path.join(report_dir, "report.md")
+            prompt = CONFLICT_PROMPT.format(work=work, what=what, files=", ".join(rest), report=report)
+            wscope, rscope = "/" + os.path.abspath(work) + "/**", "/" + os.path.abspath(report_dir) + "/**"
+            allowed = ["Read", "Glob", "Grep", "Edit(%s)" % wscope, "Edit(%s)" % rscope, "Write(%s)" % rscope] + [
+                "Bash(git -C %s %s*)" % (work, c) for c in ("log", "show", "diff", "status", "blame")]
+            cmd = [acfg["claude"], "-p", prompt, "--permission-mode", "dontAsk",
+                   "--max-budget-usd", str(acfg["max_budget_usd"]), "--output-format", "stream-json", "--verbose",
+                   "--add-dir", report_dir, "--allowedTools"] + allowed + ["--disallowedTools"] + DISALLOWED_TOOLS
+            if acfg.get("model"):
+                cmd += ["--model", acfg["model"]]
+            log("%s: xung đột %s → Claude gỡ (gói %s, %s)" % (what, ", ".join(rest), prof["name"], report_dir))
+            notify("[GỠ XUNG ĐỘT]", "%s: %s → Claude đang gỡ" % (what, ", ".join(rest)))
+            with open(os.path.join(report_dir, "claude.jsonl"), "w", encoding="utf-8") as out, \
+                    open(os.path.join(report_dir, "claude.err"), "w", encoding="utf-8") as err:
+                subprocess.run(cmd, cwd=work, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
+                               env=build_env(sub), timeout=3600)
+            first = ""
+            if os.path.exists(report):
+                with open(report, encoding="utf-8") as fh:
+                    first = fh.readline().strip()
+            left = []
+            for f in rest:
+                try:
+                    with open(os.path.join(work, f), encoding="utf-8", errors="replace") as fh:
+                        if CONFLICT_MARKER.search(fh.read()):
+                            left.append(f)
+                except OSError:
+                    pass  # file bị xoá ở một phía: để git quyết định bên dưới
+            if "ĐÃ GỠ" not in first:
+                fail = "Claude không gỡ được (%s)" % (first or "không có report")
+            elif left:
+                fail = "Claude báo đã gỡ nhưng còn dấu xung đột ở %s" % ", ".join(left)
+            else:
+                res = subprocess.run(["git", "add", "-A", "--"] + rest, cwd=work)
+                if res.returncode != 0:
+                    fail = "git add sau khi gỡ lỗi"
+        if fail:
+            subprocess.run(["git", "merge", "--abort"], cwd=work, check=False)
+            raise RuntimeError("%s xung đột: %s — %s%s" % (what, ", ".join(rest), fail,
+                                                          " (xem %s)" % report_dir if report_dir else ""))
+        notes.append("Claude gỡ %s (%s/report.md)" % (", ".join(rest), report_dir))
+    if run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=work).split():
+        subprocess.run(["git", "merge", "--abort"], cwd=work, check=False)
+        raise RuntimeError("%s: vẫn còn file xung đột sau khi gỡ" % what)
+    run(["git", "commit", "--no-edit", "-q"], cwd=work)
+    note = "%s: %s" % (what, "; ".join(notes))
+    log(note)
+    return note
+
+
+def acquire_slot(root, acfg, wait=True):
+    """Giữ một trong max_parallel suất chạy (file lock). wait=False: hết suất thì trả None ngay."""
+    n = max(1, int(acfg.get("max_parallel") or 1))
+    while True:
+        for i in range(n):
+            fh = open(os.path.join(root, ".run-slot-%d.lock" % i), "w")
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fh
+            except OSError:
+                fh.close()
+        if not wait:
+            return None
+        time.sleep(5)
+
+
+class named_lock:
+    """Khoá ngắn quanh thao tác git dùng chung (fetch, worktree add, push) giữa các lượt chạy song song."""
+
+    def __init__(self, name):
+        root = envconf.autofix_root()
+        os.makedirs(root, exist_ok=True)
+        self.path = os.path.join(root, ".lock-%s" % re.sub(r"[^\w.-]", "_", name))
+
+    def __enter__(self):
+        self.fh = open(self.path, "w")
+        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        self.fh.close()
+
+
+def make_worktree(repo, base_branch, upstream, path, branch, acfg=None):
+    """
+    Worktree mới trên nhánh auto/... từ origin/<base_branch>, merge origin/<upstream> (pull trước khi sửa).
+    Trả về ghi chú khi không merge được (vẫn sửa được trên nhánh của mình), rỗng nếu merge xong.
+    """
+    with named_lock("git-" + os.path.basename(repo.rstrip("/"))):
+        run(["git", "fetch", "-q", "origin", base_branch, upstream], cwd=repo)
+        run(["git", "worktree", "add", "-q", "-b", branch, path, "origin/" + base_branch], cwd=repo)
+    res = subprocess.run(["git", "merge", "-q", "-m", "Merge branch '%s' into %s" % (upstream, base_branch),
+                          "origin/" + upstream], cwd=path,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    if res.returncode == 0:
+        return ""
+    try:
+        resolve_conflicts(acfg, path, "merge origin/%s vào %s" % (upstream, base_branch))
+        return ""
+    except RuntimeError as ex:
+        conflicted = [str(ex)]
+    note = "chưa merge được origin/%s vào %s (xung đột: %s) — đang sửa trên %s chưa có code mới nhất" % (
+        upstream, base_branch, conflicted[0][:400], base_branch)
+    log(note)
+    return note
+
+
+def fix_commits(repo_dir, base):
+    """Commit sửa của lượt chạy: nhánh chính sau origin/<base>, bỏ merge (không tính commit kéo từ nhánh chung)."""
+    out = run(["git", "rev-list", "--first-parent", "--no-merges", "origin/%s..HEAD" % base], cwd=repo_dir, check=False)
+    return out.split()
+
+
+def verify(acfg, label, repo_dir, commits, log_path):
+    """Tự kiểm tra lại, không dựa vào báo cáo của Claude. Trả lỗi (chuỗi) hoặc rỗng nếu qua."""
+    if label == "FE":
+        cmds = [["npm", "run", "build"]]
+    else:
+        pom = os.path.join(repo_dir, acfg["be_subdir"], "pom.xml")
+        # Chỉ file của commit sửa (không tính commit kéo từ nhánh chung / nhánh mình qua merge).
+        changed = set()
+        for commit in commits:
+            changed.update(run(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit],
+                               cwd=repo_dir, check=False).split())
+        tests = sorted({os.path.basename(f)[:-5] for f in changed if f.endswith("Test.java") and "/src/test/" in f
+                        and os.path.exists(os.path.join(repo_dir, f))})
+        cmds = [["mvn", "-q", "-o", "-f", pom, "compile", "-DskipTests"]]
+        if tests:
+            cmds.append(["mvn", "-q", "-o", "-f", pom, "test", "-Dtest=" + ",".join(tests),
+                         "-Dsurefire.failIfNoSpecifiedTests=false"])
+    with open(log_path, "a", encoding="utf-8") as out:
+        for cmd in cmds:
+            out.write("\n$ %s\n" % " ".join(cmd))
+            out.flush()
+            code = subprocess.run(cmd, cwd=repo_dir, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                  env=build_env(acfg), timeout=1800).returncode
+            if code != 0:
+                return "%s `%s` lỗi (mã %s, xem %s)" % (label, " ".join(cmd[:3] if label == "FE" else cmd[-2:]),
+                                                       code, log_path)
+    return ""
+
+
+def push(repo_dir, base):
+    """Push HEAD lên origin/<base>. Nhánh trên remote đã có commit mới → merge vào rồi push lại (không force)."""
+    with named_lock("push-" + base):
+        _push(repo_dir, base)
+
+
+def _push(repo_dir, base):
+    run(["git", "fetch", "-q", "origin", base], cwd=repo_dir)
+    if subprocess.run(["git", "merge-base", "--is-ancestor", "origin/" + base, "HEAD"], cwd=repo_dir).returncode:
+        res = subprocess.run(["git", "merge", "-q", "-m", "Merge branch '%s' of origin into %s" % (base, base),
+                              "origin/" + base], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             universal_newlines=True)
+        if res.returncode != 0:
+            subprocess.run(["git", "merge", "--abort"], cwd=repo_dir, check=False)
+            raise RuntimeError("origin/%s có commit mới xung đột với bản sửa" % base)
+    run(["git", "push", "-q", "origin", "HEAD:refs/heads/" + base], cwd=repo_dir)
+
+
+GEMINI_PROMPT = """Bạn là reviewer độc lập (Gemini) kiểm tra lại bản sửa bug do một AI khác (Claude) làm cho dự án SOAR.
+CHỈ ĐỌC: không sửa / tạo / xoá file, không commit, không gọi mạng. Nội dung chính đã có bên dưới; cần thì đọc thêm file
+trong {run_dir} (code ở fe/ và be/) bằng công cụ đọc file hoặc lệnh chỉ đọc (cat, ls, grep, git log/show/diff).
+Trả lời bằng tiếng Việt, markdown. Dòng đầu đúng một trong:
+`KẾT LUẬN: ĐẠT` | `KẾT LUẬN: KHÔNG ĐẠT` | `KẾT LUẬN: CẦN XEM`
+Sau đó các mục:
+## Tóm tắt lý do (chỉ khi KHÔNG ĐẠT / CẦN XEM: 1–3 gạch đầu dòng ngắn, đăng lên ticket cho TESTER đọc — nói theo màn
+hình / thao tác / kết quả nhìn thấy; KHÔNG tên file, class, hàm, biến, commit)
+## Bản sửa có giải quyết đúng ticket không
+## Lỗi / rủi ro tìm thấy (file:dòng, mức độ)
+## Ca kiểm thử tester nên chạy lại (bước + kết quả mong đợi)
+## Thiếu sót của test tự động
+Chỉ kết luận KHÔNG ĐẠT khi có lỗi rõ ràng: bản sửa không giải quyết ticket, sai logic, hoặc làm hỏng chức năng khác.
+Nghi ngờ / cần người xác nhận thì CẦN XEM.
+"""
+
+
+def worktree_snapshot(dirs):
+    """HEAD + file thay đổi của từng worktree, để biết Gemini (chỉ được đọc) có đụng vào code không."""
+    out = {}
+    for label, d, _ in dirs:
+        if os.path.isdir(d):
+            out[label] = (run(["git", "rev-parse", "HEAD"], cwd=d, check=False).strip(),
+                          run(["git", "status", "--porcelain"], cwd=d, check=False))
+    return out
+
+
+def gemini_review(acfg, run_dir, items):
+    """Gemini xem lại bản sửa (chỉ đọc). Trả (kết luận, nội dung); kết luận rỗng nếu Gemini không chạy được."""
+    parts = [GEMINI_PROMPT.format(run_dir=run_dir)]
+    for title, path in (("TICKET", "ticket/ticket.md"), ("BÁO CÁO CỦA CLAUDE", "report.md"),
+                        ("KẾT QUẢ BUILD / TEST TỰ ĐỘNG", "verify.log")):
+        full = os.path.join(run_dir, path)
+        if os.path.exists(full):
+            with open(full, encoding="utf-8", errors="replace") as f:
+                parts += ["", "# " + title, f.read()[-30000:]]
+    parts += ["", "# DIFF"]
+    for label, repo_dir, commits in items:
+        for commit in commits:
+            parts += ["## " + label, run(["git", "show", commit], cwd=repo_dir, check=False)[:60000]]
+    out_path = os.path.join(run_dir, "gemini.md")
+    # Chạy nền không hỏi được quyền: thiếu quyền là agy dừng, không ra kết luận. Cho đọc file trong thư mục lượt chạy
+    # và chạy lệnh (Gemini hay dùng git log / ls / head để xem code) nhưng trong sandbox; worktree được kiểm tra lại
+    # sau khi Gemini xong (worktree_snapshot), có thay đổi thì không push.
+    # Worktree fe/ be/ không có .git riêng (dữ liệu git ở <repo gốc>/.git/worktrees/…) và node_modules là symlink về
+    # repo gốc, nên phải cho đọc cả hai repo gốc, không chỉ thư mục lượt chạy.
+    readable = [run_dir] + [os.path.realpath(os.path.expanduser(acfg[k])) for k in ("fe_repo", "be_repo")]
+    perms = {"permissions": {"allow": ["read_file(%s/**)" % d for d in readable] + ["command(*)"]}}
+    cmd = [os.path.expanduser(acfg["gemini_cmd"]), "-p", "\n".join(parts), "--mode", "plan", "--sandbox",
+           "--settings", json.dumps(perms), "--print-timeout", "%ds" % (acfg["gemini_timeout"] - 30)]
+    if acfg.get("gemini_model"):
+        cmd += ["--model", acfg["gemini_model"]]
+    for attempt in range(2):
+        try:
+            res = subprocess.run(cmd, cwd=run_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 stdin=subprocess.DEVNULL, universal_newlines=True, timeout=acfg["gemini_timeout"])
+            text, err = res.stdout.strip(), res.stderr.strip()
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            text, err = "", str(ex)
+        # Bị từ chối quyền (đọc file ngoài các thư mục cho phép…) thì agy dừng hẳn: chạy lại một lần, nhắc giới hạn.
+        if attempt or "permission that headless mode cannot prompt for" not in (text + err):
+            break
+        log("Gemini bị từ chối quyền, chạy lại: %s" % (text + err)[-200:].replace("\n", " "))
+        cmd[2] = "\n".join(parts) + "\n\nLƯU Ý: chỉ được đọc file trong các thư mục: %s. Không đọc file ở nơi khác." % (
+            ", ".join(readable))
+    m = re.search(r"KẾT LUẬN:\s*(KHÔNG ĐẠT|ĐẠT|CẦN XEM)", text[:500])
+    if not m:
+        text = "Gemini không trả kết luận.\n\n```\n%s\n```\n\n%s" % (err[-1500:], text[:3000])
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return (m.group(1) if m else ""), text
+
+
+FOLLOWUP_PROMPT = """Bạn là Claude, đã (hoặc AI trước đã) sửa bug {display_id} — {subject}. Chạy nền, không có người theo dõi.
+Gemini (reviewer độc lập) vừa test lại bản sửa và kết luận **{gemini_verdict}**. Toàn bộ nhận xét: {run_dir}/gemini.md
+Ticket: {run_dir}/ticket/ticket.md. Bản sửa hiện tại: {commits} (xem bằng `git -C <worktree> show <hash>`).
+Worktree: FE {fe_dir}, BE {be_dir} (module {be_dir}/{be_subdir}); nhánh hiện tại của worktree đã chứa bản sửa.
+
+## Làm
+1. Xét TỪNG ý Gemini nêu (lỗi, rủi ro, test thiếu). Kiểm chứng trong code — Gemini có thể sai, đừng tin mù quáng.
+2. Ý đúng, trong phạm vi ticket, sửa được an toàn → sửa tối thiểu, thêm/sửa test, kiểm tra
+   (FE `npm run build`; BE `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml test -Dtest='<Test>' -Dsurefire.failIfNoSpecifiedTests=false`
+   và `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml compile -DskipTests`), rồi commit bằng `git -C <worktree> add …` +
+   `git -C <worktree> commit …`, message `[{display_id}] - {subject}` + dòng trống + mô tả ngắn tiếng Việt không dấu
+   (bắt đầu bằng "Bo sung sau review Gemini: ") + dòng trống + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+3. Ý sai / ngoài phạm vi / chỉ là gợi ý không cần thiết → KHÔNG sửa, nêu lý do.
+4. Ý cần người quyết định (đổi hành vi sản phẩm, trái thiết kế người khác cố ý làm, cần dữ liệu môi trường thật) →
+   KHÔNG sửa phần đó.
+KHÔNG dùng `cd … && …`; git luôn `git -C`, Maven `-f`. Không push, không fetch/pull/checkout, không gọi mạng.
+
+## Báo cáo (bắt buộc)
+Ghi {run_dir}/followup.md bằng tiếng Việt. Dòng đầu đúng một trong:
+`QUYẾT ĐỊNH: SỬA THÊM` (đã commit thêm) | `QUYẾT ĐỊNH: GIỮ NGUYÊN` (không cần sửa) | `QUYẾT ĐỊNH: CẦN QUYẾT ĐỊNH`
+Các mục: ## Đánh giá từng ý của Gemini (ý → đúng/sai → xử lý); ## Đã sửa thêm (file, commit); ## Kiểm tra;
+## Cần quyết định (chỉ khi có: các phương án + đề xuất);
+## Comment cho tester (chỉ khi SỬA THÊM: đăng nguyên văn lên ticket cho TESTER đọc — đã sửa thêm gì nhìn từ màn hình /
+thao tác / kết quả, test lại thế nào; KHÔNG tên file, class, hàm, biến, commit).
+"""
+
+
+def claude_cmd(acfg, prompt, run_dir, be_dir):
+    cmd = [acfg["claude"], "-p", prompt,
+           "--permission-mode", "dontAsk",
+           "--max-budget-usd", str(acfg["max_budget_usd"]),
+           # stream-json: ghi từng thao tác ngay khi xảy ra để --status / --follow xem được tiến trình.
+           "--output-format", "stream-json", "--verbose",
+           "--add-dir", be_dir, run_dir]
+    # Mỗi quy tắc là một tham số riêng (quy tắc có khoảng trắng, không nối chuỗi được). Edit/Write để trống thì ghi
+    # được mọi nơi trên máy — chỉ cho trong thư mục của lượt chạy (worktree + report).
+    cmd += ["--allowedTools"] + ALLOWED_TOOLS + write_rules(run_dir) + ["--disallowedTools"] + DISALLOWED_TOOLS
+    if acfg.get("model"):
+        cmd += ["--model", acfg["model"]]
+    return cmd
+
+
+def run_claude(acfg, prompt, run_dir, fe_dir, be_dir, append=False):
+    """Chạy Claude headless; thao tác ghi vào claude.jsonl (append cho lượt xem lại, --follow vẫn đọc được)."""
+    mode = "a" if append else "w"
+    with open(os.path.join(run_dir, "claude.jsonl"), mode, encoding="utf-8") as out, \
+            open(os.path.join(run_dir, "claude.err"), mode, encoding="utf-8") as err:
+        return subprocess.run(claude_cmd(acfg, prompt, run_dir, be_dir), cwd=fe_dir, stdout=out, stderr=err,
+                              stdin=subprocess.DEVNULL, env=build_env(acfg)).returncode
+
+
+def claude_followup(acfg, display_id, wp, run_dir, fe_dir, be_dir, gemini_verdict, items):
+    """Claude xem lại nhận xét của Gemini và tự quyết. Trả (quyết định, nội dung followup.md)."""
+    commits = "; ".join("%s %s" % (label, ", ".join(c[:8] for c in cs)) for label, _, cs in items)
+    prompt = FOLLOWUP_PROMPT.format(
+        display_id=display_id, subject=wp.get("subject", ""), gemini_verdict=gemini_verdict, run_dir=run_dir,
+        commits=commits, fe_dir=fe_dir, be_dir=be_dir, be_subdir=acfg["be_subdir"])
+    with open(os.path.join(run_dir, "followup-prompt.md"), "w", encoding="utf-8") as f:
+        f.write(prompt)
+    run_claude(acfg, prompt, run_dir, fe_dir, be_dir, append=True)
+    path = os.path.join(run_dir, "followup.md")
+    text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+    m = re.search(r"QUYẾT ĐỊNH:\s*(SỬA THÊM|GIỮ NGUYÊN|CẦN QUYẾT ĐỊNH)", text[:300])
+    return (m.group(1) if m else ""), text
+
+
+def deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, report_text, review_of=None,
+            gemini_from=None):
+    """
+    Sau khi có bản sửa: build/test → Gemini test → (chưa đạt) Claude xem lại từng ý, tự quyết → push + OpenProject.
+    review_of=None: lượt sửa mới — commit sửa là commit trong worktree, push xong chuyển Resolved.
+    review_of={"FE": [hash], "BE": [...]}: test lại bản đã push trước đây — chỉ push khi Claude sửa thêm, không đổi
+    trạng thái ticket (chỉ comment). Trả (đã push?, mô tả).
+    gemini_from: thư mục có gemini.md của lượt trước — dùng lại kết luận đó, không chạy Gemini nữa (hàng chờ xem lại).
+    """
+    dirs = (("FE", fe_dir, acfg["fe_branch"]), ("BE", be_dir, acfg["be_branch"]))
+    subject = wp.get("subject", "")
+
+    def current():
+        items = []
+        for label, d, b in dirs:
+            commits = list((review_of or {}).get(label, [])) + fix_commits(d, b)
+            if commits:
+                items.append((label, d, commits))
+        return items
+
+    log_path = os.path.join(run_dir, "verify.log")
+
+    def verify_all():
+        for label, d, commits in current():
+            err = verify(acfg, label, d, commits, log_path)
+            if err:
+                return err
+        return ""
+
+    err = verify_all()
+    if err:
+        return False, "chưa push: " + err
+    notes, gemini_verdict, followup_text = [], "", ""
+    if gemini_from:
+        src = os.path.join(gemini_from, "gemini.md")
+        if os.path.realpath(src) != os.path.realpath(os.path.join(run_dir, "gemini.md")):
+            shutil.copy(src, os.path.join(run_dir, "gemini.md"))
+        with open(src, encoding="utf-8") as f:
+            m = re.search(r"KẾT LUẬN:\s*(KHÔNG ĐẠT|ĐẠT|CẦN XEM)", f.read()[:500])
+        gemini_verdict = m.group(1) if m else ""
+        notes.append("Gemini %s (lượt trước)" % (gemini_verdict or "?"))
+    elif acfg.get("gemini_enabled"):
+        log("%s: Gemini test lại" % display_id)
+        notify("[GEMINI TEST] %s" % display_id, "Build/test đã qua — Gemini đang test lại bản sửa: " + subject)
+        before = worktree_snapshot(dirs)
+        gemini_verdict, _ = gemini_review(acfg, run_dir, current())
+        changed = [label for label, snap in worktree_snapshot(dirs).items() if before.get(label) != snap]
+        if changed:
+            msg = "Gemini đã thay đổi worktree %s (chỉ được đọc) — kiểm tra tay %s" % (", ".join(changed), run_dir)
+            inbox(cfg, "**GEMINI CẢNH BÁO** %s — %s" % (display_id, msg))
+            return False, "chưa push: " + msg
+        shown = gemini_verdict or "không chạy được"
+        notes.append("Gemini " + shown)
+        log("%s: Gemini %s" % (display_id, shown))
+        notify("[GEMINI TEST] %s: %s" % (display_id, shown), subject)
+        inbox(cfg, "**GEMINI TEST** %s — %s · %s" % (display_id, shown, os.path.join(run_dir, "gemini.md")))
+
+    root = os.path.expanduser(acfg["root"])
+    skip, queued = "", False
+    if gemini_verdict in acfg.get("followup_on", []):
+        # Bước Claude xem lại dùng gói của lượt chạy; gói đó hết hạn mức thì đổi gói (nếu bật tự chuyển).
+        limits = followup_limits(acfg)
+        prof, why = choose_profile(root, limits, acfg.get("_profile"))
+        if prof is None:
+            skip = why
+        else:
+            if prof["name"] != acfg.get("_profile"):
+                notes.append("Claude xem lại bằng " + prof["name"])
+                set_status(root, display_id, profile=prof["name"])
+            use_profile(acfg, prof)
+    if skip:
+        notes.append("bỏ Claude xem lại: " + skip)
+        # Xếp hàng: op-watch gọi --followup-pending định kỳ, có gói còn hạn mức thì Claude xem lại lúc đó.
+        blocked = gemini_verdict == "KHÔNG ĐẠT" and acfg.get("gemini_block_on_fail")
+        queue_followup(root, display_id, wp_id, run_dir, gemini_verdict, skip,
+                       pushed=review_of is not None or not blocked)
+        queued = True
+        todo = acfg.get("followup_status_id")
+        notes.append("đã xếp hàng xem lại khi có hạn mức" + (" (ticket → TO DO)" if todo else ""))
+        if blocked and todo:
+            # Không push nên không có comment "Đã sửa": ghi ngắn lý do lên ticket rồi chuyển TO DO.
+            try:
+                op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw":
+                         "\n".join(waiting_comment(run_dir, pushed=False))}})
+                set_wp_status(api, wp_id, todo)
+            except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+                notes.append("chuyển TO DO lỗi: %s" % ex)
+        if gemini_verdict == "KHÔNG ĐẠT" and acfg.get("gemini_block_on_fail"):
+            return False, " · ".join(notes) + " → chưa push"
+    elif gemini_verdict and gemini_verdict in acfg.get("followup_on", []):
+        log("%s: Claude xem lại nhận xét Gemini" % display_id)
+        notify("[CLAUDE REVIEW] %s" % display_id, "Gemini %s — Claude đang xem lại từng ý để quyết định sửa" %
+               gemini_verdict)
+        decision, followup_text = claude_followup(acfg, display_id, wp, run_dir, fe_dir, be_dir, gemini_verdict,
+                                                  current())
+        if decision:
+            clear_followup(root, display_id)
+        shown = decision or "không có quyết định"
+        notes.append("Claude xem lại: " + shown)
+        log("%s: Claude xem lại: %s" % (display_id, shown))
+        notify("[CLAUDE REVIEW] %s: %s" % (display_id, shown), subject)
+        inbox(cfg, "**CLAUDE REVIEW** %s — %s · %s" % (display_id, shown, os.path.join(run_dir, "followup.md")))
+        if decision == "CẦN QUYẾT ĐỊNH":
+            if acfg.get("review_status_id"):
+                mark_for_review(api, wp_id, acfg["review_status_id"], followup_text, os.path.basename(run_dir))
+                return False, " · ".join(notes) + " → đã chuyển UNREVIEWED, chưa push phần mới"
+            return False, " · ".join(notes) + " → chờ quyết định, chưa push"
+        if decision == "SỬA THÊM":
+            err = verify_all()
+            if err:
+                return False, " · ".join(notes) + " → chưa push: " + err
+        elif not decision and gemini_verdict == "KHÔNG ĐẠT" and acfg.get("gemini_block_on_fail"):
+            return False, " · ".join(notes) + " → chưa push"
+    elif gemini_verdict == "KHÔNG ĐẠT" and acfg.get("gemini_block_on_fail"):
+        return False, " · ".join(notes) + " → chưa push"
+
+    to_push = [(label, d, b) for label, d, b in dirs if fix_commits(d, b)]
+    if not to_push:
+        if queued and acfg.get("followup_status_id"):
+            try:
+                op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw":
+                         "\n".join(waiting_comment(run_dir, pushed=True))}})
+                set_wp_status(api, wp_id, acfg["followup_status_id"])
+                notes.append("ticket → TO DO")
+            except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+                notes.append("chuyển TO DO lỗi: %s" % ex)
+        return False, " · ".join(notes + ["không có gì mới để push"])
+    # Hash lấy trước khi push (sau push origin/<base> đã chứa chúng).
+    hashes = {label: [h[:8] for h in fix_commits(d, b)] for label, d, b in to_push}
+    pushed = []
+    for label, d, b in to_push:
+        try:
+            push(d, b)
+        except (RuntimeError, OSError) as ex:
+            done = (" (đã push %s)" % ", ".join(pushed)) if pushed else ""
+            return False, " · ".join(notes + ["push %s lỗi: %s%s" % (label, str(ex).splitlines()[0][:200], done)])
+        pushed.append(label)
+
+    commit_line = ", ".join("%s commit %s (%s)" % (label, ", ".join("`%s`" % h for h in hashes[label]), b)
+                            for label, _, b in to_push)
+    # Comment viết cho tester (không phải dev): chỉ nội dung "Comment cho tester" của Claude, không commit / nguyên
+    # nhân trong code / hạn mức. Chi tiết kỹ thuật nằm trong report.md + báo cáo tổng hợp.
+    log("%s: push %s" % (display_id, commit_line))
+    if review_of is None:
+        lines = ["**[Autofix] Đã sửa** — đã qua kiểm tra tự động (build, test, AI kiểm tra lại)."]
+        sections = ((report_text, ("Comment cho tester", "Đề xuất"), ""),
+                    (followup_text, ("Comment cho tester",), "Bổ sung sau khi kiểm tra lại"))
+    else:
+        lines = ["**[Autofix] Bổ sung sau khi kiểm tra lại** — đã sửa thêm, qua kiểm tra tự động."]
+        sections = ((followup_text, ("Comment cho tester",), ""),)
+    for text, headings, title in sections:
+        body = next((report_section(text, h) for h in headings if report_section(text, h)), "")
+        if body and not re.fullmatch(r"[-*\s]*(Không có|Không)\.?[^\n]*", body, re.I):
+            lines += [""] + (["**%s:**" % title] if title else []) + [for_tester(body)[:3000]]
+    if queued:
+        lines += [""] + waiting_comment(run_dir, pushed=True)
+    op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join(lines)}})
+    if queued and acfg.get("followup_status_id"):
+        # Đã push nhưng Claude chưa xem lại nhận xét Gemini: để TO DO, xem lại xong mới chuyển Resolved.
+        set_wp_status(api, wp_id, acfg["followup_status_id"])
+        return True, " · ".join(notes + ["đã push %s, chuyển TO DO chờ xem lại" % ", ".join(pushed)])
+    if review_of is None:
+        set_wp_status(api, wp_id, acfg["resolved_status_id"])
+        return True, " · ".join(notes + ["đã push %s, chuyển Resolved" % ", ".join(pushed)])
+    return True, " · ".join(notes + ["đã push phần sửa thêm %s, comment lên ticket" % ", ".join(pushed)])
+
+
+def write_summary_report(acfg, display_id, run_name, wp, verdict, commits, run_dir, report_text):
+    """Báo cáo tổng hợp ở report_dir (mặc định ~/Downloads/autofix-reports/<run>.md)."""
+    out_dir = os.path.expanduser(acfg.get("report_dir") or "")
+    if not out_dir:
+        return ""
+    os.makedirs(out_dir, exist_ok=True)
+    sections = ["# %s — %s" % (display_id, wp.get("subject", "")), "",
+                "- Ticket: %s/work_packages/%s" % (op_watch.DEFAULTS["url"], wp.get("id")),
+                "- Lượt chạy: %s (%s)" % (run_name, datetime.now().strftime("%d/%m/%Y %H:%M")),
+                "- Kết quả: **%s**" % verdict,
+                "- Commit: %s" % (", ".join(commits) or "không có"),
+                "- Thư mục: %s" % run_dir, ""]
+    gemini_path = os.path.join(run_dir, "gemini.md")
+    if os.path.exists(gemini_path):
+        with open(gemini_path, encoding="utf-8") as f:
+            sections += ["## Gemini kiểm tra lại", "", f.read().strip(), ""]
+    followup_path = os.path.join(run_dir, "followup.md")
+    if os.path.exists(followup_path):
+        with open(followup_path, encoding="utf-8") as f:
+            sections += ["## Claude xem lại nhận xét của Gemini", "", f.read().strip(), ""]
+    sections += ["## Báo cáo sửa của Claude", "", report_text.strip() or "(không có)", ""]
+    verify_path = os.path.join(run_dir, "verify.log")
+    if os.path.exists(verify_path):
+        with open(verify_path, encoding="utf-8", errors="replace") as f:
+            sections += ["## Build / test tự động (cuối log)", "", "```", f.read()[-4000:].strip(), "```", ""]
+    path = os.path.join(out_dir, run_name + ".md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(sections))
+    return path
+
+
+def clean(acfg, run_name):
+    root = os.path.expanduser(acfg["root"])
+    run_dir = os.path.join(root, run_name)
+    for repo, sub in ((acfg["fe_repo"], "fe"), (acfg["be_repo"], "be")):
+        path = os.path.join(run_dir, sub)
+        if os.path.isdir(path):
+            subprocess.run(["git", "worktree", "remove", "--force", path], cwd=repo, check=False)
+        subprocess.run(["git", "branch", "-D", "auto/" + run_name], cwd=repo, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    shutil.rmtree(run_dir, ignore_errors=True)
+    log("đã xoá %s" % run_name)
+
+
+# =================================================================== tiến trình
+
+def status_dir(root):
+    path = os.path.join(root, ".status")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def set_status(root, display_id, **fields):
+    """~/autofix/.status/<SOAR-xxxx>.json: queued → preparing → running → done | error."""
+    path = os.path.join(status_dir(root), display_id + ".json")
+    data = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    data.update(fields, display_id=display_id, updated_at=datetime.now().isoformat(timespec="seconds"))
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(path + ".tmp", path)
+
+
+def load_statuses(root):
+    out = []
+    for name in sorted(os.listdir(status_dir(root))):
+        if name.endswith(".json"):
+            with open(os.path.join(status_dir(root), name), encoding="utf-8") as f:
+                out.append(json.load(f))
+    return out
+
+
+def describe(event):
+    """Một dòng ngắn cho mỗi thao tác Claude trong luồng stream-json; None nếu không đáng in."""
+    if event.get("type") == "assistant":
+        lines = []
+        for item in (event.get("message") or {}).get("content") or []:
+            if item.get("type") == "tool_use":
+                inp = item.get("input") or {}
+                target = inp.get("command") or inp.get("file_path") or inp.get("pattern") or ""
+                lines.append("%s %s" % (item.get("name"), str(target).replace("\n", " ")[:140]))
+            elif item.get("type") == "text" and item.get("text", "").strip():
+                lines.append("💬 " + item["text"].strip().replace("\n", " ")[:160])
+        return lines
+    if event.get("type") == "rate_limit_event":
+        return []
+    if event.get("type") == "result":
+        return ["■ kết thúc: %s · %s lượt · ~%.2f USD" % (
+            "lỗi" if event.get("is_error") else "xong", event.get("num_turns"), event.get("total_cost_usd") or 0)]
+    return []
+
+
+def read_events(path):
+    events = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    pass
+    return events
+
+
+# =================================================================== gói Claude (nhiều tài khoản)
+
+_LAST_LIMIT_CACHE = {}
+
+
+def find_profile(acfg, name):
+    """Gói theo tên (không có / không còn trong cấu hình → gói đầu tiên)."""
+    profs = profiles(acfg)
+    return next((p for p in profs if p["name"] == name), profs[0] if profs else None)
+
+
+def profiles(acfg):
+    """
+    Các gói trong cấu hình. Hai kiểu gói:
+      {"name", "config_dir"}  — thư mục đã /login (logged_in = có .credentials.json);
+      {"name", "token_file"}  — token của `claude setup-token` lưu trong file (logged_in = file có token).
+    Gói token chạy với thư mục cấu hình mặc định (~/.claude) để giữ settings, chỉ đổi tài khoản tính hạn mức.
+    """
+    out = []
+    for p in acfg.get("profiles") or AUTOFIX_DEFAULTS["profiles"]:
+        if p.get("token_file"):
+            tf = os.path.expanduser(p["token_file"])
+            out.append(dict(p, token_file=tf, config_dir=os.path.expanduser(p.get("config_dir") or "~/.claude"),
+                            kind="token", logged_in=bool(read_token(tf))))
+        else:
+            d = os.path.expanduser(p["config_dir"])
+            out.append(dict(p, config_dir=d, kind="dir",
+                            logged_in=os.path.exists(os.path.join(d, ".credentials.json"))))
+    return out
+
+
+def read_token(path):
+    if not path:
+        return ""
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def profile_prefs(root):
+    """<root>/.profile.json: {"active": tên gói, "auto_switch": bool} — trang theo dõi ghi, tool đọc."""
+    path = os.path.join(root, ".profile.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_profile_prefs(root, **fields):
+    data = profile_prefs(root)
+    data.update(fields)
+    path = os.path.join(root, ".profile.json")
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(path + ".tmp", path)
+
+
+def use_profile(acfg, prof):
+    """Các lệnh Claude sau đó trong lượt chạy (build_env) dùng gói này."""
+    acfg["_profile"], acfg["_config_dir"], acfg["_token_file"] = prof["name"], prof["config_dir"], prof.get("token_file")
+
+
+def last_limit_event(path):
+    """rate_limit_event cuối cùng trong một file stream-json (cache theo mtime: trang theo dõi gọi liên tục)."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    cached = _LAST_LIMIT_CACHE.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    info = None
+    for e in read_events(path):
+        if e.get("type") == "rate_limit_event":
+            info = e.get("rate_limit_info") or {}
+    _LAST_LIMIT_CACHE[path] = (mtime, info)
+    return info
+
+
+def profile_usage(root, acfg, name):
+    """Hạn mức mới nhất của một gói: từ các lượt chạy bằng gói đó + lượt kiểm tra (--probe). Trả (info, mtime)."""
+    default = (profiles(acfg) or [{}])[0].get("name")
+    paths = [os.path.join(root, ".usage", name + ".jsonl")]
+    for st in load_statuses(root):
+        # Lượt chạy trước khi có nhiều gói (không ghi profile) là của gói đầu tiên.
+        if st.get("run_dir") and (st.get("profile") or default) == name:
+            paths.append(os.path.join(st["run_dir"], "claude.jsonl"))
+    best = (None, 0)
+    for path in paths:
+        info = last_limit_event(path)
+        if info:
+            mtime = os.path.getmtime(path)
+            if mtime > best[1]:
+                best = (info, mtime)
+    return best
+
+
+def window_used(info, key):
+    """Mức đã dùng (0..1) của cửa sổ five_hour / seven_day; đã qua giờ làm mới thì coi như 0."""
+    w = ((info or {}).get("unifiedWindows") or {}).get(key) or {}
+    if w.get("resetsAt") and time.time() > w["resetsAt"]:
+        return 0.0
+    return w.get("utilization") or 0.0
+
+
+def profile_block(root, acfg, prof):
+    """Lý do không dùng được gói (chuỗi rỗng = dùng được)."""
+    if not prof["logged_in"]:
+        return "%s chưa %s" % (prof["name"], "có token" if prof.get("kind") == "token" else "đăng nhập")
+    info, _ = profile_usage(root, acfg, prof["name"])
+    if not info:
+        return ""
+    if info.get("status") == "rejected" and (info.get("resetsAt") or 0) > time.time():
+        return "%s đã hết hạn mức (làm mới %s)" % (
+            prof["name"], datetime.fromtimestamp(info["resetsAt"]).strftime("%d/%m %H:%M"))
+    # --ignore-limits (chạy tay từ trang theo dõi): bỏ qua ngưỡng tự đặt; gói đã bị chặn thật (rejected) thì vẫn không dùng.
+    if acfg.get("_ignore_limits"):
+        return ""
+    lim = profile_limits(acfg, prof)
+    seven = lim["followup_7d"] if acfg.get("_followup") else lim["seven_day"]
+    for key, label, limit in (("five_hour", "5 giờ", lim["five_hour"]), ("seven_day", "7 ngày", seven)):
+        used = window_used(info, key)
+        if limit and used >= limit:
+            return "%s: hạn mức %s đã dùng %d%% (ngưỡng %d%%)" % (prof["name"], label, used * 100, limit * 100)
+    return ""
+
+
+def profile_limits(acfg, prof):
+    """
+    Ngưỡng của một gói (0..1): `limits` riêng của gói trong config ({"five_hour", "seven_day", "followup_7d"}),
+    thiếu khoá nào thì lấy ngưỡng chung (pause_above_utilization / switch_above_7d / followup_skip_above_7d).
+    """
+    own = prof.get("limits") or {}
+    seven = own.get("seven_day", acfg.get("switch_above_7d"))
+    return {"five_hour": own.get("five_hour", acfg.get("pause_above_utilization")), "seven_day": seven,
+            "followup_7d": own.get("followup_7d", acfg.get("followup_skip_above_7d") or seven)}
+
+
+def choose_profile(root, acfg, prefer=None, exclude=()):
+    """
+    Gói cho lượt chạy: gói `prefer` (hoặc gói đang chọn) nếu còn hạn mức; tự chuyển bật thì thử lần lượt các gói khác.
+    Trả (gói, ghi chú) — gói None khi không gói nào dùng được, ghi chú là lý do.
+    """
+    prefs = profile_prefs(root)
+    auto = prefs.get("auto_switch", acfg.get("auto_switch", True))
+    first = find_profile(acfg, prefer or prefs.get("active"))
+    order = [first] + ([p for p in profiles(acfg) if p["name"] != first["name"]] if auto else [])
+    reasons = []
+    for prof in order:
+        if prof["name"] in exclude:
+            continue
+        why = profile_block(root, acfg, prof)
+        if not why:
+            note = "đổi sang %s (%s)" % (prof["name"], "; ".join(reasons)) if reasons else ""
+            return prof, note
+        reasons.append(why)
+    if not auto and len(profiles(acfg)) > 1:
+        reasons.append("tự chuyển gói đang tắt")
+    return None, "; ".join(reasons) or "không có gói nào"
+
+
+def hit_limit(path):
+    """Phiên Claude bị dừng vì hết hạn mức gói (rate_limit_event rejected / kết quả lỗi nói về limit)?"""
+    for e in read_events(path):
+        if e.get("type") == "rate_limit_event" and (e.get("rate_limit_info") or {}).get("status") == "rejected":
+            return True
+        if e.get("type") == "result" and e.get("is_error") and re.search(
+                r"usage limit|rate limit|limit reached|hit your limit", str(e.get("result") or ""), re.I):
+            return True
+    return False
+
+
+def probe_profile(acfg, prof):
+    """Gọi Claude một câu rất ngắn bằng gói này để lấy hạn mức hiện tại (ghi <root>/.usage/<gói>.jsonl)."""
+    root = os.path.expanduser(acfg["root"])
+    os.makedirs(os.path.join(root, ".usage"), exist_ok=True)
+    sub = dict(acfg)
+    use_profile(sub, prof)
+    with open(os.path.join(root, ".usage", prof["name"] + ".jsonl"), "w", encoding="utf-8") as out:
+        return subprocess.run([acfg["claude"], "-p", "Trả lời đúng một chữ: ok", "--output-format", "stream-json",
+                               "--verbose", "--tools", ""],
+                              cwd=root, stdout=out, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                              env=build_env(sub), timeout=180).returncode
+
+
+def usage_line(info):
+    if not info:
+        return "chưa có dữ liệu (cần một lượt chạy hoặc --probe)"
+    windows = info.get("unifiedWindows") or {}
+    parts = []
+    for key, label in (("five_hour", "5 giờ"), ("seven_day", "7 ngày")):
+        w = windows.get(key)
+        if w:
+            reset = datetime.fromtimestamp(w["resetsAt"]).strftime("%d/%m %H:%M") if w.get("resetsAt") else "?"
+            parts.append("%s %d%% (làm mới %s)" % (label, round(window_used(info, key) * 100), reset))
+    overage = "không tính phí vượt hạn mức" if info.get("overageStatus") == "rejected" else \
+        "vượt hạn mức: %s" % info.get("overageStatus")
+    return "%s · %s" % (", ".join(parts) or "?", overage)
+
+
+def show_status(root, acfg, last=8):
+    active_name = find_profile(acfg, profile_prefs(root).get("active"))["name"]
+    for prof in profiles(acfg):
+        print("%s %s%s: %s" % ("▶" if prof["name"] == active_name else " ", prof["name"],
+                               "" if prof["logged_in"] else " (chưa đăng nhập)",
+                               usage_line(profile_usage(root, acfg, prof["name"])[0])))
+    statuses = load_statuses(root)
+    if not statuses:
+        print("Chưa có lượt autofix nào.")
+        return
+    active = [s for s in statuses if s.get("state") in ("queued", "preparing", "running", "shipping")]
+    done = sorted([s for s in statuses if s not in active], key=lambda s: s.get("updated_at", ""), reverse=True)
+    for s in active + done[:5]:
+        since = s.get("started_at") or s.get("queued_at") or ""
+        elapsed = ""
+        if s.get("state") in ("preparing", "running", "shipping") and since:
+            elapsed = " · %d phút" % ((datetime.now() - datetime.fromisoformat(since)).total_seconds() // 60)
+        print("%-10s %-9s %s%s%s%s" % (s["display_id"], s.get("state"), since[5:16].replace("T", " "), elapsed,
+                                      (" · " + s["profile"]) if s.get("profile") else "",
+                                      (" · " + s["verdict"]) if s.get("verdict") else ""))
+        if s.get("run_dir"):
+            print("           %s" % s["run_dir"])
+        if s.get("state") != "running":
+            continue
+        events = read_events(os.path.join(s["run_dir"], "claude.jsonl"))
+        actions = [line for e in events for line in describe(e)]
+        tools = sum(1 for line in actions if not line.startswith(("💬", "■")))
+        print("           %d thao tác — gần nhất:" % tools)
+        for line in actions[-last:]:
+            print("             · " + line)
+        for sub in ("fe", "be"):
+            path = os.path.join(s["run_dir"], sub)
+            if os.path.isdir(path):
+                res = subprocess.run(["git", "diff", "--shortstat", "HEAD"], cwd=path, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, universal_newlines=True)
+                stat = res.stdout.strip() if res.returncode == 0 else ""
+                print("           %s: %s" % (sub.upper(), stat or "chưa sửa file"))
+
+
+def follow(root, target):
+    statuses = [s for s in load_statuses(root) if s.get("state") == "running"]
+    if target:
+        statuses = [s for s in load_statuses(root) if s["display_id"] == target or s.get("run_name") == target]
+    if not statuses or not statuses[-1].get("run_dir"):
+        print("Không có lượt nào đang chạy%s." % (" cho " + target if target else ""))
+        return
+    s = statuses[-1]
+    path = os.path.join(s["run_dir"], "claude.jsonl")
+    print("Theo dõi %s — %s (Ctrl+C để thoát, phiên vẫn chạy tiếp)" % (s["display_id"], path))
+    pos = 0
+    while True:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                f.seek(pos)
+                for line in f:
+                    if not line.endswith("\n"):
+                        break
+                    pos += len(line.encode("utf-8"))
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    for text in describe(event):
+                        print("[%s] %s" % (datetime.now().strftime("%H:%M:%S"), text), flush=True)
+                    if event.get("type") == "result":
+                        return
+        time.sleep(1)
+
+
+def ticket_commits(repo_dir, display_id):
+    """Commit đã sửa ticket trên nhánh hiện tại (mới nhất trước), nhận theo tiền tố `[SOAR-xxxx]` của message."""
+    out = run(["git", "log", "--no-merges", "--format=%H %s", "HEAD"], cwd=repo_dir, check=False)
+    tag = "[%s]" % display_id
+    return [line.split(" ", 1)[0] for line in out.splitlines() if " " in line and tag in line.split(" ", 1)[1][:40]]
+
+
+def review_ticket(api, cfg, acfg, ref, profile=None, gemini_from=None):
+    """
+    Test lại bằng Gemini một ticket đã sửa + push trước đây (--review). Tạo worktree mới từ nhánh của mình, lấy các
+    commit `[SOAR-xxxx]`, build/test, Gemini test, Claude xem lại ý chưa đạt; chỉ push nếu Claude sửa thêm.
+    """
+    root = os.path.expanduser(acfg["root"])
+    wp = api.get("/api/v3/work_packages/%s" % ref)
+    wp_id, display_id = wp["id"], wp.get("displayId") or "WP-%s" % wp["id"]
+    # QA trên server đang chạy (deploy_qa) thì ưu tiên nó: chờ xong mới test lại ticket cũ.
+    qa_flag = os.path.join(root, ".qa-active")
+    if os.path.exists(qa_flag):
+        log("%s: chờ QA trên server xong (ưu tiên QA)" % display_id)
+        while os.path.exists(qa_flag) and time.time() - os.path.getmtime(qa_flag) < 6 * 3600:
+            time.sleep(30)
+    global_lock = acquire_slot(root, acfg, wait=False)
+    if global_lock is None:
+        log("%s: chờ có suất chạy (đang chạy đủ %s lượt)" % (display_id, acfg.get("max_parallel")))
+        global_lock = acquire_slot(root, acfg)
+    # Gói cho bước Claude xem lại; không gói nào dùng được thì deliver tự bỏ bước đó.
+    prof, _ = choose_profile(root, acfg, profile)
+    if prof:
+        use_profile(acfg, prof)
+    run_name = "%s-%s-%s" % (display_id, "followup" if gemini_from else "review", datetime.now().strftime("%m%d-%H%M"))
+    run_dir = os.path.join(root, run_name)
+    fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
+    set_status(root, display_id, state="shipping", event="FOLLOWUP" if gemini_from else "REVIEW", run_dir=run_dir, run_name=run_name, verdict=None,
+               wp_id=wp_id, profile=acfg.get("_profile"),
+               started_at=datetime.now().isoformat(timespec="seconds"), pid=os.getpid())
+    try:
+        log("%s: test lại (%s)" % (display_id, run_dir))
+        notify("[GEMINI TEST] %s" % display_id, "Bắt đầu test lại bản đã sửa: " + wp.get("subject", ""))
+        wp = fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))
+        make_worktree(acfg["fe_repo"], acfg["fe_branch"], acfg["fe_upstream"], fe_dir, "auto/" + run_name, acfg)
+        nm = os.path.join(acfg["fe_repo"], "node_modules")
+        if os.path.isdir(nm):
+            os.symlink(nm, os.path.join(fe_dir, "node_modules"))
+        make_worktree(acfg["be_repo"], acfg["be_branch"], acfg["be_upstream"], be_dir, "auto/" + run_name, acfg)
+        review_of = {label: ticket_commits(d, display_id) for label, d in (("FE", fe_dir), ("BE", be_dir))}
+        review_of = {k: v for k, v in review_of.items() if v}
+        # Báo cáo sửa cũ (nếu thư mục lượt sửa còn) giúp Gemini hiểu ý định.
+        old = sorted(p for p in glob.glob(os.path.join(root, display_id + "-1*", "report.md")))
+        report_text = open(old[-1], encoding="utf-8").read() if old else ""
+        if report_text:
+            shutil.copy(old[-1], os.path.join(run_dir, "report.md"))
+        if not review_of:
+            verdict = "không tìm thấy commit [%s] trên nhánh" % display_id
+        else:
+            _, verdict = deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, report_text,
+                                 review_of=review_of, gemini_from=gemini_from)
+            if gemini_from:
+                verdict += followup_done_status(api, acfg, root, wp_id, display_id, verdict)
+        commits = ["%s %s" % (k, ", ".join(c[:8] for c in v)) for k, v in review_of.items()]
+        saved = write_summary_report(acfg, display_id, run_name, wp, "TEST LẠI: " + verdict, commits, run_dir,
+                                     report_text)
+        set_status(root, display_id, state="done", verdict="test lại: " + verdict, commits=commits)
+        inbox(cfg, "**TEST LẠI** %s — %s · báo cáo: %s" % (display_id, verdict, saved))
+        notify("[TEST LẠI] %s: %s" % (display_id, verdict[:120]), wp.get("subject", ""))
+    except Exception as ex:  # noqa: BLE001
+        log("%s: test lại lỗi %s" % (display_id, ex))
+        set_status(root, display_id, state="error", verdict="test lại lỗi: " + str(ex).splitlines()[0][:200])
+        inbox(cfg, "**TEST LẠI LỖI** %s — %s (thư mục %s)" % (display_id, str(ex).splitlines()[0], run_dir))
+        notify("[TEST LẠI LỖI] %s" % display_id, str(ex)[:200])
+    finally:
+        fcntl.flock(global_lock, fcntl.LOCK_UN)
+
+
+# =================================================================== hàng chờ Claude xem lại
+
+def pending_dir(root):
+    path = os.path.join(root, ".pending-followup")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def queue_followup(root, display_id, wp_id, run_dir, gemini_verdict, reason, pushed=True, attempts=None):
+    """Ghi ticket cần Claude xem lại nhận xét Gemini (bị bỏ vì hết hạn mức) vào <root>/.pending-followup/."""
+    path = os.path.join(pending_dir(root), display_id + ".json")
+    old = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            old = json.load(f)
+    data = {"display_id": display_id, "wp_id": str(wp_id), "run_dir": run_dir, "gemini_verdict": gemini_verdict,
+            "reason": reason, "pushed": pushed,
+            "attempts": old.get("attempts", 0) if attempts is None else attempts,
+            "queued_at": old.get("queued_at") or datetime.now().isoformat(timespec="seconds"),
+            "updated_at": datetime.now().isoformat(timespec="seconds")}
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(path + ".tmp", path)
+
+
+def clear_followup(root, display_id):
+    path = os.path.join(pending_dir(root), display_id + ".json")
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def load_pending(root):
+    out = []
+    for name in sorted(os.listdir(pending_dir(root))):
+        if name.endswith(".json"):
+            with open(os.path.join(pending_dir(root), name), encoding="utf-8") as f:
+                out.append(json.load(f))
+    return sorted(out, key=lambda p: p.get("queued_at", ""))
+
+
+def followup_limits(acfg):
+    """Cấu hình để chọn gói cho bước Claude xem lại: dùng ngưỡng 7 ngày "xem lại" của từng gói."""
+    return dict(acfg, _followup=True)
+
+
+def backfill_pending(root, acfg, tickets=()):
+    """Đưa các lượt đã bỏ bước Claude xem lại (trước khi có hàng chờ) vào hàng chờ. Trả danh sách ticket đã thêm."""
+    added = []
+    for st in load_statuses(root):
+        if tickets and st["display_id"] not in tickets:
+            continue
+        run_dir = st.get("run_dir") or ""
+        if "bỏ Claude xem lại" not in (st.get("verdict") or "") or not os.path.exists(os.path.join(run_dir, "gemini.md")):
+            continue
+        with open(os.path.join(run_dir, "gemini.md"), encoding="utf-8") as f:
+            m = re.search(r"KẾT LUẬN:\s*(KHÔNG ĐẠT|ĐẠT|CẦN XEM)", f.read()[:500])
+        verdict = m.group(1) if m else ""
+        if verdict not in acfg.get("followup_on", []):
+            continue
+        wp_id = st.get("wp_id")
+        if not wp_id:
+            # Lượt cũ không ghi wp_id: lấy từ link ticket trong ticket.md / báo cáo tổng hợp.
+            for path in glob.glob(os.path.join(os.path.expanduser(acfg.get("report_dir") or ""),
+                                               st.get("run_name", "") + ".md")):
+                m = re.search(r"/work_packages/(\d+)", open(path, encoding="utf-8").read())
+                wp_id = m.group(1) if m else None
+        if not wp_id:
+            continue
+        queue_followup(root, st["display_id"], wp_id, run_dir, verdict, st.get("verdict"),
+                       pushed="đã push" in st.get("verdict", ""))
+        added.append(st["display_id"])
+    return added
+
+
+def process_pending(api, cfg, acfg, force=None):
+    """
+    Chạy Claude xem lại cho các ticket trong hàng chờ khi có gói còn hạn mức (op-watch gọi định kỳ qua on_tick).
+    - Bản sửa đã push: worktree mới từ nhánh của mình (review_ticket), dùng lại gemini.md, Claude xem lại, push phần
+      sửa thêm + comment.
+    - Bản sửa chưa push (Gemini KHÔNG ĐẠT chặn push): làm tiếp ngay trong worktree cũ, xem lại xong mới push + Resolved.
+    force: tên ticket — chạy ticket đó ngay (vẫn cần gói còn hạn mức).
+    """
+    root = os.path.expanduser(acfg["root"])
+    pending = [p for p in load_pending(root) if not force or p["display_id"] == force]
+    if not pending:
+        return
+    # Chỉ một tiến trình xử lý hàng chờ mỗi lúc (on_tick của op-watch và lượt sửa mới đều có thể gọi).
+    tick_lock = open(os.path.join(root, ".followup.lock"), "w")
+    try:
+        fcntl.flock(tick_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return
+    for item in pending:
+        display_id = item["display_id"]
+        st = next((s for s in load_statuses(root) if s["display_id"] == display_id), {})
+        # Ticket đã có lượt sửa mới hơn (reopen, chạy lại) thì nhận xét Gemini cũ không còn đúng.
+        if st.get("started_at", "") > item["queued_at"] and st.get("event") in ("NEW", "REOPENED", "MANUAL", "QA_FAIL") \
+                and os.path.realpath(st.get("run_dir") or "") != os.path.realpath(item["run_dir"]):
+            log("%s: bỏ khỏi hàng chờ xem lại (đã có lượt sửa mới hơn)" % display_id)
+            clear_followup(root, display_id)
+            continue
+        if st.get("state") in ("queued", "preparing", "running", "shipping"):
+            continue
+        prof, why = choose_profile(root, followup_limits(acfg))
+        if prof is None:
+            log("hàng chờ xem lại: %d ticket, chưa có gói còn hạn mức (%s)" % (len(pending), why))
+            return
+        if item.get("attempts", 0) >= 3:
+            inbox(cfg, "**XEM LẠI BỎ QUA** %s — đã thử 3 lần không xong, xem tay: %s" % (
+                display_id, os.path.join(item["run_dir"], "gemini.md")))
+            clear_followup(root, display_id)
+            continue
+        # Đếm số lần thử trước khi chạy: lượt lỗi giữa chừng vẫn còn trong hàng chờ, quá 3 lần thì bỏ.
+        queue_followup(root, display_id, item["wp_id"], item["run_dir"], item["gemini_verdict"], item["reason"],
+                       item.get("pushed", True), attempts=item.get("attempts", 0) + 1)
+        msg = "Gemini %s — có hạn mức (%s), Claude xem lại" % (item["gemini_verdict"], prof["name"])
+        log("%s: %s" % (display_id, msg))
+        inbox(cfg, "**XEM LẠI TỪ HÀNG CHỜ** %s — %s" % (display_id, msg))
+        notify("[XEM LẠI TỪ HÀNG CHỜ] %s" % display_id, msg)
+        old_fe, old_be = os.path.join(item["run_dir"], "fe"), os.path.join(item["run_dir"], "be")
+        if not item.get("pushed", True) and os.path.isdir(old_fe) and os.path.isdir(old_be):
+            resume_unpushed(api, cfg, acfg, item, prof)
+        else:
+            review_ticket(api, cfg, acfg, item["wp_id"], prof["name"], gemini_from=item["run_dir"])
+
+
+def followup_done_status(api, acfg, root, wp_id, display_id, verdict):
+    """
+    Sau lượt xem lại từ hàng chờ: Claude đã quyết định (ticket ra khỏi hàng chờ) mà ticket vẫn TO DO → Resolved.
+    CẦN QUYẾT ĐỊNH thì deliver đã chuyển UNREVIEWED; tester đổi trạng thái khác thì không đụng tới.
+    """
+    todo = acfg.get("followup_status_id")
+    if not todo or os.path.exists(os.path.join(pending_dir(root), display_id + ".json")) or "UNREVIEWED" in verdict:
+        return ""
+    try:
+        if wp_status_id(api, wp_id) != int(todo):
+            return ""
+        set_wp_status(api, wp_id, acfg["resolved_status_id"])
+        return " · xem lại xong, chuyển Resolved"
+    except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+        return " · chuyển Resolved lỗi: %s" % ex
+
+
+def resume_unpushed(api, cfg, acfg, item, prof):
+    """Bản sửa bị Gemini chặn push và bỏ bước xem lại: làm tiếp trong worktree cũ (deliver như lượt sửa mới)."""
+    root = os.path.expanduser(acfg["root"])
+    display_id, run_dir = item["display_id"], item["run_dir"]
+    fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
+    global_lock = acquire_slot(root, acfg)
+    use_profile(acfg, prof)
+    set_status(root, display_id, state="shipping", event="FOLLOWUP", profile=prof["name"], pid=os.getpid(),
+               started_at=datetime.now().isoformat(timespec="seconds"))
+    try:
+        wp = api.get("/api/v3/work_packages/%s" % item["wp_id"])
+        report_path = os.path.join(run_dir, "report.md")
+        report_text = open(report_path, encoding="utf-8").read() if os.path.exists(report_path) else ""
+        _, verdict = deliver(api, cfg, acfg, item["wp_id"], display_id, wp, run_dir, fe_dir, be_dir, report_text,
+                             gemini_from=run_dir)
+        verdict += followup_done_status(api, acfg, root, item["wp_id"], display_id, verdict)
+        set_status(root, display_id, state="done", verdict="xem lại: " + verdict)
+        inbox(cfg, "**XEM LẠI** %s — %s" % (display_id, verdict))
+        notify("[XEM LẠI] %s: %s" % (display_id, verdict[:120]), wp.get("subject", ""))
+    except Exception as ex:  # noqa: BLE001
+        set_status(root, display_id, state="error", verdict="xem lại lỗi: " + str(ex).splitlines()[0][:200])
+        inbox(cfg, "**XEM LẠI LỖI** %s — %s" % (display_id, str(ex).splitlines()[0]))
+    finally:
+        fcntl.flock(global_lock, fcntl.LOCK_UN)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Tự sửa bug OpenProject tới bước commit bằng Claude Code.")
+    parser.add_argument("--wp", help="id work package (mặc định lấy từ biến OP_WP_ID của op-watch)")
+    parser.add_argument("--event", help="sự kiện (mặc định OP_EVENT); chỉ chạy với các sự kiện trong cấu hình")
+    parser.add_argument("--dry-run", action="store_true", help="chuẩn bị ticket + worktree + prompt, không gọi Claude")
+    parser.add_argument("--clean", metavar="RUN", help="xoá worktree + nhánh auto của một lượt chạy (tên thư mục)")
+    parser.add_argument("--status", action="store_true", help="xem các lượt đang chờ / đang chạy / vừa xong")
+    parser.add_argument("--follow", nargs="?", const="", metavar="TICKET",
+                        help="xem trực tiếp thao tác của lượt đang chạy (hoặc của TICKET)")
+    parser.add_argument("--review", nargs="+", metavar="TICKET",
+                        help="Gemini test lại các ticket đã sửa + push (SOAR-xxxx hoặc id), lần lượt từng cái")
+    parser.add_argument("--qa-report", metavar="QA_MD",
+                        help="báo cáo QA trên server KHÔNG ĐẠT (deploy_qa): Claude kiểm chứng rồi sửa tiếp / giải thích")
+    parser.add_argument("--profile", metavar="GÓI", help="chạy bằng gói Claude này (mặc định: gói đang chọn)")
+    parser.add_argument("--probe", nargs="?", const="", metavar="GÓI",
+                        help="hỏi Claude một câu ngắn để cập nhật hạn mức của gói (mặc định: mọi gói đã đăng nhập)")
+    parser.add_argument("--followup-pending", nargs="?", const="", metavar="TICKET",
+                        help="Claude xem lại các ticket trong hàng chờ nếu có gói còn hạn mức (op-watch gọi định kỳ)")
+    parser.add_argument("--queue-followup", nargs="*", metavar="TICKET",
+                        help="đưa các lượt đã bỏ bước Claude xem lại vào hàng chờ (không ghi ticket = quét tất cả)")
+    parser.add_argument("--ignore-limits", action="store_true",
+                        help="bỏ qua ngưỡng hạn mức tự đặt (pause_above_utilization / switch_above_7d / followup_skip_above_7d)")
+    parser.add_argument("--config", help="đường dẫn config op-watch")
+    args = parser.parse_args()
+
+    cfg = op_watch.load_config(argparse.Namespace(config=args.config, interval=None, on_change=None, no_notify=False))
+    acfg = dict(AUTOFIX_DEFAULTS)
+    acfg.update(cfg.get("autofix") or {})
+    root = os.path.expanduser(acfg["root"])
+    if args.ignore_limits:
+        acfg["_ignore_limits"] = True
+
+    if args.clean:
+        clean(acfg, args.clean)
+        return
+    if args.probe is not None:
+        os.makedirs(root, exist_ok=True)
+        for prof in profiles(acfg):
+            if (args.probe and prof["name"] != args.probe) or not prof["logged_in"]:
+                continue
+            code = probe_profile(acfg, prof)
+            print("%s: %s" % (prof["name"], usage_line(profile_usage(root, acfg, prof["name"])[0])
+                              if code == 0 else "lỗi (mã %s)" % code))
+        return
+    if args.queue_followup is not None:
+        os.makedirs(root, exist_ok=True)
+        added = backfill_pending(root, acfg, args.queue_followup)
+        print("Đã xếp hàng xem lại: %s" % (", ".join(added) or "không có"))
+        return
+    if args.followup_pending is not None:
+        os.makedirs(root, exist_ok=True)
+        if not load_pending(root):
+            return
+        process_pending(op_watch.OpenProject(cfg["url"], cfg["api_key"]), cfg, acfg, args.followup_pending or None)
+        return
+    if args.status:
+        os.makedirs(root, exist_ok=True)
+        show_status(root, acfg)
+        return
+    if args.review:
+        os.makedirs(root, exist_ok=True)
+        api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+        for ref in args.review:
+            review_ticket(api, cfg, acfg, ref, args.profile)
+        return
+    if args.follow is not None:
+        try:
+            follow(root, args.follow)
+        except KeyboardInterrupt:
+            pass
+        return
+
+    wp_id = args.wp or os.environ.get("OP_WP_ID")
+    event = args.event or os.environ.get("OP_EVENT") or "MANUAL"
+    if not wp_id:
+        sys.exit("Thiếu --wp")
+    if not acfg["enabled"] or (event not in ("MANUAL", "QA_FAIL") and event not in acfg["events"]):
+        return
+
+    api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    wp = api.get("/api/v3/work_packages/%s" % wp_id)
+    display_id = wp.get("displayId") or "WP-%s" % wp_id
+    os.makedirs(root, exist_ok=True)
+    num = re.search(r"(\d+)$", display_id)
+    if event != "MANUAL" and acfg.get("min_ticket_number") and num and int(num.group(1)) < acfg["min_ticket_number"]:
+        log("%s (%s): bỏ qua — chỉ tự sửa ticket từ SOAR-%d trở lên" % (display_id, event, acfg["min_ticket_number"]))
+        return
+
+    # Ticket này đang được xử lý (op-watch có thể báo lại khi có comment / reopen) thì bỏ qua.
+    ticket_lock = open(os.path.join(root, ".%s.lock" % display_id), "w")
+    try:
+        fcntl.flock(ticket_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("%s đang được xử lý, bỏ qua" % display_id)
+        return
+
+    # Tối đa max_parallel lượt chạy cùng lúc: hết suất thì chờ ở đây.
+    log("%s (%s): chờ tới lượt" % (display_id, event))
+    set_status(root, display_id, state="queued", event=event, queued_at=datetime.now().isoformat(timespec="seconds"),
+               started_at=None, run_dir=None, verdict=None, pid=os.getpid())
+    global_lock = acquire_slot(root, acfg, wait=False)
+    if global_lock is None:
+        busy = [st["display_id"] for st in load_statuses(root)
+                if st.get("state") in ("preparing", "running", "shipping") and st.get("display_id") != display_id]
+        msg = "chờ %s xong" % ", ".join(busy) if busy else "chờ lượt trước xong"
+        inbox(cfg, "**AUTOFIX XẾP HÀNG** %s — %s" % (display_id, msg))
+        notify("[AUTOFIX XẾP HÀNG] %s" % display_id, msg)
+        global_lock = acquire_slot(root, acfg)
+
+    # Ticket này được sửa lại từ đầu: nhận xét Gemini cũ của nó trong hàng chờ không còn giá trị.
+    clear_followup(root, display_id)
+    # Ưu tiên hàng chờ xem lại: có gói còn hạn mức thì xử lý các ticket đang chờ trước rồi mới sửa ticket mới.
+    # Lượt chạy tay bỏ qua ngưỡng (--ignore-limits) thì chỉ làm đúng ticket được yêu cầu.
+    if not args.dry_run and not acfg.get("_ignore_limits") and load_pending(root) \
+            and choose_profile(root, followup_limits(acfg))[0]:
+        log("%s: chạy hàng chờ xem lại trước" % display_id)
+        fcntl.flock(global_lock, fcntl.LOCK_UN)
+        process_pending(api, cfg, acfg)
+        global_lock = acquire_slot(root, acfg)
+    prof, switch_note = choose_profile(root, acfg, args.profile)
+    if prof is None and not args.dry_run:
+        msg = "hoãn: %s — chạy tay sau bằng --wp %s (hoặc chọn gói khác trên trang theo dõi)" % (switch_note, wp_id)
+        log("%s: %s" % (display_id, msg))
+        set_status(root, display_id, state="paused", verdict=msg)
+        inbox(cfg, "**AUTOFIX HOÃN** %s — %s" % (display_id, msg))
+        notify("[AUTOFIX HOÃN] %s" % display_id, msg)
+        fcntl.flock(global_lock, fcntl.LOCK_UN)
+        return
+
+    if prof:
+        use_profile(acfg, prof)
+        if switch_note:
+            inbox(cfg, "**AUTOFIX ĐỔI GÓI** %s — %s" % (display_id, switch_note))
+            notify("[AUTOFIX ĐỔI GÓI] %s" % display_id, switch_note)
+    run_name = "%s-%s" % (display_id, datetime.now().strftime("%m%d-%H%M"))
+    run_dir = os.path.join(root, run_name)
+    fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
+    branch = "auto/" + run_name
+    report = os.path.join(run_dir, "report.md")
+    started = time.time()
+    set_status(root, display_id, state="preparing", run_dir=run_dir, run_name=run_name, wp_id=wp_id,
+               profile=acfg.get("_profile"), started_at=datetime.now().isoformat(timespec="seconds"))
+    try:
+        log("%s: tải ticket, tạo worktree %s" % (display_id, run_dir))
+        wp = fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))
+        notes = [make_worktree(acfg["fe_repo"], acfg["fe_branch"], acfg["fe_upstream"], fe_dir, branch, acfg)]
+        nm = os.path.join(acfg["fe_repo"], "node_modules")
+        if os.path.isdir(nm):
+            os.symlink(nm, os.path.join(fe_dir, "node_modules"))
+        notes.append(make_worktree(acfg["be_repo"], acfg["be_branch"], acfg["be_upstream"], be_dir, branch, acfg))
+        notes = [n for n in notes if n]
+        if notes:
+            inbox(cfg, "**AUTOFIX CẢNH BÁO** %s — %s" % (display_id, "; ".join(notes)))
+        merge_note = "".join(
+            "\n- LƯU Ý: %s. Có thể code liên quan đã đổi ở nhánh chung: nếu gặp, ghi rõ trong report.md." % n
+            for n in notes)
+
+        prompt = PROMPT.format(
+            display_id=display_id, wp_id=wp_id, status=wp["_links"]["status"].get("title"), event=event,
+            subject=wp.get("subject", ""), run_dir=run_dir, fe_dir=fe_dir, be_dir=be_dir,
+            fe_auto=branch, be_auto=branch, be_subdir=acfg["be_subdir"], merge_note=merge_note)
+        if args.qa_report and os.path.exists(args.qa_report):
+            qa_copy = os.path.join(run_dir, "qa-server.md")
+            shutil.copy(args.qa_report, qa_copy)
+            extra = {}
+            for key, name, dest in (("qa_rounds", "gemini-rounds.jsonl", "qa-rounds.jsonl"),
+                                    ("deploy_check", "deploy-check.md", "qa-deploy-check.md")):
+                src = os.path.join(os.path.dirname(args.qa_report), name)
+                if os.path.exists(src):
+                    shutil.copy(src, os.path.join(run_dir, dest))
+                    extra[key] = os.path.join(run_dir, dest)
+                else:
+                    extra[key] = "(không có)"
+            prompt += QA_FAIL_NOTE.format(qa_report=qa_copy, display_id=display_id, **extra)
+        with open(os.path.join(run_dir, "prompt.md"), "w", encoding="utf-8") as f:
+            f.write(prompt)
+        if args.dry_run:
+            log("dry-run: đã chuẩn bị %s (không gọi Claude)" % run_dir)
+            set_status(root, display_id, state="done", verdict="dry-run")
+            return
+
+        log("%s: chạy Claude (giới hạn %s USD)" % (display_id, acfg["max_budget_usd"]))
+        inbox(cfg, "**AUTOFIX ĐANG CHẠY** %s — %s · xem: `op_autofix.py --follow %s`" % (
+            display_id, wp.get("subject", ""), display_id))
+        notify("[AUTOFIX ĐANG CHẠY] %s" % display_id, wp.get("subject", ""))
+        set_status(root, display_id, state="running")
+        code = run_claude(acfg, prompt, run_dir, fe_dir, be_dir)
+        # Hết hạn mức giữa chừng: chạy tiếp trên cùng worktree bằng gói khác (mỗi gói tối đa một lần).
+        tried = [acfg["_profile"]]
+        while not os.path.exists(report) and hit_limit(os.path.join(run_dir, "claude.jsonl")):
+            nxt, why = choose_profile(root, acfg, exclude=tried)
+            if nxt is None:
+                inbox(cfg, "**AUTOFIX HẾT HẠN MỨC** %s — %s dừng giữa chừng, không còn gói khác (%s)" % (
+                    display_id, acfg["_profile"], why))
+                break
+            msg = "%s hết hạn mức giữa chừng → chạy tiếp bằng %s" % (acfg["_profile"], nxt["name"])
+            log("%s: %s" % (display_id, msg))
+            inbox(cfg, "**AUTOFIX ĐỔI GÓI** %s — %s" % (display_id, msg))
+            notify("[AUTOFIX ĐỔI GÓI] %s" % display_id, msg)
+            use_profile(acfg, nxt)
+            tried.append(nxt["name"])
+            set_status(root, display_id, profile=nxt["name"])
+            code = run_claude(acfg, prompt + RESUME_NOTE, run_dir, fe_dir, be_dir, append=True)
+
+        verdict = "KHÔNG CÓ BÁO CÁO (Claude thoát mã %s, xem claude.jsonl / claude.err)" % code
+        report_text = ""
+        if os.path.exists(report):
+            with open(report, encoding="utf-8") as f:
+                report_text = f.read()
+            first = report_text.strip().splitlines()[0] if report_text.strip() else ""
+            verdict = first.replace("KẾT QUẢ:", "").strip() or first
+        if verdict.startswith("CẦN QUYẾT ĐỊNH") and acfg.get("review_status_id"):
+            try:
+                mark_for_review(api, wp_id, acfg["review_status_id"], report_text, run_name)
+                verdict += " → đã chuyển UNREVIEWED"
+            except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+                verdict += " (chuyển UNREVIEWED lỗi: %s)" % ex
+        commits = []
+        for repo_dir, label in ((fe_dir, "FE"), (be_dir, "BE")):
+            base = acfg["fe_branch"] if label == "FE" else acfg["be_branch"]
+            out = run(["git", "log", "--oneline", "origin/%s..HEAD" % base, "--no-merges",
+                       "--grep=" + display_id], cwd=repo_dir, check=False).strip()
+            if out:
+                commits.append("%s %s" % (label, out.splitlines()[0].split()[0]))
+        has_fix = fix_commits(fe_dir, acfg["fe_branch"]) or fix_commits(be_dir, acfg["be_branch"])
+        if verdict.startswith("ĐÃ SỬA") and has_fix and acfg.get("auto_ship"):
+            set_status(root, display_id, state="shipping")
+            log("%s: kiểm tra lại + push" % display_id)
+            notify("[AUTOFIX ĐANG PUSH] %s" % display_id, "Đã sửa — đang build / test, Gemini test lại rồi push")
+            try:
+                shipped, ship_msg = deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir,
+                                            report_text)
+            except Exception as ex:  # noqa: BLE001 — ghi lại, vẫn báo kết quả sửa
+                shipped, ship_msg = False, "ship lỗi: %s" % str(ex).splitlines()[0][:200]
+            verdict += " → " + ship_msg
+            if not shipped and "UNREVIEWED" not in ship_msg:
+                verdict += " (sửa tay rồi push)"
+        minutes = int((time.time() - started) / 60)
+        summary = "%s — %s%s (%d phút) · báo cáo: %s" % (
+            display_id, verdict, (" · commit " + ", ".join(commits)) if commits else "", minutes, report)
+        log(summary)
+        result = [e for e in read_events(os.path.join(run_dir, "claude.jsonl")) if e.get("type") == "result"]
+        set_status(root, display_id, state="done", verdict=verdict, commits=commits,
+                   cost_usd=result[-1].get("total_cost_usd") if result else None)
+        try:
+            saved = write_summary_report(acfg, display_id, run_name, wp, verdict, commits, run_dir, report_text)
+        except OSError as ex:
+            saved = ""
+            log("%s: không ghi được báo cáo tổng hợp: %s" % (display_id, ex))
+        if saved:
+            summary += " · tổng hợp: " + saved
+        inbox(cfg, "**AUTOFIX** " + summary)
+        notify("[AUTOFIX] %s: %s" % (display_id, verdict), wp.get("subject", ""))
+    except Exception as ex:  # noqa: BLE001 — mọi lỗi đều phải báo ra inbox, không chết im lặng
+        log("%s: lỗi %s" % (display_id, ex))
+        set_status(root, display_id, state="error", verdict="lỗi: " + str(ex).splitlines()[0][:200])
+        inbox(cfg, "**AUTOFIX LỖI** %s — %s (thư mục %s)" % (display_id, str(ex).splitlines()[0], run_dir))
+        notify("[AUTOFIX LỖI] %s" % display_id, str(ex)[:200])
+    finally:
+        fcntl.flock(global_lock, fcntl.LOCK_UN)
+
+
+if __name__ == "__main__":
+    main()

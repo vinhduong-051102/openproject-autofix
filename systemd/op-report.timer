@@ -1,0 +1,9 @@
+[Unit]
+Description=Tao bao cao ngay theo lich REPORT_SCHEDULE (lo gio vi tat may thi chay khi bat may)
+
+[Timer]
+@REPORT_ONCALENDAR@
+Persistent=true
+
+[Install]
+WantedBy=timers.target

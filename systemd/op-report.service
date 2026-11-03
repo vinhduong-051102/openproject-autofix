@@ -1,0 +1,9 @@
+[Unit]
+Description=daily_report - bao cao cong viec hang ngay (thu muc DAILY_REPORT_DIR)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@TOOL_DIR@
+Environment=PATH=@EXTRA_PATH@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@PYTHON@ -u @TOOL_DIR@/daily_report.py

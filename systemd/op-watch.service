@@ -1,0 +1,14 @@
+[Unit]
+Description=op-watch - theo doi OpenProject, bao bug moi / reopen / comment moi
+After=network-online.target
+
+[Service]
+# Cấu hình đọc từ @TOOL_DIR@/.env (do script tự nạp; systemd không dùng EnvironmentFile vì không mở rộng ${HOME}).
+WorkingDirectory=@TOOL_DIR@
+Environment=PATH=@EXTRA_PATH@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@PYTHON@ -u @TOOL_DIR@/op_watch.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

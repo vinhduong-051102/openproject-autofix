@@ -1,0 +1,8 @@
+{
+  "api_key": "opapi-...",
+  "autofix": {
+    "profiles": [
+      {"name": "Gói chính", "config_dir": "~/.claude"}
+    ]
+  }
+}

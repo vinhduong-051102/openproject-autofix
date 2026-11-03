@@ -1,0 +1,13 @@
+[Unit]
+Description=op-dashboard - trang theo doi autofix (cong DASHBOARD_PORT trong .env)
+After=network-online.target
+
+[Service]
+WorkingDirectory=@TOOL_DIR@
+Environment=PATH=@EXTRA_PATH@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@PYTHON@ -u @TOOL_DIR@/op_dashboard.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,14 @@
+# Cấu hình máy + bí mật
+.env
+*.json.local
+tokens/
+token*
+!*.example.json
+# Bản sao lưu, cache, log
+*.bak-*
+*.bak
+__pycache__/
+*.pyc
+*.log
+*.tmp
+.cache/

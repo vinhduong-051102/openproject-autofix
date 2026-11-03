@@ -1,0 +1,9 @@
+[Unit]
+Description=Chay merge_to_dev theo lich MERGE_SCHEDULE (lo gio vi tat may thi chay khi bat may)
+
+[Timer]
+@MERGE_ONCALENDAR@
+Persistent=true
+
+[Install]
+WantedBy=timers.target

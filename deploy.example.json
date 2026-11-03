@@ -1,0 +1,9 @@
+{
+  "password": "<mat-khau-ssh-server-test>",
+  "app_password": "<mat-khau-tai-khoan-ung-dung>",
+  "app_otp": "<otp>",
+  "accounts": {
+    "QA_superadmin": {"password": "<mat-khau>"},
+    "tencuaban": {"password": "<mat-khau>"}
+  }
+}
