@@ -935,6 +935,12 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             last = qa_history(display_id)
             if last and last.get("build") == build:
                 return drop("đã QA trên bản này (%s)" % last.get("verdict"))
+        elif not hashes:
+            # Ticket trong hàng chờ nhưng commit sửa chưa vào dev-ss / develop-ss (vd. còn trên nhánh cá nhân):
+            # server chắc chắn chưa có bản sửa → không QA, để lại hàng chờ tới đợt merge + deploy sau.
+            log("%s: chưa thấy commit [%s] trên %s / %s — để lại hàng chờ"
+                % (display_id, display_id, acfg["fe_upstream"], acfg["be_upstream"]))
+            return
         elif fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is False:
             log("%s: bản FE %s trên server chưa có bản sửa — để lại hàng chờ" % (display_id, baseline["fe"]))
             return
