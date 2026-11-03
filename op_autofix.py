@@ -183,6 +183,16 @@ Worktree có thể đã có thay đổi / commit dở của lượt trước: xe
 """
 
 
+INTERRUPTED_NOTE = """
+
+## Chạy tiếp (lượt trước bị ngắt giữa chừng — máy / dịch vụ khởi động lại)
+Worktree có thể đã có thay đổi / commit dở của lượt trước: xem `git -C <worktree> status` và
+`git -C <worktree> log --oneline -3` trước, làm tiếp từ đó (không làm lại từ đầu, không commit trùng). Thay đổi chưa
+commit có thể chưa xong (bị cắt ngang khi đang sửa): đọc lại cho chắc trước khi dùng. report.md (nếu có) là của lượt
+bị ngắt — ghi lại cho đúng kết quả cuối cùng.
+"""
+
+
 QA_FAIL_NOTE = """
 
 ## QA trên server test KHÔNG ĐẠT (lý do lượt chạy này)
@@ -1108,23 +1118,74 @@ def status_dir(root):
 def set_status(root, display_id, **fields):
     """~/autofix/.status/<SOAR-xxxx>.json: queued → preparing → running → done | error."""
     path = os.path.join(status_dir(root), display_id + ".json")
-    data = {}
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    data.update(fields, display_id=display_id, updated_at=datetime.now().isoformat(timespec="seconds"))
-    with open(path + ".tmp", "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
-    os.replace(path + ".tmp", path)
+    # Khoá quanh đọc-sửa-ghi: tiến trình phục hồi (--recover) và tiến trình con nó vừa mở cùng ghi một file.
+    with open(path + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = {}
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        if fields.get("state") in ("done", "paused"):
+            data.pop("recover_attempts", None)  # lượt đã kết thúc bình thường: đếm lại số lần bị ngắt từ đầu
+        data.update(fields, display_id=display_id, updated_at=datetime.now().isoformat(timespec="seconds"))
+        tmp = "%s.%d.tmp" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
 
 
 def load_statuses(root):
     out = []
     for name in sorted(os.listdir(status_dir(root))):
         if name.endswith(".json"):
-            with open(os.path.join(status_dir(root), name), encoding="utf-8") as f:
-                out.append(json.load(f))
+            try:
+                with open(os.path.join(status_dir(root), name), encoding="utf-8") as f:
+                    out.append(json.load(f))
+            except (OSError, ValueError):
+                pass
     return out
+
+
+ACTIVE_STATES = ("queued", "preparing", "running", "shipping")
+
+
+def boot_time():
+    with open("/proc/stat") as f:
+        for line in f:
+            if line.startswith("btime "):
+                return float(line.split()[1])
+    return 0.0
+
+
+def proc_start(pid):
+    """Thời điểm (epoch) tiến trình pid bắt đầu; None nếu không còn."""
+    try:
+        with open("/proc/%d/stat" % int(pid)) as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+        return boot_time() + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, TypeError, IndexError):
+        return None
+
+
+def status_alive(s):
+    """
+    Lượt trong trạng thái còn tiến trình chạy thật: PID còn, là op_autofix, và bắt đầu trước lần ghi trạng thái cuối
+    (sau khi khởi động lại máy, PID cũ có thể đã thuộc về tiến trình khác).
+    """
+    pid = s.get("pid")
+    start = proc_start(pid) if pid else None
+    if start is None:
+        return False
+    try:
+        with open("/proc/%d/cmdline" % int(pid), "rb") as f:
+            if b"op_autofix" not in f.read():
+                return False
+    except OSError:
+        return False
+    try:
+        return start <= datetime.fromisoformat(s.get("updated_at") or "").timestamp() + 2
+    except ValueError:
+        return True
 
 
 def describe(event):
@@ -1779,6 +1840,135 @@ def resume_unpushed(api, cfg, acfg, item, prof):
         fcntl.flock(global_lock, fcntl.LOCK_UN)
 
 
+# =================================================================== phục hồi lượt bị ngắt
+
+MAX_RECOVER = 3
+
+
+def ticket_locked(root, display_id):
+    """Khoá ticket (.SOAR-x.lock) đang bị một tiến trình giữ."""
+    path = os.path.join(root, ".%s.lock" % display_id)
+    if not os.path.exists(path):
+        return False
+    with open(path, "a") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    return False
+
+
+def report_done(path):
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8") as f:
+        return f.read(200).lstrip().startswith("KẾT QUẢ:")
+
+
+def recover_plan(api, root, acfg, s):
+    """
+    Việc cần làm cho một lượt bị ngắt: (tham số op_autofix, mô tả) hoặc (None, kết luận ghi vào trạng thái).
+    """
+    display_id, state, event = s["display_id"], s.get("state"), s.get("event") or "MANUAL"
+    run_dir = s.get("run_dir") or ""
+    run_name = s.get("run_name") or os.path.basename(run_dir)
+    fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
+    has_tree = bool(run_dir) and os.path.isdir(fe_dir) and os.path.isdir(be_dir)
+
+    if event == "FOLLOWUP":
+        # Hàng chờ xem lại còn mục của ticket (đã đếm số lần thử) → process_pending tự chạy lại ở on_tick sau.
+        if os.path.exists(os.path.join(pending_dir(root), display_id + ".json")):
+            return None, "bị ngắt khi Claude xem lại — hàng chờ xem lại sẽ chạy lại"
+        return None, "bị ngắt khi Claude xem lại (không còn trong hàng chờ) — xem tay %s" % run_dir
+    if event == "REVIEW":
+        return ["--review", display_id], "test lại từ đầu"
+    if state == "shipping" or event == "SHIP":
+        if not has_tree or not report_done(os.path.join(run_dir, "report.md")):
+            return None, "bị ngắt khi push, không còn worktree / báo cáo — xem tay %s" % run_dir
+        if fix_commits(fe_dir, acfg["fe_branch"]) or fix_commits(be_dir, acfg["be_branch"]):
+            return ["--ship", run_name], "giao lại %s (kiểm tra + push)" % run_name
+        return None, ("bị ngắt khi push: không còn commit chưa push (có thể đã push xong) — kiểm tra comment / "
+                      "trạng thái ticket tay · %s" % run_dir)
+
+    wp_id = str(s.get("wp_id") or "")
+    if not wp_id.isdigit():
+        wp_id = str(api.get("/api/v3/work_packages/%s" % display_id)["id"])
+    argv = ["--wp", wp_id, "--event", event]
+    if event == "QA_FAIL" and s.get("qa_report") and os.path.exists(s["qa_report"]):
+        argv += ["--qa-report", s["qa_report"]]
+    if state in ("preparing", "running") and has_tree and os.path.exists(os.path.join(run_dir, "prompt.md")):
+        return argv + ["--resume", run_name], "làm tiếp trong %s" % run_name
+    return argv, "chạy lại từ đầu" if state != "queued" else "xếp hàng lại"
+
+
+def recover(cfg, acfg, dry_run=False):
+    """
+    Tìm lượt có trạng thái đang chạy mà tiến trình đã chết (máy tắt / op-watch khởi động lại…) và chạy lại:
+    queued → xếp hàng lại; preparing/running → làm tiếp trên worktree cũ; shipping → --ship; REVIEW → --review;
+    FOLLOWUP → để hàng chờ xem lại xử lý. Mỗi ticket tự chạy lại tối đa MAX_RECOVER lần. op-watch gọi qua on_tick
+    (lượt đầu chạy ngay khi khởi động).
+    """
+    root = os.path.expanduser(acfg["root"])
+    os.makedirs(root, exist_ok=True)
+    lock = open(os.path.join(root, ".recover.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return []
+    stale = [s for s in load_statuses(root) if s.get("state") in ACTIVE_STATES and not status_alive(s)
+             and not ticket_locked(root, s["display_id"])]
+    if not stale:
+        return []
+    api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    try:
+        api.me()
+    except (op_watch.urllib.error.URLError, OSError, ValueError) as ex:
+        log("phục hồi: %d lượt bị ngắt, chưa gọi được OpenProject (%s) — để lượt sau" % (len(stale), ex))
+        return []
+    # Lượt đã làm dở trước (giữ thứ tự xếp hàng cũ) — queued sau cùng, theo thời điểm vào hàng.
+    rank = {"shipping": 0, "running": 1, "preparing": 2, "queued": 3}
+    stale.sort(key=lambda s: (rank.get(s.get("state"), 9), s.get("queued_at") or s.get("started_at") or ""))
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = []
+    for s in stale:
+        display_id = s["display_id"]
+        attempts = s.get("recover_attempts", 0)
+        try:
+            if attempts >= MAX_RECOVER:
+                argv, what = None, "bị ngắt %d lần, không tự chạy lại nữa — chạy tay trên trang theo dõi" % attempts
+            else:
+                argv, what = recover_plan(api, root, acfg, s)
+        except Exception as ex:  # noqa: BLE001 — một ticket lỗi không chặn các ticket khác
+            log("phục hồi %s: lỗi %s — để lượt sau" % (display_id, ex))
+            continue
+        line = "%s (%s, %s): %s" % (display_id, s.get("state"), s.get("event"), what)
+        out.append(line)
+        if dry_run:
+            print(line + ("" if argv is None else "  →  op_autofix.py " + " ".join(argv)))
+            continue
+        log("phục hồi " + line)
+        if argv is None:
+            set_status(root, display_id, state="error", verdict="bị ngắt: " + what)
+            inbox(cfg, "**AUTOFIX BỊ NGẮT** %s — %s" % (display_id, what))
+            continue
+        with open(os.path.join(root, ".recover-%s.log" % display_id), "a", encoding="utf-8") as logf:
+            logf.write("\n[%s] %s\n" % (datetime.now().isoformat(timespec="seconds"), " ".join(argv)))
+            logf.flush()
+            child = subprocess.Popen([sys.executable, os.path.join(here, "op_autofix.py")] + argv, cwd=here,
+                                     stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                     start_new_session=True)
+        # Ghi PID con ngay: lượt on_tick sau thấy tiến trình còn sống, không mở trùng.
+        set_status(root, display_id, pid=child.pid, recover_attempts=attempts + 1,
+                   recovered_at=datetime.now().isoformat(timespec="seconds"))
+        inbox(cfg, "**AUTOFIX BỊ NGẮT → CHẠY LẠI** %s — %s (lần %d/%d)" % (display_id, what, attempts + 1, MAX_RECOVER))
+        # Cách nhau một chút để các lượt xếp hàng lại giữ đúng thứ tự cũ khi giành suất chạy.
+        time.sleep(1)
+    if out and not dry_run:
+        notify("[AUTOFIX BỊ NGẮT] %d lượt" % len(out), "\n".join(out)[:300])
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Tự sửa bug OpenProject tới bước commit bằng Claude Code.")
     parser.add_argument("--wp", help="id work package (mặc định lấy từ biến OP_WP_ID của op-watch)")
@@ -1804,6 +1994,11 @@ def main():
                         help="đưa các lượt đã bỏ bước Claude xem lại vào hàng chờ (không ghi ticket = quét tất cả)")
     parser.add_argument("--ignore-limits", action="store_true",
                         help="bỏ qua ngưỡng hạn mức tự đặt (pause_above_utilization / switch_above_7d / followup_skip_above_7d)")
+    parser.add_argument("--recover", action="store_true",
+                        help="chạy lại các lượt bị ngắt (trạng thái đang chạy mà tiến trình đã chết) — op-watch gọi "
+                             "định kỳ qua on_tick; kèm --dry-run để chỉ liệt kê")
+    parser.add_argument("--resume", metavar="RUN",
+                        help="làm tiếp lượt bị ngắt trong thư mục cũ (vd SOAR-2570-1103-1650) thay vì tạo worktree mới")
     parser.add_argument("--config", help="đường dẫn config op-watch")
     args = parser.parse_args()
 
@@ -1814,6 +2009,9 @@ def main():
     if args.ignore_limits:
         acfg["_ignore_limits"] = True
 
+    if args.recover:
+        recover(cfg, acfg, args.dry_run)
+        return
     if args.clean:
         clean(acfg, args.clean)
         return
@@ -1884,7 +2082,8 @@ def main():
     # Tối đa max_parallel lượt chạy cùng lúc: hết suất thì chờ ở đây.
     log("%s (%s): chờ tới lượt" % (display_id, event))
     set_status(root, display_id, state="queued", event=event, queued_at=datetime.now().isoformat(timespec="seconds"),
-               started_at=None, run_dir=None, verdict=None, pid=os.getpid())
+               started_at=None, run_dir=None, verdict=None, pid=os.getpid(), wp_id=str(wp["id"]),
+               qa_report=os.path.abspath(args.qa_report) if args.qa_report else None)
     global_lock = acquire_slot(root, acfg, wait=False)
     if global_lock is None:
         busy = [st["display_id"] for st in load_statuses(root)
@@ -1919,7 +2118,16 @@ def main():
         if switch_note:
             inbox(cfg, "**AUTOFIX ĐỔI GÓI** %s — %s" % (display_id, switch_note))
             notify("[AUTOFIX ĐỔI GÓI] %s" % display_id, switch_note)
-    run_name = "%s-%s" % (display_id, datetime.now().strftime("%m%d-%H%M"))
+    # --resume: lượt bị ngắt giữa chừng — dùng lại thư mục, worktree và prompt cũ (không tạo nhánh mới).
+    resume_dir = os.path.join(root, os.path.basename(args.resume)) if args.resume else None
+    if resume_dir and not (os.path.basename(resume_dir).startswith(display_id + "-")
+                           and os.path.isfile(os.path.join(resume_dir, "prompt.md"))
+                           and os.path.isdir(os.path.join(resume_dir, "fe"))
+                           and os.path.isdir(os.path.join(resume_dir, "be"))):
+        log("%s: không làm tiếp được %s (thiếu prompt / worktree) — sửa lại từ đầu" % (display_id, args.resume))
+        resume_dir = None
+    run_name = (os.path.basename(resume_dir) if resume_dir
+                else "%s-%s" % (display_id, datetime.now().strftime("%m%d-%H%M")))
     run_dir = os.path.join(root, run_name)
     fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
     branch = "auto/" + run_name
@@ -1928,50 +2136,70 @@ def main():
     set_status(root, display_id, state="preparing", run_dir=run_dir, run_name=run_name, wp_id=wp_id,
                profile=acfg.get("_profile"), started_at=datetime.now().isoformat(timespec="seconds"))
     try:
-        log("%s: tải ticket, tạo worktree %s" % (display_id, run_dir))
-        wp = fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))
-        notes = [make_worktree(acfg["fe_repo"], acfg["fe_branch"], acfg["fe_upstream"], fe_dir, branch, acfg)]
-        nm = os.path.join(acfg["fe_repo"], "node_modules")
-        if os.path.isdir(nm):
-            os.symlink(nm, os.path.join(fe_dir, "node_modules"))
-        notes.append(make_worktree(acfg["be_repo"], acfg["be_branch"], acfg["be_upstream"], be_dir, branch, acfg))
-        notes = [n for n in notes if n]
-        if notes:
-            inbox(cfg, "**AUTOFIX CẢNH BÁO** %s — %s" % (display_id, "; ".join(notes)))
-        merge_note = "".join(
-            "\n- LƯU Ý: %s. Có thể code liên quan đã đổi ở nhánh chung: nếu gặp, ghi rõ trong report.md." % n
-            for n in notes)
+        if resume_dir:
+            log("%s: làm tiếp lượt bị ngắt %s" % (display_id, run_dir))
+            wp = fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))
+            with open(os.path.join(run_dir, "prompt.md"), encoding="utf-8") as f:
+                prompt = f.read()
+        else:
+            log("%s: tải ticket, tạo worktree %s" % (display_id, run_dir))
+            wp = fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))
+            notes = [make_worktree(acfg["fe_repo"], acfg["fe_branch"], acfg["fe_upstream"], fe_dir, branch, acfg)]
+            nm = os.path.join(acfg["fe_repo"], "node_modules")
+            if os.path.isdir(nm):
+                os.symlink(nm, os.path.join(fe_dir, "node_modules"))
+            notes.append(make_worktree(acfg["be_repo"], acfg["be_branch"], acfg["be_upstream"], be_dir, branch, acfg))
+            notes = [n for n in notes if n]
+            if notes:
+                inbox(cfg, "**AUTOFIX CẢNH BÁO** %s — %s" % (display_id, "; ".join(notes)))
+            merge_note = "".join(
+                "\n- LƯU Ý: %s. Có thể code liên quan đã đổi ở nhánh chung: nếu gặp, ghi rõ trong report.md." % n
+                for n in notes)
 
-        prompt = PROMPT.format(
-            display_id=display_id, wp_id=wp_id, status=wp["_links"]["status"].get("title"), event=event,
-            subject=wp.get("subject", ""), run_dir=run_dir, fe_dir=fe_dir, be_dir=be_dir,
-            fe_auto=branch, be_auto=branch, be_subdir=acfg["be_subdir"], merge_note=merge_note)
-        if args.qa_report and os.path.exists(args.qa_report):
-            qa_copy = os.path.join(run_dir, "qa-server.md")
-            shutil.copy(args.qa_report, qa_copy)
-            extra = {}
-            for key, name, dest in (("qa_rounds", "gemini-rounds.jsonl", "qa-rounds.jsonl"),
-                                    ("deploy_check", "deploy-check.md", "qa-deploy-check.md")):
-                src = os.path.join(os.path.dirname(args.qa_report), name)
-                if os.path.exists(src):
-                    shutil.copy(src, os.path.join(run_dir, dest))
-                    extra[key] = os.path.join(run_dir, dest)
-                else:
-                    extra[key] = "(không có)"
-            prompt += QA_FAIL_NOTE.format(qa_report=qa_copy, display_id=display_id, **extra)
-        with open(os.path.join(run_dir, "prompt.md"), "w", encoding="utf-8") as f:
-            f.write(prompt)
-        if args.dry_run:
-            log("dry-run: đã chuẩn bị %s (không gọi Claude)" % run_dir)
-            set_status(root, display_id, state="done", verdict="dry-run")
-            return
+            prompt = PROMPT.format(
+                display_id=display_id, wp_id=wp_id, status=wp["_links"]["status"].get("title"), event=event,
+                subject=wp.get("subject", ""), run_dir=run_dir, fe_dir=fe_dir, be_dir=be_dir,
+                fe_auto=branch, be_auto=branch, be_subdir=acfg["be_subdir"], merge_note=merge_note)
+            if args.qa_report and os.path.exists(args.qa_report):
+                qa_copy = os.path.join(run_dir, "qa-server.md")
+                shutil.copy(args.qa_report, qa_copy)
+                extra = {}
+                for key, name, dest in (("qa_rounds", "gemini-rounds.jsonl", "qa-rounds.jsonl"),
+                                        ("deploy_check", "deploy-check.md", "qa-deploy-check.md")):
+                    src = os.path.join(os.path.dirname(args.qa_report), name)
+                    if os.path.exists(src):
+                        shutil.copy(src, os.path.join(run_dir, dest))
+                        extra[key] = os.path.join(run_dir, dest)
+                    else:
+                        extra[key] = "(không có)"
+                prompt += QA_FAIL_NOTE.format(qa_report=qa_copy, display_id=display_id, **extra)
+            with open(os.path.join(run_dir, "prompt.md"), "w", encoding="utf-8") as f:
+                f.write(prompt)
+            if args.dry_run:
+                log("dry-run: đã chuẩn bị %s (không gọi Claude)" % run_dir)
+                set_status(root, display_id, state="done", verdict="dry-run")
+                return
 
-        log("%s: chạy Claude (giới hạn %s USD)" % (display_id, acfg["max_budget_usd"]))
-        inbox(cfg, "**AUTOFIX ĐANG CHẠY** %s — %s · xem: `op_autofix.py --follow %s`" % (
-            display_id, wp.get("subject", ""), display_id))
-        notify("[AUTOFIX ĐANG CHẠY] %s" % display_id, wp.get("subject", ""))
-        set_status(root, display_id, state="running")
-        code = run_claude(acfg, prompt, run_dir, fe_dir, be_dir)
+        if resume_dir and report_done(report):
+            # Claude đã viết xong báo cáo trước khi bị ngắt: chỉ còn bước kiểm tra / push phía sau.
+            log("%s: lượt bị ngắt đã có report.md — bỏ qua Claude, làm tiếp bước giao" % display_id)
+            code = 0
+        else:
+            log("%s: chạy Claude (giới hạn %s USD)%s" % (display_id, acfg["max_budget_usd"],
+                                                       " — làm tiếp lượt bị ngắt" if resume_dir else ""))
+            inbox(cfg, "**AUTOFIX %s** %s — %s · xem: `op_autofix.py --follow %s`" % (
+                "LÀM TIẾP" if resume_dir else "ĐANG CHẠY", display_id, wp.get("subject", ""), display_id))
+            notify("[AUTOFIX %s] %s" % ("LÀM TIẾP" if resume_dir else "ĐANG CHẠY", display_id), wp.get("subject", ""))
+            set_status(root, display_id, state="running")
+            if resume_dir:
+                # Nhật ký phiên bị ngắt để riêng: hit_limit chỉ xét phiên mới (sự kiện hết hạn mức cũ không tính).
+                for name in ("claude.jsonl", "claude.err"):
+                    old = os.path.join(run_dir, name)
+                    if os.path.exists(old):
+                        with open(old, "rb") as src, open(old + ".interrupted", "ab") as dst:
+                            shutil.copyfileobj(src, dst)
+                        os.remove(old)
+            code = run_claude(acfg, prompt + (INTERRUPTED_NOTE if resume_dir else ""), run_dir, fe_dir, be_dir)
         # Hết hạn mức giữa chừng: chạy tiếp trên cùng worktree bằng gói khác (mỗi gói tối đa một lần).
         tried = [acfg["_profile"]]
         while not os.path.exists(report) and hit_limit(os.path.join(run_dir, "claude.jsonl")):

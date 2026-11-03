@@ -1,5 +1,6 @@
 [Unit]
 Description=op-watch - theo doi OpenProject, bao bug moi / reopen / comment moi
+Wants=network-online.target
 After=network-online.target
 
 [Service]
@@ -9,6 +10,9 @@ Environment=PATH=@EXTRA_PATH@:/usr/local/bin:/usr/bin:/bin
 ExecStart=@PYTHON@ -u @TOOL_DIR@/op_watch.py
 Restart=on-failure
 RestartSec=30
+# Khởi động lại dịch vụ chỉ dừng tiến trình chính: các lượt autofix / QA nó đã mở chạy tiếp (tắt máy vẫn bị ngắt,
+# op_autofix.py --recover làm tiếp khi khởi động lại).
+KillMode=process
 
 [Install]
 WantedBy=default.target

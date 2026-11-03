@@ -73,14 +73,6 @@ def watcher_running():
     return res.returncode == 0
 
 
-def pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-
-
 def window(info, key):
     w = ((info or {}).get("unifiedWindows") or {}).get(key) or {}
     return {"used": af.window_used(info, key), "resetsAt": w.get("resetsAt")} if w else None
@@ -111,7 +103,7 @@ def state():
     for s in af.load_statuses(root):
         st = s.get("state")
         # Tiến trình đã chết mà trạng thái vẫn "đang chạy" (máy tắt giữa chừng…) thì báo rõ.
-        if st in ACTIVE_STATES and s.get("pid") and not pid_alive(s["pid"]):
+        if st in ACTIVE_STATES and s.get("pid") and not af.status_alive(s):
             st = "stale"
         run_dir = s.get("run_dir") or ""
         runs.append(dict(s, state=st, wp_id=s.get("wp_id") or wp_ids.get(s["display_id"]),
@@ -740,7 +732,7 @@ def action(body):
             raise ValueError("tên %s đã có" % new)
         if len(new) > 60 or re.search(r"[/\\\x00-\x1f]", new):
             raise ValueError("tên gói không được chứa / \\ hoặc ký tự điều khiển, tối đa 60 ký tự")
-        if any(s.get("state") in ACTIVE_STATES and s.get("profile") == old and pid_alive(s.get("pid"))
+        if any(s.get("state") in ACTIVE_STATES and s.get("profile") == old and af.status_alive(s)
                for s in af.load_statuses(root)):
             raise ValueError("%s đang có lượt chạy — đổi tên sau khi chạy xong" % old)
         entries = profile_entries(acfg)
@@ -847,7 +839,7 @@ def action(body):
         if not re.match(r"^SOAR-\d+$", display_id):
             raise ValueError("mã ticket không hợp lệ")
         s = find_run(root, display_id) or {}
-        if s.get("state") in ACTIVE_STATES and pid_alive(s.get("pid")):
+        if s.get("state") in ACTIVE_STATES and af.status_alive(s):
             raise ValueError("%s đang chạy" % display_id)
         extra = ["--profile", body["profile"]] if body.get("profile") in names else []
         prof, why = af.choose_profile(root, acfg, body.get("profile"))

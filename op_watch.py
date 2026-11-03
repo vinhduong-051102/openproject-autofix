@@ -268,7 +268,16 @@ def main():
     if args.reset and os.path.exists(STATE_PATH):
         os.remove(STATE_PATH)
 
-    me = api.me()
+    # Vừa khởi động máy thì mạng / DNS có thể chưa sẵn: thử lại thay vì thoát (systemd chỉ restart sau 30s).
+    for wait in (5, 10, 20, 30, 60, 0):
+        try:
+            me = api.me()
+            break
+        except (urllib.error.URLError, OSError) as ex:
+            if not wait:
+                raise
+            log("Chưa gọi được OpenProject (%s), thử lại sau %ss" % (ex, wait))
+            time.sleep(wait)
     log("op-watch: %s (id %s), dự án %s, %ss/lượt" % (me.get("name"), me["id"], cfg["project"], cfg["interval"]))
 
     def handle_signal(signum, frame):

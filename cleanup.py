@@ -52,7 +52,7 @@ def local_tickets(root):
 
 
 def busy(root, display_id):
-    """Ticket đang có lượt autofix (khoá ticket đang giữ / trạng thái queued|preparing|running) hoặc đang QA."""
+    """Ticket đang có lượt autofix (khoá ticket đang giữ / trạng thái đang chạy, tiến trình còn sống) hoặc đang QA."""
     lock = os.path.join(root, ".%s.lock" % display_id)
     if os.path.exists(lock):
         with open(lock, "a") as fh:
@@ -67,14 +67,8 @@ def busy(root, display_id):
             data = json.load(open(st, encoding="utf-8"))
         except ValueError:
             data = {}
-        if data.get("state") in ("queued", "preparing", "running"):
-            pid = data.get("pid")
-            try:
-                if pid:
-                    os.kill(int(pid), 0)
-                    return True
-            except (OSError, ValueError):
-                pass
+        if data.get("state") in af.ACTIVE_STATES and af.status_alive(data):
+            return True
     # QA trên server đang chạy (deploy_qa ghi .qa-active) và thư mục QA của ticket mới được tạo
     if os.path.exists(os.path.join(root, ".qa-active")):
         for d in glob.glob(os.path.join(root, "%s-qa-*" % display_id)):
