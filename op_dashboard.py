@@ -16,6 +16,7 @@ import glob
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -649,6 +650,15 @@ def action(body):
         _JOB_CACHE["at"] = 0
         d = time.strptime(until, "%Y-%m-%d")
         return "Hoãn các lượt merge + deploy tự động tới hết %s (bấm Chạy ngay vẫn chạy)" % time.strftime("%d/%m", d)
+    if kind == "poll_now":
+        pid = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "op-watch.service"],
+                             capture_output=True, text=True).stdout.strip()
+        if not pid or pid == "0":
+            raise ValueError("op-watch không chạy (systemctl --user start op-watch)")
+        os.kill(int(pid), signal.SIGUSR1)
+        review_queue(force=True)
+        _JOB_CACHE["at"] = 0
+        return "Đang kiểm tra OpenProject ngay (task mới / Reopened / comment) và làm mới danh sách chờ QA"
     if kind == "review_qa_now":
         subprocess.Popen([sys.executable, os.path.join(HERE, "deploy_qa.py"), "--review-watch"], cwd=HERE,
                          stdout=open(os.path.join(root, ".review-watch.log"), "a"), stderr=subprocess.STDOUT,

@@ -214,6 +214,7 @@ header { flex-wrap: wrap; min-width: 0; }
 .rq .id a:hover { text-decoration: underline; }
 #reviewHint code { font-size: 11.5px; }
 #reviewHint .primary { margin-left: 6px; padding: 2px 10px; font-size: 12px; }
+#pollNow { padding: 4px 10px; font-size: 12.5px; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -221,6 +222,7 @@ header { flex-wrap: wrap; min-width: 0; }
   <h1>Autofix · theo dõi</h1>
   <div class="meta">
     <span class="chips" id="chips"></span>
+    <button id="pollNow" title="Hỏi OpenProject ngay (task mới / Reopened / comment, ticket Review chờ QA) — không chờ chu kỳ 2 phút">↻ Kiểm tra ngay</button>
     <span id="updated">—</span>
     <select id="theme" title="Giao diện">
       <option value="dark">Tối</option>
@@ -875,6 +877,12 @@ $("saveLimits").onclick = async () => {
   limitsDirty = false;
 };
 $("auto").onchange = (e) => post({action: "auto_switch", value: e.target.checked});
+$("pollNow").onclick = async () => {
+  const b = $("pollNow"); b.disabled = true; b.textContent = "↻ Đang kiểm tra…";
+  await post({action: "poll_now"});
+  setTimeout(refresh, 4000);
+  setTimeout(() => { b.disabled = false; b.textContent = "↻ Kiểm tra ngay"; refresh(); }, 9000);
+};
 const addMode = () => document.querySelector("[name=addMode]:checked").value;
 document.querySelectorAll("[name=addMode]").forEach((r) => r.onchange = () => {
   const token = addMode() === "token";

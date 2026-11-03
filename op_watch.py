@@ -277,6 +277,13 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
+    # SIGUSR1 (nút "Kiểm tra ngay" trên trang theo dõi): bỏ thời gian chờ, hỏi OpenProject ngay.
+    wake = {"now": False}
+
+    def handle_wake(signum, frame):
+        wake["now"] = True
+    signal.signal(signal.SIGUSR1, handle_wake)
+
     state = load_state()
     backoff = 0
     last_tick = 0
@@ -297,8 +304,12 @@ def main():
         if args.once:
             break
         deadline = time.time() + (backoff or cfg["interval"])
-        while not stop and time.time() < deadline:
+        while not stop and time.time() < deadline and not wake["now"]:
             time.sleep(1)
+        if wake["now"]:
+            wake["now"] = False
+            backoff = 0
+            log("kiểm tra ngay (yêu cầu từ trang theo dõi)")
 
 
 if __name__ == "__main__":
