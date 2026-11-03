@@ -179,6 +179,7 @@ DEPLOY_ENV = {
     "QA_FAIL_AUTOFIX_MAX": ("qa_fail_autofix_max", "int"),
     "QA_PARALLEL": ("qa_parallel", "int"),  # chỉnh trên trang → JSON thắng
     "QA_TICKET_ACCOUNTS": ("qa_ticket_accounts", "list"),
+    "QA_REVIEW_STATUSES": ("qa_review_status_ids", "list"),
 }
 DEPLOY_MANAGED = ("qa_parallel",)
 

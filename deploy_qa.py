@@ -57,6 +57,9 @@ DEFAULTS = {
     # tài khoản tester được phép dùng khi ticket ghi sẵn tên + mật khẩu (vd tài khoản tenancy con) — đặt trong
     # deploy.json "qa_ticket_accounts" hoặc QA_TICKET_ACCOUNTS (cách nhau dấu phẩy) trong .env
     "qa_ticket_accounts": [],
+    # trạng thái OpenProject (id) của ticket giao cho mình cũng được QA lại trên server; ĐẠT → chuyển Resolved + người QA
+    # (vd [98] = Review). Đặt trong deploy.json "qa_review_status_ids" hoặc QA_REVIEW_STATUSES=98 trong .env
+    "qa_review_status_ids": [],
     "qa_model": "gemini-3.8-flash-medium",
     "qa_calls_per_round": 8,
     "be_container": "soar",
@@ -737,7 +740,8 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
     wp = api.get("/api/v3/work_packages/%s" % display_id)
     assignee = (wp["_links"].get("assignee") or {}).get("href", "")
     status_id = wp["_links"]["status"]["href"].rstrip("/").split("/")[-1]
-    if not assignee.endswith("/%s" % me_id) or status_id != str(acfg["resolved_status_id"]):
+    review = status_id in {str(x) for x in dcfg.get("qa_review_status_ids") or []}
+    if not assignee.endswith("/%s" % me_id) or (status_id != str(acfg["resolved_status_id"]) and not review):
         return "", ""
     root = os.path.expanduser(acfg["root"])
     qa_dir = os.path.join(root, "%s-qa-%s" % (display_id, datetime.now().strftime("%m%d-%H%M")))
@@ -778,13 +782,15 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
         raise ServerChanged(change)
     if verdict == "ĐẠT":
         body = af.report_section(text, "Kết quả") or "Đã kiểm tra đạt."
-        comment = "**[QA tự động] Đã deploy lên môi trường test (%s) và kiểm tra lại: ĐẠT** — chuyển %s.\n\n%s" % (
-            deployed, dcfg["qa_user_name"], af.for_tester(body)[:3000])
+        comment = "**[QA tự động] Đã deploy lên môi trường test (%s) và kiểm tra lại: ĐẠT** — %schuyển %s.\n\n%s" % (
+            deployed, "chuyển Resolved, " if review else "", dcfg["qa_user_name"], af.for_tester(body)[:3000])
         af.op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp["id"], {"comment": {"raw": comment}})
         lock_version = api.get("/api/v3/work_packages/%s" % wp["id"])["lockVersion"]
-        af.op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp["id"], {
-            "lockVersion": lock_version, "_links": {"assignee": {"href": "/api/v3/users/%s" % dcfg["qa_user_id"]}}})
-        verdict += " → đã chuyển " + dcfg["qa_user_name"]
+        links = {"assignee": {"href": "/api/v3/users/%s" % dcfg["qa_user_id"]}}
+        if review:  # ticket đang Review: QA đạt → Resolved
+            links["status"] = {"href": "/api/v3/statuses/%s" % acfg["resolved_status_id"]}
+        af.op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp["id"], {"lockVersion": lock_version, "_links": links})
+        verdict += (" → Resolved, đã chuyển " if review else " → đã chuyển ") + dcfg["qa_user_name"]
         fail_count(display_id, 0)
     elif verdict == "KHÔNG ĐẠT":
         verdict += handle_fail(api, acfg, dcfg, wp, display_id, path, text, commits)
@@ -800,9 +806,11 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
 QA_HISTORY = os.path.join(envconf.autofix_root(), "qa-history.json")
 
 
-def resolved_mine(api, cfg, acfg):
-    """Ticket đang Resolved và giao cho mình: ứng viên QA dù không còn trong hàng chờ / đợt deploy mới."""
-    wps = api.my_work_packages(cfg["project"], [str(acfg["resolved_status_id"])])
+def resolved_mine(api, cfg, acfg, dcfg=None):
+    """Ticket đang Resolved (hoặc trạng thái qa_review_status_ids, vd Review) và giao cho mình: ứng viên QA dù không còn
+    trong hàng chờ / đợt deploy mới."""
+    ids = [str(acfg["resolved_status_id"])] + [str(x) for x in ((dcfg or {}).get("qa_review_status_ids") or [])]
+    wps = api.my_work_packages(cfg["project"], ids)
     return sorted(w.get("displayId") or "WP-%s" % w["id"] for w in wps)
 
 
@@ -848,11 +856,11 @@ def run_all(dry_run=False, only=None):
     else:
         new = sorted({t for items in commits.values() for _, s in items for t in re.findall(r"\[(SOAR-\d+)\]", s)})
         try:
-            auto = set(resolved_mine(api, cfg, acfg)) - set(new) - set(waiting)
+            auto = set(resolved_mine(api, cfg, acfg, dcfg)) - set(new) - set(waiting)
         except Exception as ex:  # noqa: BLE001 — không đọc được OpenProject thì vẫn QA như cũ
             log("không lấy được danh sách Resolved: %s" % ex)
         tickets = sorted(set(new) | set(waiting) | auto)
-        log("chưa deploy: FE %d commit, BE %d commit · ticket mới: %s · hàng chờ QA: %s · Resolved chưa QA: %s" % (
+        log("chưa deploy: FE %d commit, BE %d commit · ticket mới: %s · hàng chờ QA: %s · Resolved/Review chưa QA: %s" % (
             len(commits["FE"]), len(commits["BE"]), ", ".join(new) or "không có", ", ".join(waiting) or "trống",
             ", ".join(sorted(auto)) or "không có"))
         if dry_run or not tickets:
