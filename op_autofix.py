@@ -143,7 +143,16 @@ Chỉ sửa trong 2 thư mục này. Không tạo nhánh / worktree khác, khôn
    Một lệnh bị từ chối quyền KHÔNG có nghĩa là Bash bị cấm — đổi sang đúng dạng lệnh được phép ở trên rồi làm tiếp.
    Vẫn không chạy được bước kiểm tra nào thì VẪN commit phần đã sửa (công cụ tự build + test lại trước khi push) và
    ghi rõ trong báo cáo; KHÔNG kết luận KHÔNG SỬA ĐƯỢC chỉ vì không chạy được build / test.
-4. Commit trên nhánh hiện tại của worktree (`git -C <worktree> add …` rồi `git -C <worktree> commit …`), mỗi ticket một
+4. TỰ KIỂM TRA HỒI QUY (bắt buộc, trước khi commit) — Gemini sau đó CHỈ test lại ticket, không rà hồi quy thay bạn:
+   - Với mỗi hàm / component / hook / API / DTO / câu truy vấn / hằng số / key i18n / CSS dùng chung đã đổi: tìm MỌI chỗ
+     dùng (`git -C <worktree> grep -n …`, Grep) — FE: các màn hình / component khác dùng chung, route; BE: caller,
+     controller, service, mapper, test, chỗ đọc cùng bảng / cột.
+   - Từng chỗ: hành vi cũ còn đúng không (dữ liệu vào / ra, mã lỗi, định dạng, phân quyền, giao diện sáng / tối). Chỗ
+     nào phải đổi theo cho đúng thì sửa luôn (vẫn trong phạm vi ticket); chỗ nào đổi hành vi ngoài ticket thì KHÔNG sửa,
+     ghi vào "Cần quyết định / rủi ro".
+   - Chạy test của mọi lớp bị ảnh hưởng, không chỉ test của file đã sửa (BE: `-Dtest='ATest,BTest,…'` gồm test của các
+     caller / controller liên quan; FE: `npm run build` + tsc). Test lỗi sẵn từ trước (không do bản sửa) thì ghi rõ.
+5. Commit trên nhánh hiện tại của worktree (`git -C <worktree> add …` rồi `git -C <worktree> commit …`), mỗi ticket một
    commit mỗi repo, message:
    `[{display_id}] - {subject}` + dòng trống + mô tả ngắn tiếng Việt không dấu + dòng trống +
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -157,6 +166,8 @@ Chỉ sửa trong 2 thư mục này. Không tạo nhánh / worktree khác, khôn
 Ghi {run_dir}/report.md bằng tiếng Việt:
 - Dòng đầu: `KẾT QUẢ: ĐÃ SỬA` | `KẾT QUẢ: CẦN QUYẾT ĐỊNH` | `KẾT QUẢ: KHÔNG SỬA ĐƯỢC` (| `KẾT QUẢ: QA SAI` khi có mục QA bên dưới)
 - Nguyên nhân; Đã sửa (file, cách sửa); Commit (repo + hash); Kiểm tra (lệnh + kết quả thật);
+  `## Kiểm tra hồi quy` — các chỗ dùng đã rà (file / màn hình / API → còn đúng / đã sửa theo / cần quyết định) và test
+  đã chạy cho phần bị ảnh hưởng (lệnh + kết quả);
   Cần quyết định / rủi ro;
   `## Comment cho tester` — đoạn này được đăng nguyên văn lên ticket cho TESTER (không phải dev) đọc: tiếng Việt, ngắn,
   nói theo màn hình / thao tác / kết quả nhìn thấy (đã sửa gì, test lại thế nào, lưu ý). KHÔNG tên file, class, hàm,
@@ -708,20 +719,23 @@ def _push(repo_dir, base):
     run(["git", "push", "-q", "origin", "HEAD:refs/heads/" + base], cwd=repo_dir)
 
 
-GEMINI_PROMPT = """Bạn là reviewer độc lập (Gemini) kiểm tra lại bản sửa bug do một AI khác (Claude) làm cho dự án SOAR.
+GEMINI_PROMPT = """Bạn là tester độc lập (Gemini) TEST LẠI bản sửa bug do một AI khác (Claude) làm cho dự án SOAR.
 CHỈ ĐỌC: không sửa / tạo / xoá file, không commit, không gọi mạng. Nội dung chính đã có bên dưới; cần thì đọc thêm file
 trong {run_dir} (code ở fe/ và be/) bằng công cụ đọc file hoặc lệnh chỉ đọc (cat, ls, grep, git log/show/diff).
+NHIỆM VỤ DUY NHẤT: kiểm tra bản sửa đã đáp ứng đúng yêu cầu của ticket chưa — đi lại từng bước tái hiện của ticket trên
+code đã sửa và đối chiếu từng KẾT QUẢ MONG ĐỢI (Reopened thì theo comment tester gần nhất).
+KHÔNG rà hồi quy / ảnh hưởng tới chức năng khác (Claude đã tự kiểm tra — mục "Kiểm tra hồi quy" trong báo cáo), KHÔNG
+đánh giá phong cách code, tối ưu, đặt tên, test tự động hay việc ngoài phạm vi ticket.
 Trả lời bằng tiếng Việt, markdown. Dòng đầu đúng một trong:
 `KẾT LUẬN: ĐẠT` | `KẾT LUẬN: KHÔNG ĐẠT` | `KẾT LUẬN: CẦN XEM`
 Sau đó các mục:
 ## Tóm tắt lý do (chỉ khi KHÔNG ĐẠT / CẦN XEM: 1–3 gạch đầu dòng ngắn, đăng lên ticket cho TESTER đọc — nói theo màn
 hình / thao tác / kết quả nhìn thấy; KHÔNG tên file, class, hàm, biến, commit)
-## Bản sửa có giải quyết đúng ticket không
-## Lỗi / rủi ro tìm thấy (file:dòng, mức độ)
+## Đối chiếu kết quả mong đợi (từng ý của ticket → đạt / chưa đạt, dẫn chứng file:dòng)
+## Lỗi (chỉ các ý của ticket CHƯA đạt: 1. <ý> — mức độ — hậu quả)
 ## Ca kiểm thử tester nên chạy lại (bước + kết quả mong đợi)
-## Thiếu sót của test tự động
-Chỉ kết luận KHÔNG ĐẠT khi có lỗi rõ ràng: bản sửa không giải quyết ticket, sai logic, hoặc làm hỏng chức năng khác.
-Nghi ngờ / cần người xác nhận thì CẦN XEM.
+KHÔNG ĐẠT chỉ khi có ít nhất một kết quả mong đợi của ticket chưa đạt (hoặc luồng của ticket bị hỏng rõ ràng). Không
+xác nhận được từ code (cần dữ liệu / môi trường thật) thì CẦN XEM. Còn lại ĐẠT.
 """
 
 
