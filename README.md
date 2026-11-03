@@ -206,3 +206,12 @@ Mặc định (chưa sắp thứ tự) mỗi lượt chạy chọn gói **còn n
 trong 5 giờ / 7 ngày; gói chưa có dữ liệu coi như còn đủ). Trên trang theo dõi chọn "Theo thứ tự ưu tiên" rồi sắp bằng
 ▲ ▼ / "Ưu tiên số 1" (lưu `priority` trong `~/autofix/.profile.json`); gói đầu chạm ngưỡng thì dùng gói kế tiếp (khi bật
 Tự chuyển gói). "Đổi tên" đổi tên gói trong config, kèm hạn mức đã lưu, trạng thái lượt chạy và thứ tự ưu tiên.
+
+### Đổi lịch / hoãn merge + deploy tự động
+Trên trang theo dõi bấm chip "Merge + deploy + QA":
+- **Lịch chạy tự động**: sửa / thêm giờ (HH:MM), chọn Hằng ngày hoặc Thứ 2 – thứ 6, "Lưu lịch" → ghi drop-in
+  `~/.config/systemd/user/op-merge.timer.d/schedule.conf` (đè `MERGE_SCHEDULE` của install.sh; xoá file này để quay về
+  lịch trong `.env`). Khi lưu, mốc "lần chạy trước" của timer được đặt = bây giờ để `Persistent=true` không chạy bù ngay
+  các giờ vừa thêm mà đã qua trong hôm nay.
+- **Hoãn**: "Hoãn hôm nay" hoặc hoãn tới hết một ngày → `~/autofix/.merge-skip.json`; lượt chạy theo lịch thấy đang hoãn
+  thì ghi inbox `MERGE DEV HOÃN` rồi thoát. "Chạy ngay" trên trang và chạy tay `merge_to_dev.py` vẫn chạy.

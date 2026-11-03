@@ -162,6 +162,34 @@ def process(acfg, gitea, label, repo, own, dev, dry_run, log_path):
         subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo, check=False)
 
 
+SKIP_FILE = ".merge-skip.json"    # {"until": "YYYY-MM-DD"} — trang theo dõi ghi: hoãn các lượt tự động tới hết ngày đó
+FORCE_FILE = ".merge-force"       # trang theo dõi bấm "Chạy ngay": lượt này chạy dù đang hoãn
+
+
+def skipped_today(root):
+    """
+    Lượt chạy theo lịch (systemd) mà đang hoãn → trả lý do; chạy tay (dòng lệnh) hoặc "Chạy ngay" trên trang thì không
+    hoãn. "Chạy ngay" để lại FORCE_FILE (dùng một lần, có hiệu lực 10 phút).
+    """
+    force = os.path.join(root, FORCE_FILE)
+    if os.path.exists(force):
+        fresh = time.time() - os.path.getmtime(force) < 600
+        os.remove(force)
+        if fresh:
+            return ""
+    if not os.environ.get("INVOCATION_ID"):  # không chạy dưới systemd = chạy tay
+        return ""
+    try:
+        with open(os.path.join(root, SKIP_FILE), encoding="utf-8") as f:
+            until = json.load(f).get("until") or ""
+    except (OSError, ValueError):
+        return ""
+    today = datetime.now().strftime("%Y-%m-%d")
+    if until and today <= until:
+        return "đang hoãn chạy tự động tới hết %s — bỏ qua lượt này" % datetime.strptime(until, "%Y-%m-%d").strftime("%d/%m")
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description="Merge nhánh cá nhân vào nhánh dev chung qua PR Gitea.")
     parser.add_argument("--dry-run", action="store_true", help="merge + build thử, không push / không tạo PR")
@@ -173,6 +201,12 @@ def main():
     acfg = dict(af.AUTOFIX_DEFAULTS)
     acfg.update(cfg.get("autofix") or {})
     os.makedirs(os.path.expanduser(acfg["root"]), exist_ok=True)
+
+    why = skipped_today(os.path.expanduser(acfg["root"]))
+    if why:
+        log(why)
+        af.inbox(cfg, "**MERGE DEV HOÃN** " + why)
+        return
 
     gitea = None
     if not args.dry_run:

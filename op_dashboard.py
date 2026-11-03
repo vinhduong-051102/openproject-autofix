@@ -302,6 +302,11 @@ def jobs():
         if j.get("timer"):
             tv = systemctl_show(j["timer"], ["ActiveState", "NextElapseUSecRealtime", "LastTriggerUSec",
                                              "UnitFileState"])
+            if j["key"] == "merge":
+                item["schedule"] = sc = merge_schedule(load()[2])
+                if sc["times"]:
+                    item["desc"] = re.sub(r"^Theo lịch .*?: PR ", "Theo lịch %s%s: PR " % (
+                        ", ".join(sc["times"]), " thứ 2 – thứ 6" if sc["days"] == "weekdays" else " hằng ngày"), j["desc"])
             item.update(timer=j["timer"], timer_active=tv.get("ActiveState"), timer_enabled=tv.get("UnitFileState"),
                         next=tv.get("NextElapseUSecRealtime"), last_trigger=tv.get("LastTriggerUSec"))
         out.append(item)
@@ -519,6 +524,57 @@ def save_autofix(**fields):
     os.replace(path + ".tmp", path)
 
 
+MERGE_DROPIN = os.path.expanduser("~/.config/systemd/user/op-merge.timer.d/schedule.conf")
+MERGE_STAMP = os.path.expanduser("~/.local/share/systemd/timers/stamp-op-merge.timer")
+DAYS = {"daily": "", "weekdays": "Mon..Fri "}
+
+
+def merge_schedule(root):
+    """Lịch merge + deploy hiện hành (đọc từ systemd: unit + drop-in) và trạng thái hoãn."""
+    out = subprocess.run(["systemctl", "--user", "cat", "op-merge.timer"], capture_output=True, text=True).stdout
+    cal = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("OnCalendar="):
+            v = line.split("=", 1)[1].strip()
+            if not v:
+                cal = []  # OnCalendar= rỗng trong drop-in = xoá các lịch trước
+            else:
+                cal.append(v)
+    times, days = [], "daily"
+    for v in cal:
+        m = re.match(r"^(Mon\.\.Fri\s+)?\*-\*-\*\s+(\d{1,2}):(\d{2})(?::\d{2})?$", v)
+        if m:
+            times.append("%02d:%s" % (int(m.group(2)), m.group(3)))
+            if m.group(1):
+                days = "weekdays"
+    skip = ""
+    try:
+        with open(os.path.join(root, ".merge-skip.json"), encoding="utf-8") as f:
+            skip = json.load(f).get("until") or ""
+    except (OSError, ValueError):
+        pass
+    if skip and skip < time.strftime("%Y-%m-%d"):
+        skip = ""
+    return {"times": sorted(times), "days": days, "raw": cal, "skip_until": skip}
+
+
+def set_merge_schedule(times, days):
+    os.makedirs(os.path.dirname(MERGE_DROPIN), exist_ok=True)
+    body = "[Timer]\nOnCalendar=\n" + "".join("OnCalendar=%s*-*-* %s:00\n" % (DAYS[days], t) for t in times)
+    with open(MERGE_DROPIN + ".tmp", "w", encoding="utf-8") as f:
+        f.write("# Ghi bởi trang theo dõi (op_dashboard) — lịch merge + deploy + QA\n" + body)
+    os.replace(MERGE_DROPIN + ".tmp", MERGE_DROPIN)
+    # Persistent=true: đổi lịch sang giờ đã qua trong hôm nay thì systemd sẽ "chạy bù" ngay. Đặt mốc lần chạy trước = bây
+    # giờ để lịch mới chỉ áp cho các giờ sắp tới.
+    if os.path.isdir(os.path.dirname(MERGE_STAMP)):
+        open(MERGE_STAMP, "a").close()
+        os.utime(MERGE_STAMP, None)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "restart", "op-merge.timer"], check=True)
+    _JOB_CACHE["at"] = 0
+
+
 def action(body):
     cfg, acfg, root = load()
     kind = body.get("action")
@@ -540,6 +596,34 @@ def action(body):
         if not msgs:
             raise ValueError("chưa nhập số agent")
         return "Đã lưu số agent song song: " + ", ".join(msgs) + " (áp dụng cho lượt chạy mới)"
+    if kind == "merge_schedule":
+        times = []
+        for t in body.get("times") or []:
+            m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", str(t))
+            if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+                raise ValueError("giờ không hợp lệ: %s (dạng HH:MM)" % t)
+            times.append("%02d:%s" % (int(m.group(1)), m.group(2)))
+        times = sorted(set(times))
+        if not 1 <= len(times) <= 8:
+            raise ValueError("cần từ 1 đến 8 giờ chạy")
+        days = body.get("days") if body.get("days") in DAYS else "daily"
+        set_merge_schedule(times, days)
+        return "Lịch merge + deploy: %s%s" % (", ".join(times), " (thứ 2 – thứ 6)" if days == "weekdays" else " hằng ngày")
+    if kind == "merge_skip":
+        path = os.path.join(root, ".merge-skip.json")
+        until = (body.get("until") or "").strip()
+        if not until:
+            if os.path.exists(path):
+                os.remove(path)
+            _JOB_CACHE["at"] = 0
+            return "Đã bỏ hoãn — chạy lại theo lịch"
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", until) or until < time.strftime("%Y-%m-%d"):
+            raise ValueError("ngày hoãn phải từ hôm nay trở đi (YYYY-MM-DD)")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"until": until, "set_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, f)
+        _JOB_CACHE["at"] = 0
+        d = time.strptime(until, "%Y-%m-%d")
+        return "Hoãn các lượt merge + deploy tự động tới hết %s (bấm Chạy ngay vẫn chạy)" % time.strftime("%d/%m", d)
     if kind == "probe_gemini":
         gemini_usage(force=True)
         return "Đang cập nhật hạn mức Gemini…"
@@ -554,6 +638,8 @@ def action(body):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             _JOB_CACHE["at"] = 0
             return "Đang tạo lại báo cáo hôm nay"
+        if j["key"] == "merge":
+            open(os.path.join(root, ".merge-force"), "w").close()  # "Chạy ngay" chạy cả khi đang hoãn
         subprocess.run(["systemctl", "--user", verb, "--no-block", j["unit"]], check=True)
         _JOB_CACHE["at"] = 0
         return "Đã %s %s" % ("khởi động lại" if verb == "restart" else "chạy", j["name"])

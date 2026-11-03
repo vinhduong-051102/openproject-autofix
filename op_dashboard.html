@@ -202,6 +202,12 @@ header { flex-wrap: wrap; min-width: 0; }
 .seg button + button { border-left: 1px solid var(--border); }
 .seg button.on { background: var(--panel-2); color: var(--text); font-weight: 600; }
 .p-rank { min-width: 20px; height: 20px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--border); font-size: 11px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-2); }
+
+.sched { flex-basis: 100%; display: flex; flex-direction: column; gap: 8px; margin-top: 4px; font-size: 13px; color: var(--text-2); }
+.sched-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.sched-row .muted { color: var(--text-3); font-size: 12px; }
+.tchip { display: inline-flex; align-items: center; gap: 2px; margin-right: 4px; }
+.tchip input { width: 64px; text-align: center; font-family: var(--mono); }
 </style>
 </head>
 <body>
@@ -463,13 +469,41 @@ function renderActs() {
   });
 }
 function renderRuns() { renderActs(); }
+const ddmm = (d) => d ? d.slice(8, 10) + "/" + d.slice(5, 7) : "";
+const todayIso = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+function scheduleBox(j) {
+  const sc = j.schedule || {times: [], days: "daily"};
+  const times = (sc.times.length ? sc.times : ["12:00"]).map((t) => `<span class="tchip"><input type="text" inputmode="numeric" maxlength="5" pattern="[0-2]?[0-9]:[0-5][0-9]" placeholder="HH:MM" value="${esc(t)}" data-stime aria-label="Giờ chạy (HH:MM)"><button class="link" data-sdel title="Bỏ giờ này" aria-label="Bỏ giờ ${esc(t)}">✕</button></span>`).join("");
+  return `<div class="sched">
+    <div class="sched-row"><span class="lf-title">Lịch chạy tự động</span>
+      <span id="schedTimes">${times}</span><button class="link" id="schedAdd">+ thêm giờ</button>
+      <select id="schedDays"><option value="daily" ${sc.days === "daily" ? "selected" : ""}>Hằng ngày</option><option value="weekdays" ${sc.days === "weekdays" ? "selected" : ""}>Thứ 2 – thứ 6</option></select>
+      <button id="schedSave">Lưu lịch</button></div>
+    <div class="sched-row"><span class="lf-title">Hoãn</span>
+      ${sc.skip_until ? `<span class="badge warn">Đang hoãn tới hết ${ddmm(sc.skip_until)}</span><button id="skipOff">Bỏ hoãn</button>`
+        : `<button id="skipToday" title="Bỏ qua các lượt tự động còn lại hôm nay">Hoãn hôm nay</button>
+           <span class="muted">hoặc tới hết</span><input type="date" id="skipDate" min="${todayIso()}" value="${todayIso()}"><button id="skipUntil">Hoãn</button>`}
+      <span class="muted">— lượt theo lịch bị bỏ qua; "Chạy ngay" vẫn chạy</span></div>
+  </div>`;
+}
+function bindSchedule() {
+  if (!$("schedSave")) return;
+  const bindDel = () => document.querySelectorAll("[data-sdel]").forEach((b) => b.onclick = () => { if (document.querySelectorAll("[data-stime]").length > 1) b.parentElement.remove(); });
+  bindDel();
+  $("schedAdd").onclick = () => { const sp = document.createElement("span"); sp.className = "tchip"; sp.innerHTML = `<input type="text" inputmode="numeric" maxlength="5" pattern="[0-2]?[0-9]:[0-5][0-9]" placeholder="HH:MM" value="09:00" data-stime aria-label="Giờ chạy (HH:MM)"><button class="link" data-sdel aria-label="Bỏ giờ này">✕</button>`; $("schedTimes").appendChild(sp); bindDel(); };
+  $("schedSave").onclick = () => post({action: "merge_schedule", days: $("schedDays").value, times: [...document.querySelectorAll("[data-stime]")].map((i) => i.value).filter(Boolean)});
+  if ($("skipOff")) $("skipOff").onclick = () => post({action: "merge_skip", until: ""});
+  if ($("skipToday")) $("skipToday").onclick = () => post({action: "merge_skip", until: todayIso()});
+  if ($("skipUntil")) $("skipUntil").onclick = () => post({action: "merge_skip", until: $("skipDate").value});
+}
 function renderChips() {
   const jobs = S.jobs || [];
   $("chips").innerHTML = jobs.map((j) => {
     const running = j.active === "activating";
     const ok = j.loaded && (j.timer ? (j.timer_active === "active" && (running || j.result === "success")) : j.active === "active");
     const dot = running ? "busy" : ok ? "on" : "off";
-    const note = j.timer ? (running ? "đang chạy" : "lượt tới " + sysTime(j.next).slice(6)) : (ok ? "" : "dừng");
+    const skip = j.schedule && j.schedule.skip_until;
+    const note = j.timer ? (running ? "đang chạy" : skip ? "hoãn tới hết " + ddmm(skip) : "lượt tới " + sysTime(j.next).slice(6)) : (ok ? "" : "dừng");
     return `<span class="chip ${selKind === "job" && selKey === j.key ? "sel" : ""}" data-job="${j.key}" title="${esc(j.desc)}"><i class="dot ${dot}"></i>${esc(j.name)}${note ? `<small>${esc(note)}</small>` : ""}</span>`;
   }).join("");
   document.querySelectorAll("[data-job]").forEach((el) => el.onclick = () => selectOther("job", el.dataset.job));
@@ -492,8 +526,10 @@ async function renderOther(reload) {
         ${j.timer ? `<span>Lượt tới <b>${esc(sysTime(j.next))}</b></span><span>Timer <b>${j.timer_active === "active" ? "bật" : "TẮT"}</b></span>` : `<span>Tự chạy khi bật máy <b>${j.enabled === "enabled" ? "có" : "KHÔNG"}</b></span>`}
         <span>Bắt đầu <b>${esc(sysTime(j.started))}</b></span>
         ${j.timer && j.exited ? `<span>Kết thúc <b>${esc(sysTime(j.exited))}</b></span>` : ""}</div>
-      ${r ? `<div class="kv">${[r.merge].concat(r.deploy).filter(Boolean).map((l) => `<span><b>${esc(l)}</b></span>`).join("")}</div>` : ""}`;
+      ${r ? `<div class="kv">${[r.merge].concat(r.deploy).filter(Boolean).map((l) => `<span><b>${esc(l)}</b></span>`).join("")}</div>` : ""}
+      ${j.key === "merge" && selKind === "job" ? `<div class="kv"><span>Lịch <b>${esc((j.schedule && j.schedule.times || []).join(", ") || "?")}${j.schedule && j.schedule.days === "weekdays" ? " (T2–T6)" : ""}</b></span>${j.schedule && j.schedule.skip_until ? `<span>Hoãn tới hết <b>${ddmm(j.schedule.skip_until)}</b></span>` : ""}</div>` : ""}`;
     if (j.key !== "dashboard") actions = `<button class="primary" id="jobRun" ${running ? "disabled" : ""}>${j.key === "watch" ? "Khởi động lại" : j.key === "report" ? "Tạo lại báo cáo hôm nay" : "Chạy ngay"}</button>`;
+    if (j.key === "merge" && selKind === "job") actions += scheduleBox(j);
     url = "/api/joblog?key=" + j.key;
   } else if (selKind === "qa") {
     const r = (S.qa_runs || []).find((x) => x.name === selKey); if (!r) return;
@@ -510,6 +546,7 @@ async function renderOther(reload) {
   if (key !== otherKey || !$("otherLog")) {
     otherKey = key;
     d.innerHTML = `<div class="detail-head">${head}</div>${actions ? `<div class="toolbar">${actions}</div>` : ""}<div class="log" id="otherLog"></div>`;
+    bindSchedule();
     const b = $("jobRun");
     if (b) b.onclick = async () => {
       const k = selKind === "job" ? selKey : "merge";
