@@ -195,6 +195,13 @@ main > *, section, .detail, .log, .md { min-width: 0; }
 .md img { max-width: 100%; height: auto; }
 .md table { max-width: 100%; }
 header { flex-wrap: wrap; min-width: 0; }
+
+.order-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 16px 4px; font-size: 13px; color: var(--text-2); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: none; padding: 5px 10px; font-size: 12.5px; color: var(--text-2); }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button.on { background: var(--panel-2); color: var(--text); font-weight: 600; }
+.p-rank { min-width: 20px; height: 20px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--border); font-size: 11px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-2); }
 </style>
 </head>
 <body>
@@ -329,11 +336,21 @@ function renderProfiles(force) {
   $("auto").checked = !!S.auto_switch;
   renderLimitsBox();
   if (editingLimits && !force && S.profiles.some((p) => p.name === editingLimits)) return;
-  $("profiles").innerHTML = S.profiles.map((p) => `
+  const quota = S.order_mode !== "priority", n = S.profiles.length;
+  $("profiles").innerHTML = `
+    <div class="order-mode">
+      <span class="lf-title">Thứ tự dùng gói</span>
+      <div class="seg">
+        <button class="${quota ? "on" : ""}" data-mode="quota" title="Mỗi lượt chạy chọn gói còn nhiều hạn mức nhất (mặc định khi chưa sắp thứ tự)">Còn nhiều hạn mức nhất</button>
+        <button class="${quota ? "" : "on"}" data-mode="priority" title="Dùng theo thứ tự anh sắp bằng nút ▲ ▼; gói đầu chạm ngưỡng thì sang gói kế tiếp">Theo thứ tự ưu tiên</button>
+      </div>
+    </div>` + S.profiles.map((p, i) => `
     <div class="profile ${p.active ? "active" : ""}">
       <div class="p-head">
+        <span class="p-rank" title="${quota ? "Thứ hạng theo hạn mức còn lại" : "Thứ tự ưu tiên"}">${i + 1}</span>
         <span class="p-name">${esc(p.name)}</span>
-        ${p.active ? '<span class="badge accent">Đang dùng</span>' : ""}
+        ${p.active ? '<span class="badge accent">Lượt sau dùng</span>' : ""}
+        ${p.remaining != null ? `<span class="badge" title="Còn lại = 100% − mức đã dùng cao hơn trong 5 giờ / 7 ngày">còn ${Math.round(p.remaining * 100)}%</span>` : ""}
         ${!p.logged_in ? '<span class="badge crit">Chưa đăng nhập</span>' : p.block ? '<span class="badge warn">Chạm ngưỡng</span>' : '<span class="badge ok">Sẵn sàng</span>'}
         <span class="p-dir" style="margin-left:auto">${p.kind === "token" ? (p.token_tail ? "token …" + esc(p.token_tail) : "token") : esc(p.config_dir.replace(/^\/home\/[^/]+/, "~"))}</span>
       </div>
@@ -345,13 +362,22 @@ function renderProfiles(force) {
         : p.block ? `<div class="p-note">${esc(p.block)}</div>`
         : `<div class="p-note muted">Cập nhật hạn mức: ${p.checked_at ? fmtTime(p.checked_at) : "chưa có"}</div>`}
       <div class="p-actions">
-        ${p.active ? "" : `<button class="primary" data-use="${esc(p.name)}" ${p.logged_in ? "" : "disabled"}>Dùng gói này</button>`}
+        ${i === 0 && !quota ? "" : `<button class="primary" data-use="${esc(p.name)}" ${p.logged_in ? "" : "disabled"} title="Đưa gói này lên đầu thứ tự ưu tiên">Ưu tiên số 1</button>`}
+        <button data-move="${esc(p.name)}" data-dir="-1" ${i === 0 ? "disabled" : ""} title="Lên một bậc ưu tiên" aria-label="Lên một bậc">▲</button>
+        <button data-move="${esc(p.name)}" data-dir="1" ${i === n - 1 ? "disabled" : ""} title="Xuống một bậc ưu tiên" aria-label="Xuống một bậc">▼</button>
+        <button data-rename="${esc(p.name)}">Đổi tên</button>
         <button data-probe="${esc(p.name)}" ${p.logged_in ? "" : "disabled"} title="Gửi một câu rất ngắn để lấy hạn mức mới nhất">Cập nhật hạn mức</button>
         ${p.kind === "token" ? `<button data-token="${esc(p.name)}" title="Dán token mới (token setup-token hết hạn sau khoảng 1 năm)">Đổi token</button>` : ""}
         ${S.profiles.length > 1 ? `<button class="link" data-remove="${esc(p.name)}">Bỏ khỏi danh sách</button>` : ""}
       </div>
     </div>`).join("") + `<div class="hint"><button class="link" id="toggleAdd">+ Thêm gói</button></div>`;
   document.querySelectorAll("[data-use]").forEach((b) => b.onclick = () => post({action: "use_profile", name: b.dataset.use}));
+  document.querySelectorAll("[data-move]").forEach((b) => b.onclick = () => post({action: "move_profile", name: b.dataset.move, dir: +b.dataset.dir}));
+  document.querySelectorAll("[data-mode]").forEach((b) => b.onclick = () => post({action: "priority_mode", mode: b.dataset.mode}));
+  document.querySelectorAll("[data-rename]").forEach((b) => b.onclick = () => {
+    const name = prompt(`Tên mới cho gói "${b.dataset.rename}"`, b.dataset.rename);
+    if (name && name.trim() && name.trim() !== b.dataset.rename) post({action: "rename_profile", name: b.dataset.rename, new_name: name.trim()});
+  });
   document.querySelectorAll("[data-probe]").forEach((b) => b.onclick = () => { post({action: "probe", name: b.dataset.probe}); setTimeout(refresh, 8000); });
   document.querySelectorAll("[data-remove]").forEach((b) => b.onclick = () => confirm(`Bỏ ${b.dataset.remove} khỏi danh sách gói?`) && post({action: "remove_profile", name: b.dataset.remove}));
   document.querySelectorAll("[data-token]").forEach((b) => b.onclick = () => {
@@ -505,7 +531,7 @@ async function renderOther(reload) {
   }
 }
 function renderSummaries() {
-  const a = S.profiles.find((p) => p.active);
+  const a = S.profiles.find((p) => p.active);  // gói lượt sau sẽ dùng
   const pct = (w) => w && w.used != null ? Math.round(w.used * 100) + "%" : "?";
   const gm = ((S.gemini || {}).groups || []).find((x) => /gemini/i.test(x.name || ""));
   $("profSum").textContent = (a ? `— Claude ${a.name}: 5 giờ ${pct(a.five_hour)} · 7 ngày ${pct(a.seven_day)}${a.block ? " (chạm ngưỡng)" : ""}` : "—")

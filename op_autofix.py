@@ -399,7 +399,8 @@ def build_env(acfg):
     if "_config_dir" in acfg:
         config_dir, token_file = acfg["_config_dir"], acfg.get("_token_file")
     else:
-        prof = find_profile(acfg, profile_prefs(os.path.expanduser(acfg["root"])).get("active")) or {}
+        order = profile_order(os.path.expanduser(acfg["root"]), acfg)[0]
+        prof = order[0] if order else {}
         config_dir, token_file = prof.get("config_dir", ""), prof.get("token_file")
     env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
@@ -1185,15 +1186,76 @@ def profile_limits(acfg, prof):
             "followup_7d": own.get("followup_7d", acfg.get("followup_skip_above_7d") or seven)}
 
 
+def profile_remaining(root, acfg, prof):
+    """Phần hạn mức còn lại (0..1) = 1 − max(đã dùng 5 giờ, đã dùng 7 ngày); None = chưa có dữ liệu."""
+    info, _ = profile_usage(root, acfg, prof["name"])
+    if not info:
+        return None
+    if info.get("status") == "rejected" and (info.get("resetsAt") or 0) > time.time():
+        return 0.0
+    return max(0.0, 1.0 - max(window_used(info, "five_hour"), window_used(info, "seven_day")))
+
+
+def profile_order(root, acfg):
+    """
+    Thứ tự thử các gói. Trả (danh sách gói, chế độ):
+      "priority" — đã đặt thứ tự ưu tiên trên trang theo dõi (.profile.json "priority"); gói chưa có trong danh sách
+                   xếp cuối theo thứ tự cấu hình;
+      "quota"    — chưa đặt gì: gói còn nhiều hạn mức nhất trước (gói chưa có dữ liệu hạn mức coi như còn đủ;
+                   bằng nhau thì theo thứ tự cấu hình).
+    """
+    profs = profiles(acfg)
+    names = [p["name"] for p in profs]
+    prio = [n for n in (profile_prefs(root).get("priority") or []) if n in names]
+    if prio:
+        return [profs[names.index(n)] for n in prio] + [p for p in profs if p["name"] not in prio], "priority"
+
+    def key(ip):
+        i, p = ip
+        r = profile_remaining(root, acfg, p)
+        return (-(1.0 if r is None else r), i)
+    return [p for _, p in sorted(enumerate(profs), key=key)], "quota"
+
+
+def rename_profile_data(root, old, new):
+    """Đổi tên gói trong dữ liệu của tool: hạn mức đã lưu, trạng thái lượt chạy, thứ tự ưu tiên."""
+    usage = os.path.join(root, ".usage")
+    if os.path.exists(os.path.join(usage, old + ".jsonl")):
+        os.replace(os.path.join(usage, old + ".jsonl"), os.path.join(usage, new + ".jsonl"))
+    for path in glob.glob(os.path.join(status_dir(root), "*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if data.get("profile") == old:
+            data["profile"] = new
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+            os.replace(path + ".tmp", path)
+    prefs = profile_prefs(root)
+    fields = {}
+    if prefs.get("active") == old:
+        fields["active"] = new
+    if old in (prefs.get("priority") or []):
+        fields["priority"] = [new if n == old else n for n in prefs["priority"]]
+    if fields:
+        save_profile_prefs(root, **fields)
+
+
 def choose_profile(root, acfg, prefer=None, exclude=()):
     """
-    Gói cho lượt chạy: gói `prefer` (hoặc gói đang chọn) nếu còn hạn mức; tự chuyển bật thì thử lần lượt các gói khác.
+    Gói cho lượt chạy: gói `prefer` (chạy tay chỉ định gói) rồi tới các gói theo profile_order (thứ tự ưu tiên đã đặt,
+    hoặc còn nhiều hạn mức nhất). Tự chuyển tắt thì chỉ thử gói đầu tiên.
     Trả (gói, ghi chú) — gói None khi không gói nào dùng được, ghi chú là lý do.
     """
     prefs = profile_prefs(root)
     auto = prefs.get("auto_switch", acfg.get("auto_switch", True))
-    first = find_profile(acfg, prefer or prefs.get("active"))
-    order = [first] + ([p for p in profiles(acfg) if p["name"] != first["name"]] if auto else [])
+    order = profile_order(root, acfg)[0]
+    if prefer and any(p["name"] == prefer for p in order):
+        order = [p for p in order if p["name"] == prefer] + [p for p in order if p["name"] != prefer]
+    if not auto:
+        order = order[:1]
     reasons = []
     for prof in order:
         if prof["name"] in exclude:

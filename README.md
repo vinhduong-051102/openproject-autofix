@@ -200,3 +200,9 @@ và không có lượt nào đang chạy thì bị xoá: thư mục lượt ch�
 `report_dir`, file trạng thái / khoá, mục trong `qa-history.json` / `qa-fail-count.json` / `qa-pending.json`, các dòng
 inbox chỉ nói về ticket đó. Lượt nào còn commit (không phải merge) chưa có trên remote thì GIỮ LẠI.
 `cleanup.py --dry-run` để xem trước; `cleanup.py SOAR-123` để dọn riêng một ticket.
+
+### Thứ tự dùng gói Claude
+Mặc định (chưa sắp thứ tự) mỗi lượt chạy chọn gói **còn nhiều hạn mức nhất** (còn lại = 100% − mức đã dùng cao hơn
+trong 5 giờ / 7 ngày; gói chưa có dữ liệu coi như còn đủ). Trên trang theo dõi chọn "Theo thứ tự ưu tiên" rồi sắp bằng
+▲ ▼ / "Ưu tiên số 1" (lưu `priority` trong `~/autofix/.profile.json`); gói đầu chạm ngưỡng thì dùng gói kế tiếp (khi bật
+Tự chuyển gói). "Đổi tên" đổi tên gói trong config, kèm hạn mức đã lưu, trạng thái lượt chạy và thứ tự ưu tiên.

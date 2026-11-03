@@ -89,14 +89,17 @@ def state():
     cfg, acfg, root = load()
     os.makedirs(root, exist_ok=True)
     prefs = af.profile_prefs(root)
-    active = af.find_profile(acfg, prefs.get("active"))
+    order, order_mode = af.profile_order(root, acfg)
+    nxt, _ = af.choose_profile(root, acfg)
+    active = nxt or (order[0] if order else {"name": None})
     profs = []
-    for p in af.profiles(acfg):
+    for p in order:
         info, mtime = af.profile_usage(root, acfg, p["name"])
         profs.append({
             "name": p["name"], "config_dir": p["config_dir"], "logged_in": p["logged_in"], "kind": p["kind"],
             "token_tail": af.read_token(p.get("token_file"))[-4:] if p["kind"] == "token" else "",
             "active": p["name"] == active["name"], "block": af.profile_block(root, acfg, p),
+            "remaining": af.profile_remaining(root, acfg, p),
             "five_hour": window(info, "five_hour"), "seven_day": window(info, "seven_day"),
             "status": (info or {}).get("status"), "checked_at": mtime or None,
             # Ngưỡng đang áp dụng cho gói + các ngưỡng gói tự đặt (phần còn lại theo ngưỡng chung).
@@ -118,7 +121,7 @@ def state():
                     reverse=True)
     return {
         "now": time.time(), "watcher": watcher_running(), "op_url": cfg["url"],
-        "auto_switch": prefs.get("auto_switch", acfg.get("auto_switch", True)),
+        "auto_switch": prefs.get("auto_switch", acfg.get("auto_switch", True)), "order_mode": order_mode,
         "limits": {"five_hour": acfg.get("pause_above_utilization"), "seven_day": acfg.get("switch_above_7d"),
                    "followup_7d": acfg.get("followup_skip_above_7d")},
         "profiles": profs, "runs": active_runs + others[:40], "inbox": inbox_tail(cfg),
@@ -554,11 +557,46 @@ def action(body):
         subprocess.run(["systemctl", "--user", verb, "--no-block", j["unit"]], check=True)
         _JOB_CACHE["at"] = 0
         return "Đã %s %s" % ("khởi động lại" if verb == "restart" else "chạy", j["name"])
-    if kind == "use_profile":
+    if kind in ("use_profile", "move_profile"):
+        # Dùng gói này = đưa lên đầu thứ tự ưu tiên; move_profile: dir -1 (lên) / +1 (xuống).
         if body.get("name") not in names:
             raise ValueError("không có gói này")
-        af.save_profile_prefs(root, active=body["name"])
-        return "Lượt chạy tiếp theo dùng " + body["name"]
+        order = [p["name"] for p in af.profile_order(root, acfg)[0]]
+        i = order.index(body["name"])
+        if kind == "use_profile":
+            order.insert(0, order.pop(i))
+        else:
+            j = max(0, min(len(order) - 1, i + (1 if int(body.get("dir") or 1) > 0 else -1)))
+            order[i], order[j] = order[j], order[i]
+        af.save_profile_prefs(root, priority=order)
+        return "Thứ tự ưu tiên: " + " → ".join(order)
+    if kind == "priority_mode":
+        if body.get("mode") == "quota":
+            af.save_profile_prefs(root, priority=[])
+            return "Tự chọn gói còn nhiều hạn mức nhất"
+        order = [p["name"] for p in af.profile_order(root, acfg)[0]]
+        af.save_profile_prefs(root, priority=order)
+        return "Dùng theo thứ tự ưu tiên: " + " → ".join(order)
+    if kind == "rename_profile":
+        old, new = body.get("name"), (body.get("new_name") or "").strip()
+        if old not in names:
+            raise ValueError("không có gói này")
+        if not new or new == old:
+            raise ValueError("cần tên mới")
+        if new in names:
+            raise ValueError("tên %s đã có" % new)
+        if len(new) > 60 or re.search(r"[/\\\x00-\x1f]", new):
+            raise ValueError("tên gói không được chứa / \\ hoặc ký tự điều khiển, tối đa 60 ký tự")
+        if any(s.get("state") in ACTIVE_STATES and s.get("profile") == old and pid_alive(s.get("pid"))
+               for s in af.load_statuses(root)):
+            raise ValueError("%s đang có lượt chạy — đổi tên sau khi chạy xong" % old)
+        entries = profile_entries(acfg)
+        for e in entries:
+            if e["name"] == old:
+                e["name"] = new
+        save_profiles(entries)
+        af.rename_profile_data(root, old, new)
+        return "Đã đổi tên %s → %s" % (old, new)
     if kind == "set_limits":
         fields = {}
         for key, name in LIMIT_KEYS:
