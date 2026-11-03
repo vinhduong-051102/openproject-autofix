@@ -10,7 +10,7 @@ soar_api: gọi API / tải file của môi trường test SOAR (DEPLOY_FE_URL /
     soar_api.py GET $DEPLOY_FE_URL/index.html             # file tĩnh của FE (không cần token)
     soar_api.py --header 'Accept-Language: en' GET /api/...
     soar_api.py --no-auth POST /api/v2/auth/login '{...}'
-    soar_api.py --as vinhduong GET /api/...               # tài khoản khác trong deploy.json (mặc định default_account)
+    soar_api.py --as ten_tai_khoan GET /api/...               # tài khoản khác trong deploy.json (mặc định default_account)
     soar_api.py --as QA_AUTO_khach --password 'Xyz@123' GET /api/...   # tài khoản test QA tự tạo (tên QA_AUTO_*);
                                                            # mật khẩu được nhớ, lần sau chỉ cần --as
 

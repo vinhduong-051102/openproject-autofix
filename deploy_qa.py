@@ -11,7 +11,7 @@ Chạy sau mỗi lần merge_to_dev (12h / 18h), hoặc tay: deploy_qa.py [--dry
    → tar lên images → docker load → đổi image service service-product-content (có backup).
 4. docker compose up -d --force-recreate, chờ FE đúng version + API sống.
 5. QA từng ticket (của mình, đang Resolved) có commit trong bản deploy: Claude test trên server qua soar_api.py.
-   ĐẠT → comment bằng chứng + chuyển người phụ trách sang QA (anh Tám). KHÔNG ĐẠT / KHÔNG TỰ TEST ĐƯỢC → chỉ báo.
+   ĐẠT → comment bằng chứng + chuyển người phụ trách sang QA (QA_USER_NAME). KHÔNG ĐẠT / KHÔNG TỰ TEST ĐƯỢC → chỉ báo.
 
 Cấu hình server + tài khoản test: biến DEPLOY_* / QA_* trong .env và/hoặc ~/.config/op-watch/deploy.json (chmod 600).
 """
@@ -45,8 +45,8 @@ DEFAULTS = {
     "fe_image": "soar-fe-ss",
     "be_image": "soar-be-ss-lastest-k8s",
     "be_release_branch": "release-ss/lastest-k8s",
-    "qa_user_id": 59,          # Tám Lê Văn
-    "qa_user_name": "anh Tám",
+    "qa_user_id": 0,           # id người QA trên OpenProject — đặt QA_USER_ID trong .env
+    "qa_user_name": "QA",
     "wait_minutes": 15,
     # QA bằng Gemini (agy, chỉ đọc): mỗi vòng Gemini trả JSON các request cần gọi, tool gọi qua soar_api.py rồi gửi
     # kết quả lại. "claude" = Claude headless tự gọi soar_api.py (tốn hạn mức Claude).
@@ -86,7 +86,7 @@ bản sửa đã được deploy ({deployed}). Chạy nền, không có người
 - Bản sửa (diff các commit): {qa_dir}/diff.md
 
 ## Công cụ gọi server (DUY NHẤT)
-`python3 {soar_api} <METHOD> <đường dẫn API | URL FE> [body JSON | @file]` — tự đăng nhập tài khoản vinhduong.
+`python3 {soar_api} <METHOD> <đường dẫn API | URL FE> [body JSON | @file]` — tự đăng nhập tài khoản QA mặc định.
 Ví dụ: `python3 {soar_api} GET /api/v1/...`, `python3 {soar_api} POST /api/v1/... '{{"a":1}}'`,
 `python3 {soar_api} UPLOAD /api/v1/file-attachments/upload file=@{qa_dir}/a.txt type=1 caseId=5`,
 `python3 {soar_api} --header 'Accept-Language: en' GET ...`, FE tĩnh: `python3 {soar_api} GET {fe_url}/index.html`.
@@ -120,7 +120,7 @@ Gọi API: mỗi phần tử `calls` gồm
 - SEARCH: tìm trong TOÀN BỘ mã FE đang chạy (index.html + mọi file /assets/*.js, *.css đã tải sẵn); target = đoạn
   chữ hoặc regex (Python) cần tìm, ví dụ một chuỗi i18n, tên class, aria-label, mã màu trong diff. Trả các đoạn khớp
   kèm tên file và ngữ cảnh. Dùng SEARCH để kiểm tra lỗi giao diện thay vì GET file bundle (file rất lớn, bị cắt).
-- target: đường dẫn API bắt đầu bằng `/api/...` (server {api_url}, đã đăng nhập tài khoản vinhduong) hoặc URL FE đầy
+- target: đường dẫn API bắt đầu bằng `/api/...` (server {api_url}, đã đăng nhập tài khoản QA mặc định) hoặc URL FE đầy
   đủ {fe_url}/... (index.html, /assets/*.js để kiểm tra mã giao diện đã deploy)
 - body: JSON dạng chuỗi (POST/PUT/PATCH); với UPLOAD: các trường form, mỗi dòng `ten=gia_tri`
 - header: tuỳ chọn, một header dạng `Accept-Language: en`

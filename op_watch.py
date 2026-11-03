@@ -36,7 +36,7 @@ STATE_PATH = envconf.STATE_PATH
 DEFAULT_INBOX = os.path.expanduser("~/op-watch-inbox.md")
 
 DEFAULTS = {
-    "url": "https://op.cytech.ai",
+    "url": "https://openproject.example.com",  # đặt OP_URL trong .env
     "api_key": "",
     "project": "223",
     # id trạng thái: New = 1, Reopened = 100 (Resolved = 95, Closed = 12)
