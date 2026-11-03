@@ -139,6 +139,10 @@ Chỉ sửa trong 2 thư mục này. Không tạo nhánh / worktree khác, khôn
    BE `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml test -Dtest='<Test liên quan>' -Dsurefire.failIfNoSpecifiedTests=false`
    rồi `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml compile -DskipTests`.
    KHÔNG dùng `cd … && …` (bị chặn): git luôn dùng `git -C {fe_dir} …` / `git -C {be_dir} …`, Maven dùng `-f`.
+   Thư mục làm việc hiện tại ĐÃ LÀ {fe_dir}: chạy FE đúng nguyên văn `npm run build` (không `--prefix`, không `cd`).
+   Một lệnh bị từ chối quyền KHÔNG có nghĩa là Bash bị cấm — đổi sang đúng dạng lệnh được phép ở trên rồi làm tiếp.
+   Vẫn không chạy được bước kiểm tra nào thì VẪN commit phần đã sửa (công cụ tự build + test lại trước khi push) và
+   ghi rõ trong báo cáo; KHÔNG kết luận KHÔNG SỬA ĐƯỢC chỉ vì không chạy được build / test.
 4. Commit trên nhánh hiện tại của worktree (`git -C <worktree> add …` rồi `git -C <worktree> commit …`), mỗi ticket một
    commit mỗi repo, message:
    `[{display_id}] - {subject}` + dòng trống + mô tả ngắn tiếng Việt không dấu + dòng trống +
@@ -197,7 +201,8 @@ def write_rules(run_dir):
     # Chỉ đúng 2 worktree của lượt chạy; push/fetch/checkout/branch/reset… vẫn bị chặn ở DISALLOWED_TOOLS.
     read_git = ["Bash(git -C %s/%s %s*)" % (base, sub, cmd)
                 for sub in ("fe", "be") for cmd in ("log", "show", "diff", "status", "blame", "add", "commit", "grep")]
-    return ["Edit(%s)" % scope, "Write(%s)" % scope] + read_git
+    npm = ["Bash(npm --prefix %s/fe run %s*)" % (base, c) for c in ("build", "lint")]
+    return ["Edit(%s)" % scope, "Write(%s)" % scope] + read_git + npm
 
 
 def log(msg):
