@@ -622,7 +622,7 @@ def action(body):
                 msgs.append("QA server %d" % n)
         if not msgs:
             raise ValueError("chưa nhập số agent")
-        return "Đã lưu số agent song song: " + ", ".join(msgs) + " (áp dụng cho lượt chạy mới)"
+        return "Đã lưu số agent song song: " + ", ".join(msgs) + " (áp dụng ngay cho các lượt đang xếp hàng; lượt đang chạy vẫn chạy tiếp)"
     if kind == "merge_schedule":
         times = []
         for t in body.get("times") or []:

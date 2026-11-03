@@ -538,17 +538,41 @@ def resolve_conflicts(acfg, work, what):
     return note
 
 
+def current_max_parallel(acfg):
+    """max_parallel mới nhất (trang theo dõi có thể đổi trong lúc lượt chạy đang xếp hàng)."""
+    try:
+        cfg = op_watch.load_config(argparse.Namespace(config=None, interval=None, on_change=None, no_notify=True))
+        return max(1, int((cfg.get("autofix") or {}).get("max_parallel") or acfg.get("max_parallel") or 1))
+    except (SystemExit, OSError, ValueError, TypeError):
+        return max(1, int(acfg.get("max_parallel") or 1))
+
+
 def acquire_slot(root, acfg, wait=True):
-    """Giữ một trong max_parallel suất chạy (file lock). wait=False: hết suất thì trả None ngay."""
-    n = max(1, int(acfg.get("max_parallel") or 1))
+    """
+    Giữ một suất chạy (file lock .run-slot-N.lock). Số suất = max_parallel đọc lại mỗi lần thử, nên đổi số agent trên
+    trang theo dõi áp dụng ngay cho các lượt đang xếp hàng. Đếm số suất đang bị giữ thật (kể cả suất có số thứ tự ≥ số
+    mới khi vừa giảm) — đang chạy đủ số mới thì chờ. wait=False: hết suất thì trả None ngay.
+    """
     while True:
-        for i in range(n):
+        n = current_max_parallel(acfg)
+        existing = [int(m.group(1)) for m in (re.match(r"^\.run-slot-(\d+)\.lock$", f) for f in os.listdir(root)) if m]
+        held, mine = 0, None
+        for i in range(max([n - 1] + existing) + 1):
             fh = open(os.path.join(root, ".run-slot-%d.lock" % i), "w")
             try:
                 fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return fh
             except OSError:
                 fh.close()
+                held += 1
+                continue
+            if mine is None and i < n:
+                mine = fh
+            else:
+                fh.close()  # đóng file = nhả khoá
+        if mine is not None and held < n:
+            return mine
+        if mine is not None:
+            mine.close()
         if not wait:
             return None
         time.sleep(5)

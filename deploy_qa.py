@@ -1098,9 +1098,31 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             done.add(display_id)
             save_pending(set(waiting) - done | set(remaining), "đang QA")
 
-    workers = max(1, int(dcfg.get("qa_parallel") or 1))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        list(pool.map(one, list(tickets)))
+    # Số ticket QA cùng lúc đọc lại từ cấu hình mỗi vài giây: đổi trên trang theo dõi thì áp dụng ngay cho các ticket
+    # còn đang xếp hàng trong lượt này (ticket đang test vẫn chạy tiếp).
+    gate = threading.Condition()
+    active = {"n": 0}
+
+    def limit():
+        try:
+            return max(1, int(envconf.deploy_config().get("qa_parallel") or dcfg.get("qa_parallel") or 1))
+        except (ValueError, TypeError):
+            return max(1, int(dcfg.get("qa_parallel") or 1))
+
+    def gated(display_id):
+        with gate:
+            while active["n"] >= limit() and not stop["msg"]:
+                gate.wait(3)
+            active["n"] += 1
+        try:
+            one(display_id)
+        finally:
+            with gate:
+                active["n"] -= 1
+                gate.notify_all()
+
+    with ThreadPoolExecutor(max_workers=min(10, max(1, len(tickets)))) as pool:
+        list(pool.map(gated, list(tickets)))
     if stop["msg"]:
         msg = "server 86 thay đổi trong lúc QA %s — tạm dừng, %d ticket vào hàng chờ: %s" % (
             stop["msg"], len(remaining), ", ".join(remaining))
