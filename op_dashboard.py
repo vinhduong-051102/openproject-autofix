@@ -403,7 +403,8 @@ def review_queue(force=False):
     d = _REVIEWQ["data"] or {}
     return {"items": d.get("items", []), "build": d.get("build"), "server_up": d.get("server_up"),
             "checked_at": d.get("at"), "error": _REVIEWQ["error"], "busy": _REVIEWQ["busy"],
-            "running": os.path.exists(os.path.join(load()[2], ".qa-active"))}
+            "running": os.path.exists(os.path.join(load()[2], ".qa-active")),
+            "qa_name": envconf.deploy_config().get("qa_user_name") or "người QA"}
 
 
 def gemini_usage(force=False):
@@ -671,6 +672,19 @@ def action(body):
         review_queue(force=True)
         _JOB_CACHE["at"] = 0
         return "Đang kiểm tra OpenProject ngay (task mới / Reopened / comment) và làm mới danh sách chờ QA"
+    if kind == "review_qa_one":
+        tid = (body.get("display_id") or "").strip()
+        if not re.match(r"^[A-Z][A-Z0-9]*-\d+$", tid):
+            raise ValueError("mã ticket không hợp lệ")
+        if os.path.exists(os.path.join(root, ".qa-active")):
+            raise ValueError("đang có lượt QA khác chạy trên server — chờ xong rồi bấm lại")
+        if subprocess.run(["systemctl", "--user", "is-active", "--quiet", "op-merge.service"]).returncode == 0:
+            raise ValueError("đang merge + deploy — chờ xong rồi bấm lại")
+        subprocess.Popen([sys.executable, os.path.join(HERE, "deploy_qa.py"), "--qa", tid, "--force"], cwd=HERE,
+                         stdout=open(os.path.join(root, ".review-watch.log"), "a"), stderr=subprocess.STDOUT,
+                         start_new_session=True)
+        _REVIEWQ["at"] = 0
+        return "Đang QA %s trên server (bản đang chạy, kể cả khi chưa có commit) — kết quả hiện ở Hoạt động · QA 86" % tid
     if kind == "review_qa_now":
         subprocess.Popen([sys.executable, os.path.join(HERE, "deploy_qa.py"), "--review-watch"], cwd=HERE,
                          stdout=open(os.path.join(root, ".review-watch.log"), "a"), stderr=subprocess.STDOUT,

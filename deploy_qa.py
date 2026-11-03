@@ -336,6 +336,8 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
         ticket = f.read()[-20000:]
     with open(os.path.join(qa_dir, "diff.md"), encoding="utf-8") as f:
         diff = f.read()[:30000]
+    if not diff.strip():
+        diff = "(Không có commit sửa nào gắn mã ticket — QA kiểm tra hành vi hiện tại trên server theo mô tả + comment của ticket: đã đúng kết quả mong đợi → ĐẠT, chưa đúng → KHÔNG ĐẠT.)"
     schema = os.path.join(qa_dir, "qa-schema.json")
     with open(schema, "w", encoding="utf-8") as f:
         json.dump(QA_SCHEMA, f, ensure_ascii=False)
@@ -941,7 +943,7 @@ def review_watch():
         run_all(only=cands, auto_only=True)
 
 
-def run_all(dry_run=False, only=None, auto_only=False):
+def run_all(dry_run=False, only=None, auto_only=False, force=False):
     cfg, acfg, dcfg = load()
     root = os.path.expanduser(acfg["root"])
     os.makedirs(root, exist_ok=True)
@@ -1020,14 +1022,14 @@ def run_all(dry_run=False, only=None, auto_only=False):
     open(QA_ACTIVE, "w").close()
     try:
         _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
-                 waiting, remaining, done, auto=auto)
+                 waiting, remaining, done, auto=auto, force=set(only or []) if force else set())
     finally:
         if os.path.exists(QA_ACTIVE):
             os.remove(QA_ACTIVE)
 
 
 def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
-             waiting, remaining, done, auto=()):
+             waiting, remaining, done, auto=(), force=()):
     """QA các ticket, tối đa qa_parallel ticket cùng lúc (Gemini); server đổi giữa chừng thì dừng tất cả."""
     mu = threading.Lock()
     stop = {"msg": None}
@@ -1044,7 +1046,11 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         fe_hashes = [h for label, _, hs in hashes if label == "FE" for h in hs]
         be_hashes = [h for label, _, hs in hashes if label == "BE" for h in hs]
         build = "%s|%s" % (baseline.get("fe"), baseline.get("be"))
-        if display_id in auto:
+        if display_id in force:
+            # QA tay từ trang theo dõi: bỏ điều kiện commit / bản đang chạy có bản sửa (vd ticket không cần sửa code).
+            log("%s: QA theo yêu cầu (bỏ qua điều kiện commit: FE %d, BE %d commit)"
+                % (display_id, len(fe_hashes), len(be_hashes)))
+        elif display_id in auto:
             # Ticket Resolved lấy từ OpenProject: chỉ QA khi chắc bản đang chạy có bản sửa, và chưa QA trên bản này.
             def drop(why):
                 log("%s: %s — chưa QA" % (display_id, why))
@@ -1109,6 +1115,8 @@ def main():
     parser = argparse.ArgumentParser(description="Deploy lên server test 86 rồi QA tự động từng ticket.")
     parser.add_argument("--dry-run", action="store_true", help="chỉ liệt kê commit / ticket chưa deploy")
     parser.add_argument("--qa", nargs="+", metavar="TICKET", help="chỉ QA các ticket này trên bản đang chạy")
+    parser.add_argument("--force", action="store_true",
+                        help="cùng --qa: QA kể cả khi chưa có commit / bản đang chạy chưa có bản sửa")
     parser.add_argument("--review-watch", action="store_true",
                         help="QA ngay ticket của mình ở trạng thái qa_review_status_ids chưa QA trên bản đang chạy "
                              "(op-watch gọi định kỳ)")
@@ -1118,7 +1126,7 @@ def main():
     if args.review_watch:
         review_watch()
         return
-    run_all(dry_run=args.dry_run, only=args.qa)
+    run_all(dry_run=args.dry_run, only=args.qa, force=bool(args.force and args.qa))
 
 
 if __name__ == "__main__":

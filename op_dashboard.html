@@ -210,6 +210,8 @@ header { flex-wrap: wrap; min-width: 0; }
 .tchip input { width: 64px; text-align: center; font-family: var(--mono); }
 
 .rq .verdict.muted { color: var(--text-3); }
+.rq .rq-act { grid-column: 2 / 4; margin-top: 4px; }
+.rq .rq-act button { padding: 2px 10px; font-size: 12px; }
 .rq .id a { color: inherit; text-decoration: none; }
 .rq .id a:hover { text-decoration: underline; }
 #reviewHint code { font-size: 11.5px; }
@@ -699,9 +701,19 @@ function renderReview() {
       <span class="when">${x.last && x.last.at ? esc(x.last.at.slice(5, 16).replace("T", " ")) : ""}</span>
       <span class="verdict" title="${esc(x.subject)}">${esc(x.subject)}</span>
       <span class="verdict muted" title="${esc(x.note)}">${esc(x.note)}${x.last && x.last.verdict && x.state !== "done" ? ` · lần trước: ${esc(x.last.verdict)}` : ""}</span>
+      <span class="p-actions rq-act"><button data-rqone="${esc(x.display_id)}" ${q.running ? "disabled" : ""}
+        title="${x.state === "no_commit" ? "Chưa có commit: QA kiểm tra hành vi hiện tại trên server theo mô tả ticket" : x.state === "not_deployed" ? "Bản sửa chưa lên server: QA trên bản đang chạy (có thể KHÔNG ĐẠT)" : "QA ngay trên bản đang chạy"}">QA trên server${x.state === "done" ? " lại" : ""}</button></span>
     </div>`;
   }).join("");
   if ($("reviewNow")) $("reviewNow").onclick = () => post({action: "review_qa_now"});
+  document.querySelectorAll("[data-rqone]").forEach((b) => b.onclick = () => {
+    const x = list.find((i) => i.display_id === b.dataset.rqone) || {};
+    const warn = x.state === "no_commit" ? "\n\nTicket chưa có commit: QA sẽ kiểm tra hành vi hiện tại trên server theo mô tả ticket."
+      : x.state === "not_deployed" ? "\n\nBản sửa chưa lên server: QA trên bản đang chạy có thể KHÔNG ĐẠT." : "";
+    if (confirm(`QA ${b.dataset.rqone} trên server ngay?${warn}\nĐẠT → chuyển Resolved + ${(S.review_queue || {}).qa_name || "người QA"}.`)) {
+      b.disabled = true; post({action: "review_qa_one", display_id: b.dataset.rqone});
+    }
+  });
 }
 function renderInbox() {
   $("inbox").innerHTML = S.inbox.map((l) => `<div>${esc(l).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</div>`).join("") || '<div>Trống</div>';
