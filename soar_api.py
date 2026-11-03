@@ -47,6 +47,29 @@ def load_config():
     return cfg
 
 
+RESET_RX = re.compile(r"/api/v\d+/users/(reset-password|change-password|lock|unlock|force-logout)", re.I)
+
+
+def guard_tester_accounts(cfg, method, target):
+    """Không cho QA đặt lại mật khẩu / khoá / đăng xuất cưỡng bức người dùng: tài khoản tester dùng chung với người thật."""
+    if method != "GET" and RESET_RX.search(urllib.parse.urlsplit(target).path):
+        m = re.search(r"/(\d+)(?:$|[/?])", urllib.parse.urlsplit(target).path)
+        if not m or not _is_qa_auto(cfg, m.group(1)):
+            sys.exit("Chỉ được đặt lại mật khẩu / khoá tài khoản QA_AUTO_* (id %s không phải QA_AUTO_*)" % (m.group(1) if m else "?"))
+
+
+def _is_qa_auto(cfg, user_id):
+    """Hỏi server user id này có tên QA_AUTO_* không (bằng tài khoản mặc định)."""
+    try:
+        name, pw = credentials(cfg, None)
+        token = shared_login(cfg, name, pw)
+        code, _, body = send("GET", cfg["api_url"].rstrip("/") + "/api/v1/users/%s" % user_id, None,
+                             {"Authorization": "Bearer " + token})
+        return code == 200 and str((json.loads(body or b"{}").get("data") or {}).get("username", "")).startswith("QA_AUTO_")
+    except (ValueError, OSError, SystemExit):
+        return False
+
+
 def resolve(cfg, target):
     if target.startswith("/"):
         return cfg["api_url"].rstrip("/") + target
@@ -66,13 +89,17 @@ def send(method, url, body=None, headers=None):
 
 
 def credentials(cfg, name, password=None):
-    """(username, password) của tài khoản: trong deploy.json, hoặc tài khoản test QA_AUTO_* (mật khẩu truyền / đã nhớ)."""
+    """(username, password): tài khoản trong deploy.json; tài khoản test QA_AUTO_*; hoặc tài khoản tester ghi trong ticket
+    (nằm trong qa_ticket_accounts) — hai loại sau: mật khẩu truyền --password lần đầu, tool nhớ."""
     accounts = cfg.get("accounts") or {cfg["app_user"]: {"password": cfg["app_password"]}}
     name = name or cfg.get("default_account") or cfg["app_user"]
     if name in accounts:
         return name, accounts[name]["password"]
-    if not name.startswith("QA_AUTO_"):
-        sys.exit("Tài khoản %s không có trong deploy.json; tài khoản test tự tạo phải tên QA_AUTO_*" % name)
+    ticket_accounts = set(cfg.get("qa_ticket_accounts") or [])
+    if not name.startswith("QA_AUTO_") and name not in ticket_accounts:
+        sys.exit("Tài khoản %s không có trong deploy.json; tài khoản test tự tạo phải tên QA_AUTO_*; tài khoản tester "
+                 "ghi trong ticket phải nằm trong qa_ticket_accounts (%s)"
+                 % (name, ", ".join(sorted(ticket_accounts)) or "đang trống"))
     saved = {}
     if os.path.exists(QA_ACCOUNTS):
         with open(QA_ACCOUNTS, encoding="utf-8") as f:
@@ -84,7 +111,7 @@ def credentials(cfg, name, password=None):
             json.dump(saved, f)
         os.chmod(QA_ACCOUNTS, 0o600)
     if name not in saved:
-        sys.exit("Chưa biết mật khẩu của %s: truyền --password (lấy từ PUT /api/v1/users/reset-password/{id})" % name)
+        sys.exit("Chưa biết mật khẩu của %s: truyền --password (QA_AUTO_*: lấy từ PUT /api/v1/users/reset-password/{id}; tài khoản tester: mật khẩu ghi trong ticket)" % name)
     return name, saved[name]
 
 
@@ -173,6 +200,7 @@ def main():
     method, target, rest = args[0].upper(), args[1], args[2:]
     cfg = load_config()
     url = resolve(cfg, target)
+    guard_tester_accounts(cfg, "POST" if method == "UPLOAD" else method, url)
     body, headers = None, dict(extra)
     if method == "UPLOAD":
         method = "POST"

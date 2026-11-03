@@ -54,6 +54,9 @@ DEFAULTS = {
     # kết quả lại. "claude" = Claude headless tự gọi soar_api.py (tốn hạn mức Claude).
     "qa_engine": "gemini",
     "qa_rounds": 6,
+    # tài khoản tester được phép dùng khi ticket ghi sẵn tên + mật khẩu (vd tài khoản tenancy con) — đặt trong
+    # deploy.json "qa_ticket_accounts" hoặc QA_TICKET_ACCOUNTS (cách nhau dấu phẩy) trong .env
+    "qa_ticket_accounts": [],
     "qa_model": "gemini-3.8-flash-medium",
     "qa_calls_per_round": 8,
     "be_container": "soar",
@@ -101,7 +104,9 @@ Chạy `python3 {soar_api}` không tham số để xem hướng dẫn. File test
    (index.html → file /assets/*.js liên quan) có đúng thay đổi trong diff không. Không đủ chắc → KHÔNG TỰ TEST ĐƯỢC.
 3. AN TOÀN — môi trường dùng chung với tester: không xoá / sửa dữ liệu không do mình tạo; dữ liệu test đặt tên bắt đầu
    `QA_AUTO_` và dọn lại nếu API cho phép; đổi cấu hình hệ thống thì trả lại giá trị cũ ngay sau khi test.
-   Không gọi host khác, không dùng tài khoản khác.
+   Không gọi host khác. Tài khoản: mặc định của soar_api; tài khoản test QA_AUTO_* tự tạo; hoặc tài khoản tester ghi
+   trong ticket nếu tên thuộc [{ticket_accounts}] (`--as <tên> --password '<mật khẩu trong ticket>'` lần đầu) — KHÔNG
+   đổi mật khẩu / thông tin / trạng thái của tài khoản tester, chỉ sửa / xoá dữ liệu do mình tạo.
 
 ## Báo cáo (bắt buộc)
 Ghi {qa_dir}/qa.md bằng tiếng Việt. Dòng đầu đúng một trong: `QA: ĐẠT` | `QA: KHÔNG ĐẠT` | `QA: KHÔNG TỰ TEST ĐƯỢC`
@@ -129,13 +134,20 @@ Gọi API: mỗi phần tử `calls` gồm
 - file_name + file_content: (UPLOAD) tên và nội dung file văn bản sẽ gửi ở trường `file`. file_name được gửi NGUYÊN
   VĂN (kể cả "/", "\\", "<", Unicode); file_content "" = file rỗng 0 byte; bỏ trường file_content = nội dung mặc định
 - account: tuỳ chọn, gọi bằng tài khoản nào (mặc định QA_superadmin — FULL quyền); password: chỉ khi lần đầu dùng
-  một tài khoản test QA_AUTO_* vừa tạo (sau đó tool nhớ, chỉ cần account)
+  một tài khoản test QA_AUTO_* vừa tạo, hoặc tài khoản tester ghi trong ticket (sau đó tool nhớ, chỉ cần account)
 - why: gọi để kiểm tra gì
 - parallel: true trên các request của CÙNG một vòng → các request đó được gửi đồng thời (test tranh chấp / gửi trùng)
 Tối đa {max_calls} request mỗi vòng; response dài bị cắt.
 
-Tài khoản: mặc định QA_superadmin (FULL quyền). Bug về phân quyền / phạm vi dữ liệu / loại tài khoản (khách hàng, phòng
-ban khác, thiếu quyền…) thì TỰ TẠO tài khoản test phù hợp bằng QA_superadmin rồi gọi lại bằng tài khoản đó:
+Tài khoản: mặc định QA_superadmin (FULL quyền).
+TÀI KHOẢN TESTER TRONG TICKET — ƯU TIÊN: ticket ghi sẵn tài khoản tester (tên + mật khẩu, kể cả mật khẩu chỉ ghi ở
+ticket/comment khác cùng tài khoản) và tên đó thuộc danh sách được phép [{ticket_accounts}] → gọi thẳng bằng tài khoản
+đó: account="<tên>", password="<mật khẩu trong ticket>" ở lần gọi đầu. Đặc biệt bug cách ly tenancy (tenancy con không
+tạo được tài khoản QA_AUTO_* đăng nhập được). Tài khoản tester dùng chung với người thật: KHÔNG đổi mật khẩu, thông tin,
+quyền, trạng thái của chính các tài khoản đó; chỉ sửa / xoá dữ liệu do mình tạo trong lần test (tên bắt đầu QA_).
+Mật khẩu sai / tài khoản không có trong danh sách → dùng cách tạo tài khoản QA_AUTO_* bên dưới.
+Bug về phân quyền / phạm vi dữ liệu / loại tài khoản (khách hàng, phòng ban khác, thiếu quyền…) mà ticket không có tài
+khoản dùng được thì TỰ TẠO tài khoản test phù hợp bằng QA_superadmin rồi gọi lại bằng tài khoản đó:
 1. Phòng ban + vai trò: POST /api/v1/users/list/roles/departments?department_id=<id> body `{{}}` (vai trò của phòng ban);
    danh sách user để biết phòng ban: POST /api/v1/users/filter body `{{"page":0,"size":20}}`; khách hàng: GET /api/v1/customers/list
 2. Tạo: POST /api/v1/users body (snake_case) `{{"username":"QA_AUTO_<mô_tả>","full_name":"QA AUTO …",
@@ -322,6 +334,7 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
         prompt = GEMINI_QA_PROMPT.format(
             display_id=display_id, deployed=deployed, api_url=dcfg["api_url"], fe_url=dcfg["fe_url"],
             max_calls=dcfg["qa_calls_per_round"], delete_allow=", ".join(dcfg.get("qa_delete_allow", [])) or "không",
+            ticket_accounts=", ".join(dcfg.get("qa_ticket_accounts") or []) or "trống — không dùng",
             round=rnd, rounds=rounds, ticket=ticket, diff=diff,
             last_round=" ĐÂY LÀ VÒNG CUỐI: phải done=true và kết luận." if last else "",
             transcript="\n\n".join(transcript)[-60000:] or "(chưa gọi gì)")
@@ -741,7 +754,8 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
         gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard)
     else:
         prompt = QA_PROMPT.format(display_id=display_id, subject=wp.get("subject", ""), deployed=deployed,
-                                  qa_dir=qa_dir, soar_api=SOAR_API, fe_url=dcfg["fe_url"])
+                                  qa_dir=qa_dir, soar_api=SOAR_API, fe_url=dcfg["fe_url"],
+                                  ticket_accounts=", ".join(dcfg.get("qa_ticket_accounts") or []) or "trống — không dùng")
         with open(os.path.join(qa_dir, "prompt.md"), "w", encoding="utf-8") as f:
             f.write(prompt)
         scope = "/" + qa_dir + "/**"
