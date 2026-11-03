@@ -208,6 +208,12 @@ header { flex-wrap: wrap; min-width: 0; }
 .sched-row .muted { color: var(--text-3); font-size: 12px; }
 .tchip { display: inline-flex; align-items: center; gap: 2px; margin-right: 4px; }
 .tchip input { width: 64px; text-align: center; font-family: var(--mono); }
+
+.rq .verdict.muted { color: var(--text-3); }
+.rq .id a { color: inherit; text-decoration: none; }
+.rq .id a:hover { text-decoration: underline; }
+#reviewHint code { font-size: 11.5px; }
+#reviewHint .primary { margin-left: 6px; padding: 2px 10px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -229,6 +235,11 @@ header { flex-wrap: wrap; min-width: 0; }
       <h2>Chờ Claude xem lại <span class="right" id="pendingCount"></span></h2>
       <div class="hint" id="pendingReady"></div>
       <div id="pending"></div>
+    </section>
+    <section id="reviewBox" hidden>
+      <h2>Chờ QA trên server <span class="right" id="reviewCount"></span></h2>
+      <div class="hint" id="reviewHint"></div>
+      <div id="reviewList"></div>
     </section>
     <section>
       <h2>Hoạt động <span class="right" id="actCount"></span></h2>
@@ -613,6 +624,31 @@ function renderPending() {
   document.querySelectorAll("[data-fdrop]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); confirm(`Bỏ ${b.dataset.fdrop} khỏi hàng chờ? Ticket vẫn ở TO DO.`) && post({action: "followup_drop", display_id: b.dataset.fdrop}); });
   document.querySelectorAll("#pending .run").forEach((el) => el.onclick = () => select(el.dataset.id));
 }
+const RQ = {waiting: ["Chờ QA", "accent"], not_deployed: ["Chưa deploy", "warn"], no_commit: ["Chưa merge", "warn"], done: ["Đã QA", "ok"]};
+function renderReview() {
+  const q = S.review_queue || {}, list = q.items || [];
+  $("reviewBox").hidden = !list.length;
+  if (!list.length) return;
+  const wait = list.filter((x) => x.state === "waiting").length;
+  $("reviewCount").textContent = `${list.length} ticket${wait ? ` · ${wait} sẵn sàng QA` : ""}`;
+  $("reviewHint").innerHTML = (q.running ? "Đang QA trên server… " : "")
+    + `Bản đang chạy: <code>${esc(q.build || "?")}</code>${q.server_up === false ? ' · <b class="crit">server không trả lời</b>' : ""}`
+    + ` · op-watch kiểm tra mỗi 10 phút${q.checked_at ? ` · cập nhật ${fmtTime(q.checked_at)}` : ""}`
+    + (wait && !q.running ? ` <button class="primary" id="reviewNow">QA ngay</button>` : "")
+    + (q.error ? `<div class="crit">${esc(q.error)}</div>` : "");
+  $("reviewList").innerHTML = list.map((x) => {
+    const [label, cls] = RQ[x.state] || [x.state, ""];
+    const href = x.wp_id ? `${S.op_url}/work_packages/${x.wp_id}` : "";
+    return `<div class="run rq">
+      <span class="id">${href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(x.display_id)}</a>` : esc(x.display_id)}</span>
+      <span><span class="badge ${cls}">${label}</span> ${x.status ? `<span class="badge">${esc(x.status)}</span>` : ""}</span>
+      <span class="when">${x.last && x.last.at ? esc(x.last.at.slice(5, 16).replace("T", " ")) : ""}</span>
+      <span class="verdict" title="${esc(x.subject)}">${esc(x.subject)}</span>
+      <span class="verdict muted" title="${esc(x.note)}">${esc(x.note)}${x.last && x.last.verdict && x.state !== "done" ? ` · lần trước: ${esc(x.last.verdict)}` : ""}</span>
+    </div>`;
+  }).join("");
+  if ($("reviewNow")) $("reviewNow").onclick = () => post({action: "review_qa_now"});
+}
 function renderInbox() {
   $("inbox").innerHTML = S.inbox.map((l) => `<div>${esc(l).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</div>`).join("") || '<div>Trống</div>';
 }
@@ -810,7 +846,7 @@ async function refresh() {
   try {
     S = await (await fetch("/api/state")).json();
     $("updated").textContent = "Cập nhật " + new Date().toLocaleTimeString("vi-VN");
-    renderChips(); renderAgents(); renderProfiles(); renderSummaries(); renderPending(); renderActs(); renderInbox();
+    renderChips(); renderAgents(); renderProfiles(); renderSummaries(); renderPending(); renderReview(); renderActs(); renderInbox();
     if (selKind !== "run") { renderOther(true); return; }
     if (!sel) { const f = activities()[0]; if (f) { if (f.kind === "run") select(f.key); else selectOther(f.kind, f.key); } return; }
     const r = current(), head = document.querySelector(".detail-head .badge");

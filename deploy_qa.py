@@ -866,6 +866,47 @@ def qa_history(display_id=None, build=None, verdict=None):
     return data.get(display_id) if display_id else data
 
 
+def review_queue(api=None):
+    """
+    Ticket giao cho mình ở trạng thái qa_review_status_ids (vd Review) + hàng chờ QA: tình trạng từng ticket cho trang
+    theo dõi. Mỗi mục: display_id, wp_id, subject, status, state (waiting | no_commit | not_deployed | done), note,
+    last (kết quả QA gần nhất), build (bản đang chạy).
+    """
+    cfg, acfg, dcfg = load()
+    api = api or op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    review_ids = [str(x) for x in dcfg.get("qa_review_status_ids") or []]
+    wps = api.my_work_packages(cfg["project"], review_ids) if review_ids else []
+    queued = set(load_pending())
+    fp = fingerprint(dcfg)
+    build = "%s|%s" % (fp.get("fe"), fp.get("be"))
+    out = []
+    for w in wps:
+        t = w.get("displayId") or "WP-%s" % w["id"]
+        last = qa_history(t) or {}
+        fe_h = [l.split()[0] for l in git_lines(acfg["fe_repo"], "log", "--no-merges", "-F", "--grep=[%s]" % t,
+                                                 "--format=%H", "origin/" + acfg["fe_upstream"])]
+        be_h = [l.split()[0] for l in git_lines(acfg["be_repo"], "log", "--no-merges", "-F", "--grep=[%s]" % t,
+                                                 "--format=%H", "origin/" + acfg["be_upstream"])]
+        if last.get("build") == build:
+            state, note = "done", "đã QA trên bản này: %s" % last.get("verdict")
+        elif not fe_h and not be_h:
+            state, note = "no_commit", "chưa có commit [%s] trên %s / %s" % (t, acfg["fe_upstream"], acfg["be_upstream"])
+        elif (fe_h and fe_contains(acfg, fp.get("fe"), fe_h) is not True) or \
+                (be_h and be_contains(acfg, fp.get("be"), be_h) is not True):
+            state, note = "not_deployed", "bản đang chạy chưa có bản sửa — chờ đợt merge + deploy"
+        else:
+            state, note = "waiting", "chờ lượt kiểm tra kế tiếp (tối đa 10 phút)"
+        out.append({"display_id": t, "wp_id": w["id"], "subject": w.get("subject", ""),
+                    "status": (w["_links"].get("status") or {}).get("title"), "state": state, "note": note,
+                    "fe_commits": len(fe_h), "be_commits": len(be_h), "last": last, "queued": t in queued})
+    seen = {x["display_id"] for x in out}
+    for t in sorted(queued - seen):
+        out.append({"display_id": t, "wp_id": None, "subject": "", "status": "hàng chờ QA", "state": "waiting",
+                    "note": "trong hàng chờ QA (đợt deploy trước chưa test xong)", "last": qa_history(t) or {},
+                    "queued": True})
+    return {"items": out, "build": build, "server_up": bool(fp.get("fe")), "at": time.time()}
+
+
 def review_watch():
     """
     op-watch gọi định kỳ (on_tick): ticket giao cho mình vừa chuyển sang trạng thái qa_review_status_ids (vd Review) mà

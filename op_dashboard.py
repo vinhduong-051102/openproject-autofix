@@ -129,7 +129,7 @@ def state():
         # Lý do hàng chờ chưa chạy được (rỗng = đã có gói còn hạn mức).
         "pending_ready": followup_block(root, acfg),
         **jobs(),
-        "gemini": gemini_usage(), "parallel": parallel_settings(acfg),
+        "gemini": gemini_usage(), "parallel": parallel_settings(acfg), "review_queue": review_queue(),
         "running_now": sum(1 for r in runs if r["state"] in ("preparing", "running", "shipping")),
     }
 
@@ -380,6 +380,31 @@ def _probe_gemini():
         _GEMINI["busy"] = False
 
 
+_REVIEWQ = {"at": 0, "data": None, "busy": False, "error": ""}
+REVIEWQ_TTL = 60
+
+
+def _load_review_queue():
+    try:
+        import deploy_qa
+        _REVIEWQ.update(data=deploy_qa.review_queue(), error="")
+    except Exception as ex:  # noqa: BLE001
+        _REVIEWQ.update(error="không đọc được ticket chờ QA: %s" % str(ex)[:150])
+    finally:
+        _REVIEWQ.update(at=time.time(), busy=False)
+
+
+def review_queue(force=False):
+    """Ticket Review / hàng chờ đang chờ QA trên server (cache 60 giây, đọc nền: cần OpenProject + ssh server)."""
+    if (force or time.time() - _REVIEWQ["at"] > REVIEWQ_TTL) and not _REVIEWQ["busy"]:
+        _REVIEWQ["busy"] = True
+        threading.Thread(target=_load_review_queue, daemon=True).start()
+    d = _REVIEWQ["data"] or {}
+    return {"items": d.get("items", []), "build": d.get("build"), "server_up": d.get("server_up"),
+            "checked_at": d.get("at"), "error": _REVIEWQ["error"], "busy": _REVIEWQ["busy"],
+            "running": os.path.exists(os.path.join(load()[2], ".qa-active"))}
+
+
 def gemini_usage(force=False):
     """Hạn mức Gemini (cache 5 phút, đọc nền để không chặn trang)."""
     if _GEMINI["data"] is None and not _GEMINI["at"]:
@@ -624,6 +649,12 @@ def action(body):
         _JOB_CACHE["at"] = 0
         d = time.strptime(until, "%Y-%m-%d")
         return "Hoãn các lượt merge + deploy tự động tới hết %s (bấm Chạy ngay vẫn chạy)" % time.strftime("%d/%m", d)
+    if kind == "review_qa_now":
+        subprocess.Popen([sys.executable, os.path.join(HERE, "deploy_qa.py"), "--review-watch"], cwd=HERE,
+                         stdout=open(os.path.join(root, ".review-watch.log"), "a"), stderr=subprocess.STDOUT,
+                         start_new_session=True)
+        _REVIEWQ["at"] = 0
+        return "Đang QA các ticket Review chưa QA trên bản đang chạy (bỏ qua nếu đang có merge / QA khác)"
     if kind == "probe_gemini":
         gemini_usage(force=True)
         return "Đang cập nhật hạn mức Gemini…"
