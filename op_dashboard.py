@@ -219,7 +219,7 @@ def qa_runs(root, cfg, merge_running, n=15):
         verdict, state = final.get(d), "done"
         if not verdict and os.path.exists(qa_md):
             with open(qa_md, encoding="utf-8", errors="replace") as f:
-                m = re.search(r"QA:\s*(KHÔNG ĐẠT|ĐẠT|KHÔNG TỰ TEST ĐƯỢC)", f.read(300))
+                m = re.search(r"QA:\s*(KHÔNG RÕ YÊU CẦU|KHÔNG ĐẠT|ĐẠT|KHÔNG TỰ TEST ĐƯỢC)", f.read(300))
             verdict = m.group(1) if m else "không đọc được kết luận"
         if not verdict:
             # Chưa có qa.md: lượt mới nhất khi job merge còn chạy là đang test, còn lại là bị ngắt giữa chừng.

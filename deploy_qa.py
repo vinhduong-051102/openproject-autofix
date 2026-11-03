@@ -12,6 +12,7 @@ Chạy sau mỗi lần merge_to_dev (12h / 18h), hoặc tay: deploy_qa.py [--dry
 4. docker compose up -d --force-recreate, chờ FE đúng version + API sống.
 5. QA từng ticket (của mình, đang Resolved) có commit trong bản deploy: Claude test trên server qua soar_api.py.
    ĐẠT → comment bằng chứng + chuyển người phụ trách sang QA (QA_USER_NAME). KHÔNG ĐẠT / KHÔNG TỰ TEST ĐƯỢC → chỉ báo.
+  KHÔNG RÕ YÊU CẦU → không test, comment điểm chưa rõ + câu hỏi, chuyển UNREVIEWED.
 
 Cấu hình server + tài khoản test: biến DEPLOY_* / QA_* trong .env và/hoặc ~/.config/op-watch/deploy.json (chmod 600).
 """
@@ -111,8 +112,14 @@ Chạy `python3 {soar_api}` không tham số để xem hướng dẫn. File test
    trong ticket nếu tên thuộc [{ticket_accounts}] (`--as <tên> --password '<mật khẩu trong ticket>'` lần đầu) — KHÔNG
    đổi mật khẩu / thông tin / trạng thái của tài khoản tester, chỉ sửa / xoá dữ liệu do mình tạo.
 
+4. Ticket KHÔNG RÕ RÀNG — đọc cả mô tả, comment, diff mà vẫn không xác định được cần kiểm tra gì: không có bước tái hiện
+   lẫn kết quả mong đợi, mô tả mâu thuẫn với comment, hoặc không biết màn hình / API / dữ liệu nào → KHÔNG test (không
+   gọi request), kết luận KHÔNG RÕ YÊU CẦU; phần kết quả nêu cụ thể điểm nào chưa rõ và 1-3 câu hỏi cần tester / BA trả lời.
+   Chỉ dùng khi thật sự không suy ra được; thiếu vài chi tiết nhưng vẫn kiểm tra được theo diff + ticket thì vẫn test.
+
 ## Báo cáo (bắt buộc)
-Ghi {qa_dir}/qa.md bằng tiếng Việt. Dòng đầu đúng một trong: `QA: ĐẠT` | `QA: KHÔNG ĐẠT` | `QA: KHÔNG TỰ TEST ĐƯỢC`
+Ghi {qa_dir}/qa.md bằng tiếng Việt. Dòng đầu đúng một trong: `QA: ĐẠT` | `QA: KHÔNG ĐẠT` | `QA: KHÔNG TỰ TEST ĐƯỢC` |
+`QA: KHÔNG RÕ YÊU CẦU`
 ## Kết quả — ngắn gọn cho tester: đã test gì, trên bản nào, kết quả (dùng làm comment ticket)
 ## Bằng chứng — từng request → mã HTTP + phần response quan trọng
 ## Ghi chú — dữ liệu đã tạo / đã dọn, điều chưa kiểm tra được
@@ -169,7 +176,12 @@ Lỗi chỉ thấy trên giao diện (màu, focus, nhãn trình đọc màn hìn
 mà diff thêm vào (i18n, aria-label, class, hằng số) trong mã FE đang chạy; thấy đủ thay đổi của diff → ĐẠT (ghi rõ là
 kiểm tra mã đã deploy); thiếu → KHÔNG ĐẠT; chỉ khi không xác định được chuỗi đặc trưng nào mới KHÔNG TỰ TEST ĐƯỢC.
 
-Kết thúc (done=true) khi đã đủ bằng chứng, với verdict ĐẠT | KHÔNG ĐẠT | KHÔNG TỰ TEST ĐƯỢC và
+Ticket KHÔNG RÕ RÀNG — đọc cả mô tả, comment, diff mà vẫn không xác định được cần kiểm tra gì: không có bước tái hiện
+lẫn kết quả mong đợi, mô tả mâu thuẫn với comment, hoặc không biết màn hình / API / dữ liệu nào → KHÔNG test (không
+gọi request), kết luận KHÔNG RÕ YÊU CẦU; phần kết quả nêu cụ thể điểm nào chưa rõ và 1-3 câu hỏi cần tester / BA trả lời.
+Chỉ dùng khi thật sự không suy ra được; thiếu vài chi tiết nhưng vẫn kiểm tra được theo diff + ticket thì vẫn test.
+
+Kết thúc (done=true) khi đã đủ bằng chứng, với verdict ĐẠT | KHÔNG ĐẠT | KHÔNG TỰ TEST ĐƯỢC | KHÔNG RÕ YÊU CẦU và
 result (ngắn gọn cho tester: đã test gì, kết quả), evidence (request → mã HTTP + phần response quan trọng),
 notes (dữ liệu đã tạo / chưa kiểm tra được). Chưa xong: done=false, verdict=CHƯA, calls = các request tiếp theo.
 
@@ -194,7 +206,7 @@ QA_SCHEMA = {
             "header": {"type": "string"}, "file_name": {"type": "string"}, "file_content": {"type": "string"},
             "account": {"type": "string"}, "password": {"type": "string"}, "parallel": {"type": "boolean"},
             "why": {"type": "string"}}, "required": ["method", "target"]}},
-        "verdict": {"type": "string", "enum": ["ĐẠT", "KHÔNG ĐẠT", "KHÔNG TỰ TEST ĐƯỢC", "CHƯA"]},
+        "verdict": {"type": "string", "enum": ["ĐẠT", "KHÔNG ĐẠT", "KHÔNG TỰ TEST ĐƯỢC", "KHÔNG RÕ YÊU CẦU", "CHƯA"]},
         "result": {"type": "string"}, "evidence": {"type": "string"}, "notes": {"type": "string"},
     },
     "required": ["done", "verdict"],
@@ -387,7 +399,8 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
             transcript.append("## %s%s %s%s\n(%s)\n```\n%s\n```" % (
                 "[%s] " % call["account"] if call.get("account") else "", call.get("method"), call.get("target"), (" body: " + call["body"][:500]) if call.get("body") else "",
                 call.get("why", ""), out))
-    verdict = answer.get("verdict") if answer.get("verdict") in ("ĐẠT", "KHÔNG ĐẠT", "KHÔNG TỰ TEST ĐƯỢC") \
+    verdict = answer.get("verdict") if answer.get("verdict") in ("ĐẠT", "KHÔNG ĐẠT", "KHÔNG TỰ TEST ĐƯỢC",
+                                                                 "KHÔNG RÕ YÊU CẦU") \
         else "KHÔNG TỰ TEST ĐƯỢC"
     text = "QA: %s\n\n_QA bằng Gemini (%s), %d request_\n\n## Kết quả\n%s\n\n## Bằng chứng\n%s\n\n## Ghi chú\n%s\n\n" \
            "## Toàn bộ request\n%s\n" % (
@@ -774,7 +787,7 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
                            env=af.build_env(acfg))
     path = os.path.join(qa_dir, "qa.md")
     text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
-    m = re.search(r"QA:\s*(KHÔNG ĐẠT|ĐẠT|KHÔNG TỰ TEST ĐƯỢC)", text[:200])
+    m = re.search(r"QA:\s*(KHÔNG RÕ YÊU CẦU|KHÔNG ĐẠT|ĐẠT|KHÔNG TỰ TEST ĐƯỢC)", text[:200])
     verdict = m.group(1) if m else "KHÔNG CÓ BÁO CÁO"
     # Server đổi trong lúc test → kết quả không đáng tin, không comment / không chuyển QA.
     change = guard() if guard else None
@@ -794,6 +807,17 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
         fail_count(display_id, 0)
     elif verdict == "KHÔNG ĐẠT":
         verdict += handle_fail(api, acfg, dcfg, wp, display_id, path, text, commits)
+    elif verdict == "KHÔNG RÕ YÊU CẦU":
+        # Không test: comment điểm chưa rõ + câu hỏi, chuyển UNREVIEWED (vẫn giao cho mình) để người quyết định.
+        body = af.report_section(text, "Kết quả") or "QA tự động không xác định được cần kiểm tra gì."
+        comment = "**[QA tự động] Chưa test trên môi trường test (%s): yêu cầu chưa rõ** — chuyển UNREVIEWED.\n\n%s" % (
+            deployed, af.for_tester(body)[:3000])
+        af.op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp["id"], {"comment": {"raw": comment}})
+        lock_version = api.get("/api/v3/work_packages/%s" % wp["id"])["lockVersion"]
+        af.op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp["id"], {
+            "lockVersion": lock_version,
+            "_links": {"status": {"href": "/api/v3/statuses/%s" % acfg["review_status_id"]}}})
+        verdict += " → đã chuyển UNREVIEWED"
     report_dir = os.path.expanduser(acfg.get("report_dir") or "")
     if report_dir:
         os.makedirs(report_dir, exist_ok=True)
