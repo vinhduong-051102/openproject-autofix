@@ -49,6 +49,7 @@ FIELDS = {  # khoá: (biến .env, kiểu, mặc định)
     "msg_done": ("TG_MSG_DONE", "msg", "🎉 {display_id} đã xử lý ({status}): {title}. Nhờ bạn kiểm tra lại giúp."),
     "ai_filter": ("TG_AI_FILTER", "bool", True),
     "ai_model": ("TG_AI_MODEL", "str", "sonnet"),
+    "ask_auto": ("TG_ASK_AUTO", "bool", False),
 }
 RESTART_KEYS = ("api_id", "api_hash", "testers")
 SECRET_KEYS = ("api_hash",)
@@ -261,6 +262,16 @@ CREATE TABLE IF NOT EXISTS commands (         -- việc trang theo dõi nhờ tg
     done_at TEXT, result TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS asks (              -- xin ý kiến cho ticket UNREVIEWED (phần "Cần quyết định")
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_id TEXT NOT NULL, wp_id INTEGER, subject TEXT,
+    decider TEXT NOT NULL,                -- tester | dev (AI đề xuất, mình đổi được)
+    why TEXT, question TEXT, reason TEXT, source TEXT, run_name TEXT,
+    status TEXT NOT NULL,                 -- proposed | queued | sent | answered | kept | closed
+    chat_id INTEGER, tg_msg_id INTEGER, answer TEXT, answer_by TEXT, answered_at TEXT, sent_at TEXT, error TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_asks_msg ON asks(chat_id, tg_msg_id);
 """
 
 _LOCAL = threading.local()
@@ -710,6 +721,8 @@ def action(body):
     rid = body.get("id")
     if kind == "tg_approve":
         return approve(int(rid), bool(body.get("auto", True)), (body.get("note") or "").strip(), bool(body.get("force")))
+    if str(kind).startswith("tg_ask_"):
+        return ask_action(kind, body)
     if kind == "tg_delete":
         return delete(int(rid))
     if kind == "tg_triage":
@@ -1049,6 +1062,212 @@ def triage_due():
     threading.Thread(target=work, daemon=True).start()
 
 
+# ---------------------------------------------------------------- xin ý kiến cho ticket UNREVIEWED
+
+ASK_LABELS = {"proposed": "Chờ bạn gửi", "queued": "Đang gửi", "sent": "Đã hỏi tester", "answered": "Tester đã trả lời",
+              "kept": "Giữ lại — bạn quyết", "closed": "Đã đóng"}
+ASK_OPEN = ("proposed", "queued", "sent", "answered", "kept")
+
+
+def ask_get(aid):
+    a = row("SELECT * FROM asks WHERE id=?", (int(aid),))
+    if not a:
+        raise ValueError("không có câu hỏi này")
+    return a
+
+
+def ask_update(aid, **f):
+    f["updated_at"] = now()
+    db().execute("UPDATE asks SET %s WHERE id=:_id" % ",".join("%s=:%s" % (k, k) for k in f), dict(f, _id=aid))
+
+
+def propose_ask(display_id, wp_id, subject, decider, why, question, reason, source="autofix", run_name=None):
+    """Ghi đề xuất ai quyết (gọi từ bước viết yêu cầu cần duyệt của autofix). Câu hỏi cũ của ticket thì đóng.
+    Tester quyết + bật TG_ASK_AUTO → xếp gửi ngay; không thì chờ mình bấm gửi / để mình quyết."""
+    ts = now()
+    db().execute("UPDATE asks SET status='closed', updated_at=? WHERE display_id=? AND status IN (%s)"
+                 % ",".join("?" * len(ASK_OPEN)), (ts, display_id) + ASK_OPEN)
+    decider = decider if decider in ("tester", "dev") else "dev"
+    status = "kept" if decider == "dev" else ("queued" if settings()["ask_auto"] and question else "proposed")
+    cur = db().execute(
+        "INSERT INTO asks (display_id, wp_id, subject, decider, why, question, reason, source, run_name, status,"
+        " chat_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (display_id, wp_id, subject, decider, why, question or "", reason, source, run_name, status,
+         _default_tester() if status == "queued" else None, ts, ts))
+    return cur.lastrowid
+
+
+def _default_tester():
+    t = (get_meta("watcher", {}) or {}).get("testers") or []
+    return t[0]["id"] if t else None
+
+
+def ask_text(a):
+    url = "%s/work_packages/%s/activity" % (_op_url(), a["wp_id"]) if a.get("wp_id") else ""
+    return "❓ Xin ý kiến %s — %s\n\n%s\n\n%s(Trả lời bằng cách reply vào tin này)" % (
+        a["display_id"], (a.get("subject") or "")[:150], (a.get("question") or "").strip(), url + "\n" if url else "")
+
+
+def pending_asks():
+    return rows("SELECT * FROM asks WHERE status='queued' AND chat_id IS NOT NULL ORDER BY id LIMIT 5")
+
+
+def mark_ask_sent(aid, tg_msg_id=None, error=None):
+    if error:
+        ask_update(aid, status="proposed", error=error[:300])
+    else:
+        ask_update(aid, status="sent", tg_msg_id=tg_msg_id, sent_at=now(), error=None)
+
+
+def handle_ask_reply(chat_id, reply_to, text, sender_name):
+    """Tin của tester trả lời câu hỏi (reply vào tin hỏi, hoặc nhắc đúng mã ticket đang hỏi) → comment lên ticket,
+    báo hộp thư. Trả True nếu đã xử lý (tin không gom thành yêu cầu)."""
+    a = None
+    if reply_to:
+        a = row("SELECT * FROM asks WHERE chat_id=? AND tg_msg_id=? AND status IN ('sent','answered')", (chat_id, reply_to))
+    if not a:
+        for c in rows("SELECT * FROM asks WHERE chat_id=? AND status IN ('sent','answered') ORDER BY id DESC", (chat_id,)):
+            if re.search(r"\b%s\b" % re.escape(c["display_id"]), text or "", re.I):
+                a = c
+                break
+    if not a or not (text or "").strip():
+        return False
+    import task_create
+    import op_watch
+    import op_autofix as af
+    cfg = task_create.load()[0]
+    api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    af.op_write(api, "POST", "/api/v3/work_packages/%s/activities" % a["wp_id"], {"comment": {"raw":
+                "**[Tester trả lời qua Telegram]** %s:\n\n> %s" % (sender_name, text.strip().replace("\n", "\n> "))}})
+    answer = ((a.get("answer") or "") + "\n" if a.get("answer") else "") + text.strip()
+    ask_update(a["id"], status="answered", answer=answer[-3000:], answer_by=sender_name, answered_at=now())
+    af.inbox(cfg, "**TESTER TRẢ LỜI** %s — %s: %s" % (a["display_id"], sender_name, text.strip()[:200]))
+    return True
+
+
+ASK_CLASSIFY_PROMPT = """Ticket {display_id} — {subject} của dự án SOAR đang ở trạng thái chờ duyệt. Autofix đã viết yêu
+cầu cần duyệt sau. Xác định ai nên quyết và soạn câu hỏi cho tester nếu cần. Chỉ trả kết quả JSON, không dùng công cụ.
+
+## Yêu cầu cần duyệt
+{reason}
+
+## Quy tắc
+{rules}
+
+## Kết quả: chỉ một khối JSON
+{{"decider": "tester" | "dev", "why": "một câu lý do", "question": "câu hỏi cho tester (rỗng nếu dev quyết)"}}
+"""
+
+
+def classify_ask(display_id, subject, reason):
+    import op_autofix as af
+    out = _run_claude_json(ASK_CLASSIFY_PROMPT.format(display_id=display_id, subject=subject, reason=reason[:6000],
+                                                      rules=af.DECIDER_RULES), settings()["ai_model"])
+    d = out.get("decider") if out.get("decider") in ("tester", "dev") else "dev"
+    return d, (out.get("why") or "")[:500], (out.get("question") or "")[:2000] if d == "tester" else ""
+
+
+_SCAN_LOCK = threading.Lock()
+
+
+def scan_unreviewed():
+    """Ticket UNREVIEWED giao cho mình chưa có câu hỏi đang mở → đọc comment [Cần duyệt] gần nhất, AI xác định ai quyết."""
+    import task_create
+    import op_watch
+    cfg, acfg, _ = task_create.load()
+    sid = acfg.get("review_status_id")
+    if not sid:
+        raise ValueError("chưa cấu hình trạng thái chờ duyệt (OP_STATUS_REVIEW)")
+    api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    data = api.get("/api/v3/projects/%s/work_packages" % cfg["project"], {
+        "filters": json.dumps([{"status": {"operator": "=", "values": [str(sid)]}},
+                               {"assignee": {"operator": "=", "values": ["me"]}}]), "pageSize": 100})
+    done = 0
+    for w in data.get("_embedded", {}).get("elements", []):
+        did = w.get("displayId") or "WP-%s" % w["id"]
+        if row("SELECT id FROM asks WHERE display_id=? AND status IN (%s)" % ",".join("?" * len(ASK_OPEN)),
+               (did,) + ASK_OPEN):
+            continue
+        reason = ""
+        for act in reversed(api.activities(w["id"])):
+            raw = ((act.get("comment") or {}).get("raw") or "")
+            if "[Cần duyệt]" in raw:
+                reason = raw
+                break
+        if not reason:
+            continue
+        try:
+            d, why, q = classify_ask(did, w.get("subject", ""), reason)
+        except Exception as ex:  # noqa: BLE001
+            d, why, q = "dev", "AI xác định lỗi: %s" % str(ex)[:200], ""
+        propose_ask(did, w["id"], w.get("subject", ""), d, why, q, reason, "quét", None)
+        done += 1
+    return done
+
+
+def asks_overview(status="open"):
+    if status == "open":
+        items = rows("SELECT * FROM asks WHERE status IN (%s) ORDER BY id DESC" % ",".join("?" * len(ASK_OPEN)), ASK_OPEN)
+    else:
+        items = rows("SELECT * FROM asks ORDER BY id DESC LIMIT 100")
+    for a in items:
+        a["status_label"] = ASK_LABELS.get(a["status"], a["status"])
+        cur = _live_wp(a["display_id"]) if a["status"] in ASK_OPEN else None
+        a["wp_status"] = (cur or {}).get("status")
+    counts = {k: 0 for k in ASK_LABELS}
+    for r in rows("SELECT status, COUNT(*) AS n FROM asks GROUP BY status"):
+        counts[r["status"]] = r["n"]
+    return {"items": items, "counts": counts, "testers": (get_meta("watcher", {}) or {}).get("testers") or [],
+            "op_url": _op_url(), "ask_auto": settings()["ask_auto"], "scanning": _SCAN_LOCK.locked()}
+
+
+def ask_action(kind, body):
+    aid = body.get("id")
+    if kind == "tg_ask_scan":
+        if not _SCAN_LOCK.acquire(blocking=False):
+            raise ValueError("đang quét")
+
+        def work():
+            try:
+                n = scan_unreviewed()
+                set_meta("ask_scan", {"at": now(), "found": n})
+            except Exception as ex:  # noqa: BLE001
+                set_meta("ask_scan", {"at": now(), "error": str(ex)[:300]})
+            finally:
+                _SCAN_LOCK.release()
+        threading.Thread(target=work, daemon=True).start()
+        return "Đang quét ticket UNREVIEWED của bạn (AI xác định ai quyết, vài chục giây)…"
+    a = ask_get(aid)
+    if kind == "tg_ask_send":
+        q = (body.get("question") or a["question"] or "").strip()
+        if not q:
+            raise ValueError("nhập câu hỏi cho tester")
+        chat = int(body.get("chat_id") or a["chat_id"] or _default_tester() or 0)
+        if not chat:
+            raise ValueError("chưa có tester nào (op-telegram chưa chạy?)")
+        ask_update(a["id"], question=q, chat_id=chat, decider="tester", status="queued", error=None)
+        return "Đã xếp gửi câu hỏi %s cho tester (vài giây)" % a["display_id"]
+    if kind == "tg_ask_keep":
+        ask_update(a["id"], status="kept", decider="dev")
+        return "Giữ lại %s để bạn quyết" % a["display_id"]
+    if kind == "tg_ask_close":
+        ask_update(a["id"], status="closed")
+        return "Đã đóng câu hỏi %s" % a["display_id"]
+    if kind == "tg_ask_reopen":
+        # Làm theo trả lời: chuyển Reopened → op-watch chạy autofix, prompt đọc comment trả lời mới nhất của tester.
+        import task_create
+        import op_watch
+        import op_autofix as af
+        cfg = task_create.load()[0]
+        rid = next((k for k, v in cfg["statuses"].items() if v == "Reopened"), None)
+        if not rid:
+            raise ValueError("không tìm thấy trạng thái Reopened trong cấu hình op-watch")
+        af.set_wp_status(op_watch.OpenProject(cfg["url"], cfg["api_key"]), a["wp_id"], rid)
+        ask_update(a["id"], status="closed")
+        return "Đã chuyển %s sang Reopened — autofix sẽ làm theo trả lời của tester" % a["display_id"]
+    raise ValueError("thao tác không hợp lệ")
+
+
 # ---------------------------------------------------------------- việc nền (tg_watch.py gọi định kỳ)
 
 def advance_drafts():
@@ -1141,6 +1360,10 @@ def finish_command(cid, result):
 
 def http_get(path, q):
     """Trả (mã HTTP, body, content-type) cho op_dashboard.py."""
+    if path == "/api/tg/asks":
+        d = asks_overview(q.get("status", "open"))
+        d["scan"] = get_meta("ask_scan", {})
+        return 200, d, "application/json; charset=utf-8"
     if path == "/api/tg/settings":
         return 200, public_settings(), "application/json; charset=utf-8"
     if path == "/api/tg/overview":

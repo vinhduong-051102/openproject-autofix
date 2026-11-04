@@ -173,6 +173,7 @@ Ghi {run_dir}/report.md bằng tiếng Việt:
   `## Kiểm tra hồi quy` — các chỗ dùng đã rà (file / màn hình / API → còn đúng / đã sửa theo / cần quyết định) và test
   đã chạy cho phần bị ảnh hưởng (lệnh + kết quả);
   Cần quyết định / rủi ro;
+{decider_rules}
   `## Comment cho tester` — đoạn này được đăng nguyên văn lên ticket cho TESTER (không phải dev) đọc: tiếng Việt, ngắn,
   nói theo màn hình / thao tác / kết quả nhìn thấy (đã sửa gì, test lại thế nào, lưu ý). KHÔNG tên file, class, hàm,
   biến, commit, stack trace hay giải thích code. API thì chỉ nêu endpoint + mã HTTP + thông báo trả về.
@@ -417,11 +418,32 @@ def mark_for_review(api, wp_id, status_id, report_text, run_name):
         or "Xem báo cáo autofix %s." % run_name
     if len(reason) > 4000:
         reason = reason[:4000] + "\n…"
+    decider, why, question = review_decider(report_text)
     comment = "**[Cần duyệt]** Ticket cần quyết định trước khi sửa:\n\n" + for_tester(reason)
+    if decider:
+        comment += "\n\n_Người quyết: %s%s_" % ("Tester — sẽ xin ý kiến qua Telegram" if decider == "tester" else "Dev",
+                                               (" (" + plain_md(why) + ")") if why else "")
     op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": comment}})
-    lock_version = api.get("/api/v3/work_packages/%s" % wp_id)["lockVersion"]
+    w = api.get("/api/v3/work_packages/%s" % wp_id)
     op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp_id, {
-        "lockVersion": lock_version, "_links": {"status": {"href": "/api/v3/statuses/%s" % status_id}}})
+        "lockVersion": w["lockVersion"], "_links": {"status": {"href": "/api/v3/statuses/%s" % status_id}}})
+    try:  # xin ý kiến tester qua Telegram (tg_requests) — lỗi ở đây không được làm hỏng lượt autofix
+        import tg_requests
+        tg_requests.propose_ask(w.get("displayId") or "WP-%s" % wp_id, int(wp_id), w.get("subject", ""), decider or "dev",
+                                why, for_tester(question), for_tester(reason), "autofix", run_name)
+    except Exception as ex:  # noqa: BLE001
+        log("xin ý kiến qua Telegram lỗi: %s" % ex)
+
+
+def review_decider(report_text):
+    """(tester | dev | "", lý do, câu hỏi cho tester) từ mục "Người quyết định" / "Câu hỏi cho tester" của báo cáo."""
+    sec = report_section(report_text, "Người quyết định")
+    m = re.search(r"NGƯỜI QUYẾT:\s*(TESTER|DEV)", sec or report_text)
+    if not m:
+        return "", "", ""
+    why = re.sub(r"^.*NGƯỜI QUYẾT:\s*(TESTER|DEV)\W*", "", sec, count=1, flags=re.S).strip() if sec else ""
+    question = report_section(report_text, "Câu hỏi cho tester") if m.group(1) == "TESTER" else ""
+    return m.group(1).lower(), why[:500], question[:2000]
 
 
 def fetch_ticket(api, wp_id, out_dir):
@@ -1128,11 +1150,23 @@ Ghi {run_dir}/followup.md bằng tiếng Việt. Dòng đầu đúng một trong
 `QUYẾT ĐỊNH: SỬA THÊM` (đã commit thêm) | `QUYẾT ĐỊNH: GIỮ NGUYÊN` (không cần sửa) | `QUYẾT ĐỊNH: CẦN QUYẾT ĐỊNH`
 Các mục: ## Đánh giá từng ý của Gemini (ý → đúng/sai → xử lý); ## Đã sửa thêm (file, commit); ## Kiểm tra;
 ## Cần quyết định (chỉ khi có: các phương án + đề xuất);
+{decider_rules}
 ## Comment cho tester (chỉ khi SỬA THÊM: đăng nguyên văn lên ticket cho TESTER đọc — đã sửa thêm gì nhìn từ màn hình /
 thao tác / kết quả, test lại thế nào; KHÔNG tên file, class, hàm, biến, commit).
 """
 
 
+
+# Ai quyết phần "Cần quyết định": tester trả lời được (hỏi qua Telegram) hay để dev (mình) quyết.
+DECIDER_RULES = """  Khi kết quả là CẦN QUYẾT ĐỊNH thêm 2 mục ngay sau mục Cần quyết định:
+  `## Người quyết định` — dòng đầu đúng một trong `NGƯỜI QUYẾT: TESTER` | `NGƯỜI QUYẾT: DEV`, dòng sau một câu lý do.
+    TESTER khi tester (hoặc BA qua tester) trả lời được: hiểu ticket thế nào / hành vi đúng là phương án nào (nhìn thấy
+    trên màn hình / API), kết quả mong đợi, thiếu bước tái hiện, dữ liệu / tài khoản test, xác nhận lỗi còn không.
+    DEV khi là lựa chọn kỹ thuật / kiến trúc, ảnh hưởng tính năng khác / code người khác, rủi ro bảo mật, phạm vi /
+    chi phí, cần lãnh đạo chốt, hoặc vấn đề của công cụ / môi trường dev.
+  `## Câu hỏi cho tester` — chỉ khi NGƯỜI QUYẾT: TESTER: tin nhắn Telegram gửi tester, tối đa 6 dòng, ngôn ngữ của
+    tester (không tên file / class / code), nêu vấn đề + các phương án đánh số 1, 2, 3 để tester trả lời bằng số, kèm
+    phương án đề xuất."""
 
 # Chế độ dontAsk: lệnh ghép chỉ chạy khi MỌI phần đều khớp ALLOWED_TOOLS — một phần lạ là cả lệnh bị từ chối.
 BASH_RULES = """Quy tắc lệnh Bash (chạy không người duyệt, lệnh ngoài danh sách bị từ chối, không hỏi):
@@ -1215,7 +1249,7 @@ def claude_followup(acfg, display_id, wp, run_dir, fe_dir, be_dir, gemini_verdic
     """Claude xem lại nhận xét của Gemini và tự quyết. Trả (quyết định, nội dung followup.md)."""
     commits = "; ".join("%s %s" % (label, ", ".join(c[:8] for c in cs)) for label, _, cs in items)
     prompt = FOLLOWUP_PROMPT.format(
-        bash_rules=BASH_RULES.format(run_dir=run_dir),
+        bash_rules=BASH_RULES.format(run_dir=run_dir), decider_rules=DECIDER_RULES,
         display_id=display_id, subject=wp.get("subject", ""), gemini_verdict=gemini_verdict, run_dir=run_dir,
         commits=commits, fe_dir=fe_dir, be_dir=be_dir, be_subdir=acfg["be_subdir"])
     with open(os.path.join(run_dir, "followup-prompt.md"), "w", encoding="utf-8") as f:
@@ -2566,7 +2600,7 @@ def main():
                 for n in notes)
 
             prompt = PROMPT.format(
-                bash_rules=BASH_RULES.format(run_dir=run_dir),
+                bash_rules=BASH_RULES.format(run_dir=run_dir), decider_rules=DECIDER_RULES,
                 display_id=display_id, wp_id=wp_id, status=wp["_links"]["status"].get("title"), event=event,
                 subject=wp.get("subject", ""), run_dir=run_dir, fe_dir=fe_dir, be_dir=be_dir,
                 fe_auto=branch, be_auto=branch, be_subdir=acfg["be_subdir"], merge_note=merge_note)

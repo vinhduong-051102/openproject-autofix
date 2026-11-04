@@ -374,6 +374,11 @@ header { flex-wrap: wrap; min-width: 0; }
 .tg-acts input[type=text] { flex: 1; min-width: 180px; width: auto; }
 .tg-pick { display: flex; gap: 8px; align-items: flex-start; } .tg-pick input { margin-top: 12px; }
 .tg-acts button.danger { color: var(--crit); }
+.tg-ask { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--panel-2); display: grid; gap: 6px; font-size: 13px; }
+.tg-ask .q { white-space: pre-wrap; } .tg-ask textarea { min-height: 90px; }
+.tg-ask-md { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px; max-height: 340px; overflow: auto; overscroll-behavior: contain; }
+.tg-ask-md > :first-child { margin-top: 6px; } .tg-ask-md > :last-child { margin-bottom: 6px; }
+.tg-ask .ans { border-left: 3px solid var(--accent); padding-left: 8px; white-space: pre-wrap; }
 .tg-ai { display: grid; gap: 6px; margin: 8px 0 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); font-size: 13px; }
 .tg-form { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 10px 14px; align-items: start; }
 .tg-form > label { padding-top: 7px; font-weight: 600; font-size: 13px; }
@@ -428,6 +433,7 @@ header { flex-wrap: wrap; min-width: 0; }
         <div class="seg" id="tgStatus"><button data-v="open" class="on">Đang mở</button><button data-v="created">Đã tạo</button><button data-v="linked">Đã gắn</button><button data-v="rejected">Từ chối</button><button data-v="ignored">Bỏ qua</button><button data-v="all">Tất cả</button></div>
         <input id="tgQ" type="search" placeholder="Tìm trong yêu cầu / tin nhắn">
         <button id="tgChats" title="Xem toàn bộ cuộc trò chuyện, nhập tin cũ, tạo yêu cầu từ tin đã chọn">💬 Chat</button>
+        <button id="tgAsksBtn" title="Ticket UNREVIEWED: AI đề xuất hỏi tester hay để bạn quyết; gửi câu hỏi + nhận trả lời qua Telegram">❓ Xin ý kiến <span id="tgAskN"></span></button>
         <button id="tgSettingsBtn" title="Cấu hình nhận yêu cầu qua Telegram: tester, cách gom tin, tin trả lời…">⚙ Cài đặt</button>
       </div>
       <div class="op-list" id="tgList"><div class="empty">Đang tải…</div></div>
@@ -1708,7 +1714,7 @@ async function tgChat(chatId) {
   };
 }
 function tgShow() { $("tgModal").hidden = false; document.documentElement.classList.add("modal-open"); }
-function tgClose() { $("tgModal").hidden = true; TG.cur = null; TG.chat = null; if ($("wpModal").hidden) document.documentElement.classList.remove("modal-open"); }
+function tgClose() { $("tgModal").hidden = true; TG.cur = null; TG.chat = null; TG.asks = false; if ($("wpModal").hidden) document.documentElement.classList.remove("modal-open"); }
 $("tgmClose").onclick = tgClose;
 $("tgModal").onclick = (e) => { if (e.target.id === "tgModal") tgClose(); };
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("tgModal").hidden) tgClose(); });
@@ -1743,6 +1749,7 @@ async function tgSettings() {
       <label for="tgs_max_media_mb">Tệp tối đa (MB)${S("max_media_mb")}</label><div><input type="number" id="tgs_max_media_mb" min="1" max="200" value="${st.max_media_mb}"></div>
       <h4>Trả lời tester</h4>
       <label for="tgs_notify_tester">Gửi tin trả lời${S("notify_tester")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_notify_tester" ${st.notify_tester ? "checked" : ""}> Trả lời tester (từ tài khoản của bạn) khi tạo task / gắn việc / từ chối / việc xong</label></div>
+      <label for="tgs_ask_auto">Xin ý kiến tester${S("ask_auto")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_ask_auto" ${st.ask_auto ? "checked" : ""}> Tự gửi câu hỏi khi AI xác định tester quyết (ticket chuyển UNREVIEWED). Tắt: chờ bạn bấm “Gửi tester”.</label></div>
       <label for="tgs_done_statuses">Trạng thái coi là xong${S("done_statuses")}</label><div><input type="text" id="tgs_done_statuses" value="${esc((st.done_statuses || []).join(", "))}"><div class="hint">Task sang trạng thái này thì báo tester một lần.</div></div>
       <label for="tgs_sync_minutes">Đồng bộ trạng thái (phút)${S("sync_minutes")}</label><div><input type="number" id="tgs_sync_minutes" min="1" max="120" value="${st.sync_minutes}"></div>
       ${msg("msg_created", "Mẫu: đã tạo task", "{title} {display_id}")}
@@ -1761,7 +1768,7 @@ async function tgSettings() {
     const v = (id) => $("tgs_" + id).value;
     const body = {api_id: v("api_id").trim(), testers: v("testers"), detect_mode: v("detect_mode"), request_tags: v("request_tags"),
       group_window: v("group_window"), max_media_mb: v("max_media_mb"), notify_tester: $("tgs_notify_tester").checked,
-      done_statuses: v("done_statuses"), sync_minutes: v("sync_minutes"), ai_filter: $("tgs_ai_filter").checked, ai_model: v("ai_model"),
+      done_statuses: v("done_statuses"), sync_minutes: v("sync_minutes"), ai_filter: $("tgs_ai_filter").checked, ai_model: v("ai_model"), ask_auto: $("tgs_ask_auto").checked,
       msg_created: v("msg_created"), msg_linked: v("msg_linked"), msg_rejected: v("msg_rejected"), msg_done: v("msg_done")};
     if (v("api_hash").trim()) body.api_hash = v("api_hash").trim();
     const r = await post({action: "tg_settings", settings: body});
@@ -1821,6 +1828,67 @@ function tgLoginRender(st) {
   enter("tgsPhone", "tgsPhoneBtn"); enter("tgsCode", "tgsCodeBtn"); enter("tgsPw", "tgsPwBtn");
 }
 $("tgSettingsBtn").onclick = tgSettings;
+// ---- Xin ý kiến cho ticket UNREVIEWED: AI xác định tester trả lời được (hỏi qua Telegram) hay để bạn quyết ----
+const ASK_BADGE = {proposed: "warn", queued: "accent", sent: "accent", answered: "ok", kept: "", closed: ""};
+async function tgAsks(all) {
+  let d;
+  try { d = await tgFetch("/api/tg/asks" + (all ? "?status=all" : "")); } catch (e) { return toast(e.message, true); }
+  TG.cur = null; TG.chat = null; TG.asks = true;
+  tgShow(); $("tgmTitle").textContent = "Xin ý kiến — ticket UNREVIEWED";
+  const testers = d.testers || [];
+  const wpUrl = (a) => d.op_url && a.wp_id ? `${d.op_url}/work_packages/${a.wp_id}/activity` : "#";
+  const card = (a) => {
+    const open = !["closed"].includes(a.status);
+    const canSend = ["proposed", "kept"].includes(a.status) || (a.status === "sent" && a.error);
+    return `<div class="tg-ask" data-ask="${a.id}">
+      <div><a href="${esc(wpUrl(a))}" target="_blank" rel="noopener"><b>${esc(a.display_id)}</b> ↗</a> ${esc(a.subject || "")}</div>
+      <div><span class="badge ${ASK_BADGE[a.status] || ""}">${esc(a.status_label)}</span>
+        <span class="badge ${a.decider === "tester" ? "accent" : ""}">AI đề xuất: ${a.decider === "tester" ? "hỏi tester" : "bạn quyết"}</span>
+        ${a.wp_status ? `<span class="muted">· ticket: ${esc(a.wp_status)}</span>` : ""} <span class="muted">· ${esc(a.source || "")} ${tgTime(a.created_at)}</span></div>
+      ${a.why ? `<div class="muted">Lý do: ${esc(a.why)}</div>` : ""}
+      ${a.reason ? `<div class="tm-label">Nội dung cần duyệt</div><div class="md tg-ask-md">${renderMd(a.reason)}</div>` : ""}
+      ${canSend ? `<div class="tm-label">Câu hỏi gửi tester</div><textarea data-askq>${esc(a.question || "")}</textarea>
+        <div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          ${testers.length > 1 ? `<select data-askchat>${testers.map((t) => `<option value="${t.id}" ${t.id === a.chat_id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select>` : ""}
+          <button class="${a.decider === "tester" ? "primary" : ""}" data-askact="send">📨 Gửi tester</button>
+          ${a.status !== "kept" ? `<button data-askact="keep">Giữ lại — tôi quyết</button>` : ""}
+          <button data-askact="close">Đóng</button></div>` : ""}
+      ${a.error ? `<div class="badge crit" style="white-space:normal">Gửi lỗi: ${esc(a.error)}</div>` : ""}
+      ${["queued", "sent", "answered"].includes(a.status) && !canSend ? `<div class="tm-label">Đã hỏi${a.sent_at ? " lúc " + tgTime(a.sent_at) : ""}</div><div class="q">${esc(a.question || "")}</div>` : ""}
+      ${a.answer ? `<div class="tm-label">Trả lời của ${esc(a.answer_by || "tester")} (${tgTime(a.answered_at)}) — đã comment lên ticket</div><div class="ans">${esc(a.answer)}</div>` : ""}
+      ${open && !canSend ? `<div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap">
+        ${a.status === "answered" ? `<button class="primary" data-askact="reopen" title="Chuyển ticket sang Reopened: autofix chạy lại và làm theo trả lời">▶ Làm theo trả lời (chuyển Reopened)</button>` : ""}
+        <button data-askact="close">Đóng</button></div>` : ""}
+    </div>`;
+  };
+  const sc = d.scan || {};
+  $("tgmBody").innerHTML = `
+    <div class="tm-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+      <button id="tgAskScan" ${d.scanning ? "disabled" : ""}>🔎 Quét ticket UNREVIEWED của tôi</button>
+      <button class="link" id="tgAskAll">${all ? "Chỉ đang mở" : "Xem cả đã đóng"}</button>
+      <span class="muted">${d.scanning ? "⏳ đang quét…" : sc.at ? `Quét lần cuối ${tgTime(sc.at)}${sc.error ? " — lỗi: " + esc(sc.error) : ": thêm " + sc.found + " ticket"}` : ""}</span></div>
+    <div class="muted" style="margin-bottom:10px">Ticket mới chuyển UNREVIEWED được AI xác định người quyết ngay lúc viết yêu cầu cần duyệt. ${d.ask_auto ? "Đang bật tự gửi câu hỏi cho tester." : "Câu hỏi chỉ gửi khi bạn bấm “Gửi tester” (bật tự gửi trong ⚙ Cài đặt)."} Tester reply tin hỏi → trả lời được comment lên ticket.</div>
+    ${d.items.map(card).join("") || `<div class="empty">Không có ticket chờ ý kiến. Bấm “Quét” để xét các ticket UNREVIEWED hiện có.</div>`}`;
+  $("tgAskScan").onclick = () => post({action: "tg_ask_scan"}).then(() => { const t = setInterval(async () => {
+    if ($("tgModal").hidden || !TG.asks) return clearInterval(t);
+    const x = await tgFetch("/api/tg/asks"); if (!x.scanning) { clearInterval(t); tgAsks(all); }
+  }, 4000); tgAsks(all); });
+  $("tgAskAll").onclick = () => tgAsks(!all);
+  document.querySelectorAll("#tgmBody [data-askact]").forEach((b) => b.onclick = async () => {
+    const box = b.closest("[data-ask]"), id = +box.dataset.ask, act = b.dataset.askact;
+    const body = {action: "tg_ask_" + act, id};
+    if (act === "send") { body.question = box.querySelector("[data-askq]").value; const c = box.querySelector("[data-askchat]"); if (c) body.chat_id = +c.value; }
+    if (act === "reopen" && !confirm("Chuyển ticket sang Reopened để autofix làm theo trả lời của tester?")) return;
+    if (await post(body)) setTimeout(() => tgAsks(all), act === "send" ? 2500 : 300);
+  });
+}
+$("tgAsksBtn").onclick = () => tgAsks(false);
+async function tgAskCount() {
+  try { const d = await tgFetch("/api/tg/asks"); const n = d.counts.proposed + d.counts.answered;
+    $("tgAskN").textContent = n ? `(${n})` : ""; } catch (e) { /* bỏ qua */ }
+}
+tgAskCount(); setInterval(tgAskCount, 30000);
+
 
 $("tgBox").querySelector("h2").addEventListener("click", () => setTimeout(tgLoad, 0));
 tgLoad(); setInterval(tgLoad, 15000);

@@ -107,6 +107,19 @@ class Watcher:
     async def store(self, msg, live):
         if msg.chat_id not in self.testers:
             return
+        if live and not msg.out and (msg.message or "").strip():
+            # Trả lời câu hỏi xin ý kiến (ticket UNREVIEWED) → comment lên ticket, không gom thành yêu cầu.
+            try:
+                handled = await self.run_blocking(tr.handle_ask_reply, msg.chat_id, msg.reply_to_msg_id, msg.message,
+                                                  self.testers[msg.chat_id])
+            except Exception:  # noqa: BLE001
+                log.exception("lỗi ghi trả lời xin ý kiến")
+                handled = False
+            if handled:
+                tr.ingest(msg.chat_id, msg.id, True, self.testers[msg.chat_id], msg.message or "", msg.date, None, None,
+                          msg.reply_to_msg_id, False)
+                log.info("tester %s trả lời câu hỏi xin ý kiến", self.testers[msg.chat_id])
+                return
         media, kind = await self.download(msg)
         rid = tr.ingest(msg.chat_id, msg.id, not msg.out,
                         self.testers[msg.chat_id] if not msg.out else (self.me or "Tôi"),
@@ -135,6 +148,13 @@ class Watcher:
         while True:
             try:
                 tr.finalize_due()
+                for a in tr.pending_asks():
+                    try:
+                        sent = await self.c.send_message(a["chat_id"], tr.ask_text(a))
+                        tr.mark_ask_sent(a["id"], sent.id)
+                        log.info("đã gửi câu hỏi xin ý kiến %s", a["display_id"])
+                    except Exception as ex:  # noqa: BLE001
+                        tr.mark_ask_sent(a["id"], error=str(ex))
                 for o in tr.pending_outbox():
                     try:
                         await self.c.send_message(o["chat_id"], o["text"], reply_to=o["reply_to"])
