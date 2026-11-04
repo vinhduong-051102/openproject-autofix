@@ -139,6 +139,52 @@ Cài đặt: token Gitea (Settings → Applications → Generate token, quyền 
 Chạy thử: `python3 merge_to_dev.py --dry-run` (merge + build, không push / không tạo PR); chạy ngay:
 `systemctl --user start op-merge.service`; xem log: `journalctl --user -u op-merge -n 50`.
 
+## Deploy không dừng trang (deploy_qa.py — DEPLOY_STRATEGY)
+
+Sau khi build + `docker load` image mới và ghi vào `docker-compose.yml`, `deploy_qa.py` đưa bản mới vào chạy theo
+`DEPLOY_STRATEGY` (mặc định `bluegreen`). Mỗi phần FE / BE:
+
+1. Kiểm tra trước (chỉ đọc): nginx `soar-https-nginx` chạy, upstream (`soar_frontend_4443` / `soar_backend_4443`) chỉ khai
+   báo trong file riêng `nginx-config/op-watch-upstream-{fe,be}.conf`, container chính chạy. Chưa đạt → phần đó dùng `service`.
+2. Dựng container tạm `soar-fe-next` / `soar-next` bằng `docker compose run -d --no-deps` (cùng `.env`, volume, mạng
+   compose; không mở cổng host).
+3. Kiểm tra bản tạm qua mạng nội bộ (curl từ container nginx): FE trả `index.html` có đúng `<meta name="version">`; BE
+   `/actuator/health` = 200 và `/api/v1/ping` < 500. BE tạm được gắn thêm alias mạng `soar` (playbook gọi `http://soar:8888`).
+4. Ghi upstream → bản tạm, `nginx -t` rồi `nginx -s reload` (graceful), kiểm tra URL công khai.
+5. Tạo lại container chính bằng image mới (`docker compose up -d --no-deps --force-recreate <service>`) trong lúc trang
+   chạy trên bản tạm; kiểm tra bản chính.
+6. Trỏ upstream về bản chính (tên service compose), chờ `DEPLOY_BG_DRAIN_SECONDS`, xoá bản tạm, reload nginx.
+
+Lỗi ở bước 2–4: nginx về bản chính, xoá bản tạm, trả image cũ vào `docker-compose.yml` → trang giữ bản cũ, báo
+`DEPLOY 86 LỖI`. Lỗi ở bước 5: trang tiếp tục chạy bằng container tạm (bản mới, đặt `restart unless-stopped`), báo lỗi kèm
+lệnh cần làm tay. Tiến trình hiện trên trang theo dõi như log compose trước đây (`.compose-live.log`).
+
+`service`: chỉ tạo lại FE/BE đổi image với `--no-deps` rồi reload nginx (trang dừng ngắn, không đụng playbook / nginx).
+`recreate`: cách cũ `docker compose up -d --force-recreate` cả stack.
+
+Xem trước các lệnh (không ssh, không đổi gì): `python3 deploy_qa.py --rollout-plan [fe] [be] [--strategy service]
+[--destructive]`.
+
+**BE và DB**: trong lúc chuyển, 2 bản BE chạy cùng Postgres / Redis vài phút. Liquibase của bản mới migrate khi bản cũ vẫn
+phục vụ (Liquibase có khoá `DATABASECHANGELOGLOCK`, chỉ một bản migrate). Thêm bảng / cột là an toàn; migration phá cấu trúc
+(drop / rename / đổi kiểu cột, NOT NULL…) thì bản cũ có thể lỗi SQL → mặc định (`DEPLOY_BG_BE_DESTRUCTIVE=fallback`) BE
+dùng `service` khi diff `db/` có các thay đổi đó. Quartz chạy clustered (JDBC) nên job Quartz không chạy trùng; các
+`@Scheduled` (flush thống kê, reaper, cron hằng ngày…) có thể chạy ở cả 2 bản trong vài phút chồng nhau.
+
+Cài một lần trên server (tách upstream nginx ra file riêng để deploy được phép đổi):
+
+```bash
+cd ~/soar_v2.0
+cp nginx-config/soar-all-4443.conf nginx-config/soar-all-4443.conf.bak-$(date +%Y%m%d-%H%M)-truoc-bluegreen
+printf 'upstream soar_frontend_4443 {\n    server soar-fe-nginx:3000;\n    keepalive 64;\n}\n' > nginx-config/op-watch-upstream-fe.conf
+printf 'upstream soar_backend_4443 {\n    server service-product-content:8888;\n    keepalive 64;\n}\n' > nginx-config/op-watch-upstream-be.conf
+sed -i '/^upstream soar_frontend_4443 {/,/^}/d; /^upstream soar_backend_4443 {/,/^}/d' nginx-config/soar-all-4443.conf
+docker exec soar-https-nginx nginx -t && docker exec soar-https-nginx nginx -s reload
+```
+
+`nginx -t` lỗi thì trả lại: `cp nginx-config/soar-all-4443.conf.bak-<giờ>-truoc-bluegreen nginx-config/soar-all-4443.conf
+&& rm nginx-config/op-watch-upstream-*.conf`. Tắt bluegreen: `DEPLOY_STRATEGY=service` (hoặc `recreate`) trong `.env`.
+
 ## Nhiều gói Claude + trang theo dõi (op_dashboard.py)
 
 Mỗi gói Claude là một thư mục cấu hình đã đăng nhập riêng (`CLAUDE_CONFIG_DIR`). Khai báo trong config op-watch:

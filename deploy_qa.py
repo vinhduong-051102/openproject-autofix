@@ -9,7 +9,9 @@ Chạy sau mỗi lần merge_to_dev (12h / 18h), hoặc tay: deploy_qa.py [--dry
    ~/soar_v2.0/images → docker load → đổi image service soar-fe-nginx trong docker-compose.yml (có backup).
 3. BE: worktree release-ss/lastest-k8s → merge origin/develop-ss, push → docker build soar-be-ss-lastest-k8s:<ngày><a..z>
    → tar lên images → docker load → đổi image service service-product-content (có backup).
-4. docker compose up -d --force-recreate, chờ FE đúng version + API sống.
+4. Đưa image mới vào chạy theo DEPLOY_STRATEGY (mặc định bluegreen: container tạm <tên>-next chạy bản mới, kiểm tra
+   sống, nginx trỏ sang, tạo lại container chính, trỏ về, xoá tạm — bản mới không lên thì giữ bản cũ; xem rollout()),
+   chờ FE đúng version + API sống.
 5. QA từng ticket (của mình, đang Resolved) có commit trong bản deploy: Claude test trên server qua soar_api.py.
    ĐẠT → comment bằng chứng + chuyển người phụ trách sang QA (QA_USER_NAME). KHÔNG ĐẠT / KHÔNG TỰ TEST ĐƯỢC → chỉ báo.
   KHÔNG RÕ YÊU CẦU → không test, comment điểm chưa rõ + câu hỏi, chuyển UNREVIEWED.
@@ -23,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -78,7 +81,57 @@ DEFAULTS = {
     "qa_fail_autofix_max": 2,
     # DELETE chỉ cho các đường dẫn khớp (dữ liệu QA tự tạo khi test, ví dụ huỷ báo cáo kết quả AI của cảnh báo).
     "qa_delete_allow": [r"^/api/v1/alerts/[^/?]+/ai-feedback/?$"],
+    # ---- Cách đưa image mới vào chạy (rollout, xem README "Deploy không dừng trang") ----
+    # bluegreen: dựng container tạm <container>-next chạy image mới → kiểm tra sống → nginx trỏ sang tạm → tạo lại
+    #            container chính bằng image mới → nginx trỏ lại chính → xoá tạm. Lỗi trước khi chuyển: xoá tạm, trả
+    #            image cũ vào docker-compose.yml, trang giữ bản cũ. Server chưa tách upstream nginx → tự dùng "service".
+    # service:   chỉ tạo lại service đổi image (--no-deps) rồi reload nginx — trang dừng vài chục giây / ~1 phút (BE).
+    # recreate:  cách cũ, docker compose up -d --force-recreate CẢ stack (dễ sập cả trang nếu playbook unhealthy).
+    "deploy_strategy": "bluegreen",
+    "bg_parts": ["fe", "be"],          # phần nào dùng bluegreen (phần còn lại dùng service)
+    "nginx_container": "soar-https-nginx",
+    "nginx_service": "soar-https-nginx",
+    "fe_container": "soar-fe",         # container_name của fe_service (BE: be_container)
+    "bg_fe_upstream": "soar_frontend_4443",
+    "bg_be_upstream": "soar_backend_4443",
+    # File upstream riêng trong thư mục mount vào /etc/nginx/conf.d (đường dẫn tương đối DEPLOY_BASE); deploy ghi đè.
+    "bg_fe_upstream_file": "nginx-config/op-watch-upstream-fe.conf",
+    "bg_be_upstream_file": "nginx-config/op-watch-upstream-be.conf",
+    "bg_fe_port": 3000,
+    "bg_be_port": 8888,
+    "bg_next_suffix": "-next",
+    "bg_health_minutes": 10,           # chờ container tạm / chính sống tối đa N phút
+    "bg_drain_seconds": 15,            # sau khi trỏ nginx về chính: chờ request dở trên container tạm xong rồi mới xoá
+    "bg_be_health_path": "/actuator/health",
+    # BE tạm nhận thêm alias mạng = be_container ("soar") để service nội bộ (playbook gọi http://soar:8888) không lỗi
+    # trong lúc container chính tạo lại.
+    "bg_be_aliases": True,
+    # BE có migration Liquibase phá cấu trúc (drop / rename cột, bảng…): fallback = dùng "service" cho BE (dừng bản
+    # cũ trước khi bản mới migrate); ignore = vẫn bluegreen (bản cũ có thể lỗi SQL vài phút trong lúc chạy song song).
+    "bg_be_destructive": "fallback",
 }
+
+# Biến .env cho phần rollout (đọc thẳng ở đây, không cần sửa envconf.DEPLOY_ENV).
+ROLLOUT_ENV = {
+    "DEPLOY_STRATEGY": ("deploy_strategy", "str"),
+    "DEPLOY_BLUEGREEN_PARTS": ("bg_parts", "list"),
+    "DEPLOY_NGINX_CONTAINER": ("nginx_container", "str"),
+    "DEPLOY_NGINX_SERVICE": ("nginx_service", "str"),
+    "DEPLOY_FE_CONTAINER": ("fe_container", "str"),
+    "DEPLOY_BG_FE_UPSTREAM": ("bg_fe_upstream", "str"),
+    "DEPLOY_BG_BE_UPSTREAM": ("bg_be_upstream", "str"),
+    "DEPLOY_BG_FE_UPSTREAM_FILE": ("bg_fe_upstream_file", "str"),
+    "DEPLOY_BG_BE_UPSTREAM_FILE": ("bg_be_upstream_file", "str"),
+    "DEPLOY_BG_FE_PORT": ("bg_fe_port", "int"),
+    "DEPLOY_BG_BE_PORT": ("bg_be_port", "int"),
+    "DEPLOY_BG_NEXT_SUFFIX": ("bg_next_suffix", "str"),
+    "DEPLOY_BG_HEALTH_MINUTES": ("bg_health_minutes", "int"),
+    "DEPLOY_BG_DRAIN_SECONDS": ("bg_drain_seconds", "int"),
+    "DEPLOY_BG_BE_HEALTH_PATH": ("bg_be_health_path", "str"),
+    "DEPLOY_BG_BE_ALIASES": ("bg_be_aliases", "bool"),
+    "DEPLOY_BG_BE_DESTRUCTIVE": ("bg_be_destructive", "str"),
+}
+STRATEGIES = ("bluegreen", "service", "recreate")
 
 FAIL_COUNT = os.path.join(envconf.autofix_root(), "qa-fail-count.json")
 # Rule rút ra từ các lần Claude kết luận QA SAI (op_autofix.report_qa_wrong ghi thêm); đưa vào prompt mọi lần QA sau.
@@ -518,7 +571,7 @@ def load():
     acfg = dict(af.AUTOFIX_DEFAULTS)
     acfg.update(cfg.get("autofix") or {})
     dcfg = dict(DEFAULTS)
-    dcfg.update(envconf.deploy_config())
+    dcfg.update(envconf.overlay(envconf.deploy_config(), ROLLOUT_ENV))
     return cfg, acfg, dcfg
 
 
@@ -545,6 +598,20 @@ def upload(dcfg, local, remote_path, logf=None):
     env = dict(os.environ, SSHPASS=dcfg["password"])
     sh(["sshpass", "-e", "scp", "-q", "-o", "StrictHostKeyChecking=accept-new", local,
         "%s@%s:%s" % (dcfg["user"], dcfg["host"], remote_path)], logf=logf, env=env)
+
+
+def compose_image_cmd(dcfg, service):
+    """Lệnh in image hiện ghi trong docker-compose.yml cho service (khối "  <service>:" tới service kế tiếp)."""
+    return ("cd %s && sed -n '/^  %s:/,/^  [a-z]/ s|^[[:space:]]*image:[[:space:]]*||p' docker-compose.yml | head -1"
+            % (dcfg["base"], service))
+
+
+def compose_image(dcfg, service):
+    """Image hiện tại của service trong docker-compose.yml (để trả lại nếu bản mới không lên). Lỗi → None."""
+    try:
+        return remote(dcfg, compose_image_cmd(dcfg, service), timeout=60).strip() or None
+    except (RuntimeError, subprocess.TimeoutExpired):
+        return None
 
 
 def set_compose_image(dcfg, service, image, logf):
@@ -584,7 +651,7 @@ def fresh_worktree(repo, path, ref):
     af.run(["git", "worktree", "add", "-q", "--detach", path, ref], cwd=repo)
 
 
-def deploy_fe(acfg, dcfg, root, logf):
+def deploy_fe(acfg, dcfg, root, logf, changes=None):
     repo, dev = acfg["fe_repo"], acfg["fe_upstream"]
     work = os.path.join(root, "deploy-fe")
     fresh_worktree(repo, work, "origin/" + dev)
@@ -607,13 +674,18 @@ def deploy_fe(acfg, dcfg, root, logf):
         af.push(work, dev)
         upload(dcfg, tar, "%s/images/%s.tar" % (dcfg["base"], dcfg["fe_image"]), logf)
         remote(dcfg, "cd %s && docker load -i images/%s.tar" % (dcfg["base"], dcfg["fe_image"]), logf)
-        set_compose_image(dcfg, dcfg["fe_service"], "%s:%s" % (dcfg["fe_image"], version), logf)
+        new_image = "%s:%s" % (dcfg["fe_image"], version)
+        old_image = compose_image(dcfg, dcfg["fe_service"])
+        set_compose_image(dcfg, dcfg["fe_service"], new_image, logf)
+        if changes is not None:
+            changes.append({"part": "fe", "service": dcfg["fe_service"], "container": dcfg["fe_container"],
+                            "old_image": old_image, "new_image": new_image, "version": version})
         return version
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo, check=False)
 
 
-def deploy_be(acfg, dcfg, root, logf):
+def deploy_be(acfg, dcfg, root, logf, changes=None):
     repo, release = acfg["be_repo"], dcfg["be_release_branch"]
     work = os.path.join(root, "deploy-be")
     fresh_worktree(repo, work, "origin/" + release)
@@ -650,7 +722,16 @@ def deploy_be(acfg, dcfg, root, logf):
         upload(dcfg, tar, "%s/images/%s.tar" % (dcfg["base"], dcfg["be_image"]), logf)
         os.remove(tar)
         remote(dcfg, "cd %s && docker load -i images/%s.tar" % (dcfg["base"], dcfg["be_image"]), logf)
+        # Migration Liquibase trong bản này (so với nhánh release trước khi merge): có thay đổi phá cấu trúc thì
+        # bluegreen chạy song song bản cũ với schema mới là rủi ro → rollout() quyết định theo bg_be_destructive.
+        db_dir = os.path.join(acfg["be_subdir"], "src", "main", "resources", "db")
+        mig = af.run(["git", "diff", "origin/%s..HEAD" % release, "--", db_dir], cwd=work, check=False)
+        old_image = compose_image(dcfg, dcfg["be_service"])
         set_compose_image(dcfg, dcfg["be_service"], image, logf)
+        if changes is not None:
+            changes.append({"part": "be", "service": dcfg["be_service"], "container": dcfg["be_container"],
+                            "old_image": old_image, "new_image": image, "version": tag,
+                            "migrations": bool(mig.strip()), "destructive": destructive_migrations(mig)})
         return tag
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo, check=False)
@@ -765,6 +846,422 @@ def _compose_retry(dcfg, logf=None):
         except (RuntimeError, subprocess.TimeoutExpired) as ex:
             last = ex
     raise last
+
+
+# ==== Rollout: đưa image mới vào chạy mà không dừng trang (blue-green qua container tạm) ===========================
+# Luồng bluegreen cho một phần (FE hoặc BE), docker-compose.yml đã ghi image mới (deploy_fe / deploy_be):
+#   0. preflight: nginx chạy, upstream <name> chỉ khai báo trong file riêng bg_*_upstream_file, container chính chạy
+#      → không đạt thì dùng "service" (dừng ngắn) cho phần đó.
+#   1. nginx trỏ chắc chắn về bản chính (dọn lần deploy dở trước), xoá <container>-next cũ nếu còn.
+#   2. docker compose run -d --no-deps --name <container>-next <service>: cùng env_file / volume / mạng compose,
+#      KHÔNG publish cổng host → không đụng bản đang chạy.
+#   3. kiểm tra bản tạm qua mạng nội bộ (curl từ container nginx): FE trả index.html đúng version; BE
+#      /actuator/health = 200 và /api/v1/ping < 500. BE: gắn alias mạng "soar" cho bản tạm (service nội bộ gọi
+#      http://soar:8888) rồi kiểm tra lại.
+#   4. ghi upstream → <container>-next, nginx -t, nginx -s reload (graceful); kiểm tra URL công khai.
+#      Lỗi ở 2-4: nginx về bản chính, xoá bản tạm, trả image cũ vào docker-compose.yml → trang giữ bản cũ.
+#   5. docker compose up -d --no-deps --force-recreate <service>: container chính (đúng tên, cổng host, nhãn compose)
+#      chạy image mới; trong lúc này trang chạy trên bản tạm. Kiểm tra bản chính qua tên service compose.
+#      Lỗi: GIỮ bản tạm phục vụ trang (đặt restart unless-stopped), báo lỗi để người xem.
+#   6. upstream → tên service compose (chỉ container chính có alias này), reload, chờ drain, xoá bản tạm.
+
+class RolloutError(RuntimeError):
+    pass
+
+
+def q(s):
+    return shlex.quote(str(s))
+
+
+def part_cfg(dcfg, ch):
+    """Thông số bluegreen của một thay đổi {"part": "fe"|"be", "service", "container", ...}."""
+    p = ch["part"]
+    return {
+        "upstream": dcfg["bg_%s_upstream" % p],
+        "file": dcfg["bg_%s_upstream_file" % p],
+        "port": int(dcfg["bg_%s_port" % p]),
+        "next": ch["container"] + dcfg.get("bg_next_suffix", "-next"),
+        # Host cho upstream của bản chính: tên service compose (alias chỉ container do compose up tạo có; container
+        # tạm tạo bằng compose run không có) → khi bản tạm còn alias "soar" nginx vẫn chỉ trỏ đúng bản chính.
+        "main_host": ch["service"],
+    }
+
+
+def upstream_conf(name, host, port, keepalive=64):
+    return ("# Quản lý bởi op-watch deploy_qa.py (deploy bluegreen) — đừng sửa tay, deploy sẽ ghi đè.\n"
+            "upstream %s {\n    server %s:%d;\n    keepalive %d;\n}\n" % (name, host, int(port), keepalive))
+
+
+def nginx_reload_cmd(dcfg):
+    n = q(dcfg["nginx_container"])
+    return "docker exec %s nginx -t && docker exec %s nginx -s reload" % (n, n)
+
+
+def cmd_write_upstream(dcfg, ch, host):
+    """Ghi file upstream trỏ host, nginx -t rồi reload; nginx -t lỗi → trả file cũ (.prev) và thoát mã 1."""
+    pc = part_cfg(dcfg, ch)
+    f = q(pc["file"])
+    return ("cd %s && printf '%%s' %s > %s.tmp && { [ ! -f %s ] || cp %s %s.prev; } && mv %s.tmp %s && "
+            "{ %s || { echo 'nginx -t / reload lỗi → trả upstream cũ' >&2; [ ! -f %s.prev ] || mv %s.prev %s; "
+            "%s; exit 1; }; }"
+            % (dcfg["base"], q(upstream_conf(pc["upstream"], host, pc["port"])), f, f, f, f, f, f,
+               nginx_reload_cmd(dcfg), f, f, f, nginx_reload_cmd(dcfg)))
+
+
+def cmd_preflight(dcfg, ch):
+    """In "PREFLIGHT:OK" hoặc "PREFLIGHT: <lý do>…" (chỉ đọc)."""
+    pc = part_cfg(dcfg, ch)
+    rx = q(r"^[[:space:]]*upstream[[:space:]]+%s[[:space:]]*\{" % pc["upstream"])
+    f, n, c = q(pc["file"]), q(dcfg["nginx_container"]), q(ch["container"])
+    confdir = q(os.path.dirname(pc["file"]) or ".")
+    return ("cd %s || { echo 'PREFLIGHT: không vào được thư mục compose'; exit 0; }; r=''; "
+            "[ \"$(docker inspect -f '{{.State.Running}}' %s 2>/dev/null)\" = true ] || r=\"$r nginx-%s-không-chạy\"; "
+            "[ -f %s ] || r=\"$r thiếu-file-%s\"; "
+            "k=$(grep -lE %s %s/*.conf 2>/dev/null | wc -l); "
+            "{ [ \"$k\" = 1 ] && grep -qE %s %s; } || r=\"$r upstream-%s-khai-báo-ở-$k-file-.conf(cần-đúng-1:-%s)\"; "
+            "[ \"$(docker inspect -f '{{.State.Running}}' %s 2>/dev/null)\" = true ] || r=\"$r container-%s-không-chạy\"; "
+            "echo \"PREFLIGHT:${r:-OK}\""
+            % (dcfg["base"], n, dcfg["nginx_container"], f, pc["file"], rx, confdir, rx, f, pc["upstream"],
+               pc["file"], c, ch["container"]))
+
+
+def parse_preflight(out):
+    """→ (ok, lý do)."""
+    m = re.search(r"PREFLIGHT:(.*)", out or "")
+    if not m:
+        return False, "không đọc được kết quả preflight"
+    why = m.group(1).strip()
+    return why == "OK", why
+
+
+def cmd_next_start(dcfg, ch):
+    pc = part_cfg(dcfg, ch)
+    return ("cd %s && docker rm -f %s >/dev/null 2>&1; docker compose run -d --no-deps --name %s %s"
+            % (dcfg["base"], q(pc["next"]), q(pc["next"]), q(ch["service"])))
+
+
+def cmd_next_net(dcfg, ch, aliases, only_if_service_alias=False):
+    """Nối lại bản tạm vào mạng compose với đúng các alias cho trước (docker tự thêm tên container).
+    - BE: aliases=[be_container] ("soar") để service nội bộ gọi http://soar:8888 vẫn có bản trả lời trong lúc
+      container chính tạo lại. Chạy SAU khi bản tạm đã kiểm tra sống và TRƯỚC khi nginx trỏ sang (nối lại đổi IP).
+    - only_if_service_alias: chỉ làm khi bản tạm lỡ có alias = tên service compose (alias dành riêng cho bản chính,
+      upstream "bản chính" dùng tên này)."""
+    pc = part_cfg(dcfg, ch)
+    nx = q(pc["next"])
+    cond = ""
+    if only_if_service_alias:
+        cond = ("docker inspect -f '{{range .NetworkSettings.Networks}}{{.Aliases}} {{end}}' %s | grep -qw %s || "
+                "{ echo 'bản tạm không có alias %s'; exit 0; }; " % (nx, q(ch["service"]), ch["service"]))
+    return ("set -e; %sNETS=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' %s); "
+            "set -- $NETS; docker network disconnect \"$1\" %s; docker network connect %s\"$1\" %s; "
+            "echo \"%s nối lại mạng $1, alias: %s\""
+            % (cond, nx, nx, "".join("--alias %s " % q(a) for a in aliases), nx, pc["next"],
+               ",".join(aliases) or "(chỉ tên container)"))
+
+
+def cmd_probe(dcfg, ch, host, container):
+    """Một lần kiểm tra (chỉ đọc): in "PROBE state=<trạng thái container> ok=<0|1> detail=<…>"."""
+    pc = part_cfg(dcfg, ch)
+    n = q(dcfg["nginx_container"])
+    base = "http://%s:%d" % (host, pc["port"])
+    head = "st=$(docker inspect -f '{{.State.Status}}' %s 2>/dev/null) || st=missing; st=${st:-missing}; " % q(container)
+    if ch["part"] == "fe":
+        return (head + "body=$(docker exec %s curl -s --max-time 10 %s 2>/dev/null); "
+                "case \"$body\" in *%s*) ok=1;; *) ok=0;; esac; "
+                "echo \"PROBE state=$st ok=$ok detail=index.html-${#body}-byte\""
+                % (n, q(base + "/"), q('content="%s"' % ch["version"])))
+    return (head + "h=$(docker exec %s curl -s -o /dev/null -w '%%{http_code}' --max-time 10 %s 2>/dev/null); "
+            "p=$(docker exec %s curl -s -o /dev/null -w '%%{http_code}' --max-time 10 %s 2>/dev/null); "
+            "ok=0; [ \"$h\" = 200 ] && [ \"${p:-000}\" -ge 200 ] 2>/dev/null && [ \"$p\" -lt 500 ] && ok=1; "
+            "echo \"PROBE state=$st ok=$ok detail=health-$h-ping-$p\""
+            % (n, q(base + dcfg.get("bg_be_health_path", "/actuator/health")), n, q(base + "/api/v1/ping")))
+
+
+def parse_probe(out):
+    """→ (trạng thái container, ok, chi tiết)."""
+    m = re.search(r"PROBE state=(\S*) ok=(\d) detail=(\S*)", out or "")
+    if not m:
+        return "unknown", False, (out or "").strip()[-120:]
+    return m.group(1), m.group(2) == "1", m.group(3)
+
+
+def cmd_recreate_main(dcfg, ch):
+    return "cd %s && docker compose up -d --no-deps --force-recreate %s" % (dcfg["base"], q(ch["service"]))
+
+
+def cmd_service_up(dcfg, services):
+    """Strategy service: chỉ tạo lại các service đổi image, rồi reload nginx (nginx phân giải tên container lúc
+    nạp cấu hình → container mới đổi IP mà không reload thì 502). nginx không chạy → start riêng nó (--no-deps)."""
+    n = q(dcfg["nginx_container"])
+    return ("cd %s && docker compose up -d --no-deps --force-recreate %s && "
+            "if [ \"$(docker inspect -f '{{.State.Running}}' %s 2>/dev/null)\" = true ]; then %s; "
+            "else docker compose up -d --no-deps %s; fi"
+            % (dcfg["base"], " ".join(q(s) for s in services), n, nginx_reload_cmd(dcfg), q(dcfg["nginx_service"])))
+
+
+DESTRUCTIVE_RX = re.compile(
+    r"<\s*(dropColumn|dropTable|renameColumn|renameTable|dropView|modifyDataType|addNotNullConstraint|"
+    r"dropNotNullConstraint|dropForeignKeyConstraint|dropUniqueConstraint|dropPrimaryKey|dropSequence|mergeColumns)\b"
+    r"|\b(DROP\s+(TABLE|COLUMN|VIEW|CONSTRAINT|INDEX)|RENAME\s+(TO|COLUMN)|ALTER\s+COLUMN\s+\S+\s+(TYPE|SET\s+NOT\s+NULL)"
+    r"|TRUNCATE\b)", re.I)
+
+
+def destructive_migrations(diff_text):
+    """Dòng thêm mới (+) trong diff thư mục db/ có thay đổi schema không tương thích ngược → danh sách (tối đa 10)."""
+    out = []
+    for line in (diff_text or "").splitlines():
+        if line.startswith("+") and not line.startswith("+++") and DESTRUCTIVE_RX.search(line):
+            out.append(line[1:].strip()[:160])
+            if len(out) >= 10:
+                break
+    return out
+
+
+def _live_note(text, logf=None):
+    with open(COMPOSE_LIVE, "a", encoding="utf-8") as live:
+        live.write("# %s %s\n" % (datetime.now().strftime("%H:%M:%S"), text))
+    if logf:
+        logf.write("\n# %s\n" % text)
+        logf.flush()
+    log(text)
+
+
+class Runner:
+    """Chạy lệnh trên server (ghi compose-live cho dashboard) hoặc, khi dry=True, chỉ in lệnh sẽ chạy."""
+
+    def __init__(self, dcfg, logf=None, dry=False):
+        self.dcfg, self.logf, self.dry, self.plan = dcfg, logf, dry, []
+
+    def run(self, command, timeout=1800, quiet=False, fake=""):
+        """quiet: lệnh đọc / kiểm tra lặp lại — không stream vào compose-live (tránh làm rối log)."""
+        if self.dry:
+            self.plan.append(command)
+            print("$ " + command)
+            return fake
+        if quiet:
+            return remote(self.dcfg, command, self.logf, timeout=timeout)
+        return remote_stream(self.dcfg, command, self.logf, timeout=timeout)
+
+    def note(self, text):
+        if self.dry:
+            print("# " + text)
+        else:
+            _live_note(text, self.logf)
+
+    def sleep(self, seconds):
+        if not self.dry:
+            time.sleep(seconds)
+
+
+def wait_healthy(rn, ch, host, container, minutes):
+    """Kiểm tra lặp tới khi ok / hết giờ / container đã thoát. → (ok, chi tiết lần cuối)."""
+    deadline, started, last, n = time.time() + minutes * 60, time.time(), "", 0
+    while True:
+        try:
+            out = rn.run(cmd_probe(rn.dcfg, ch, host, container), timeout=90, quiet=True,
+                         fake="PROBE state=running ok=1 detail=dry-run")
+        except (RuntimeError, subprocess.TimeoutExpired) as ex:
+            out = str(ex)
+        st, ok, detail = parse_probe(out)
+        last = "%s state=%s %s" % (host, st, detail)
+        n += 1
+        if ok:
+            rn.note("%s sống sau %.0fs (%s)" % (host, time.time() - started, detail))
+            return True, last
+        if st in ("exited", "dead", "missing"):
+            return False, last
+        if n == 1 or n % 6 == 0:
+            rn.note("chờ %s sống… %s (%.0fs)" % (host, last, time.time() - started))
+        if time.time() >= deadline:
+            return False, last
+        rn.sleep(10)
+
+
+def public_ok(dcfg, ch, minutes=2):
+    """Sau khi nginx trỏ sang bản tạm: URL công khai trả đúng (FE version / API < 500)."""
+    deadline = time.time() + minutes * 60
+    while True:
+        try:
+            if ch["part"] == "fe":
+                html = urllib.request.urlopen(dcfg["fe_url"] + "/", timeout=15).read().decode("utf-8", "replace")
+                if ('content="%s"' % ch["version"]) in html:
+                    return True
+            else:
+                try:
+                    urllib.request.urlopen(dcfg["api_url"] + "/api/v1/ping", timeout=15)
+                    return True
+                except urllib.error.HTTPError as ex:
+                    if ex.code < 500:
+                        return True
+        except OSError:
+            pass
+        if time.time() >= deadline:
+            return False
+        time.sleep(10)
+
+
+def _restore_image(rn, ch):
+    """Trả image cũ vào docker-compose.yml (bản mới không lên — compose up sau này không kéo nhầm bản lỗi)."""
+    if not ch.get("old_image"):
+        rn.note("không biết image cũ của %s — docker-compose.yml vẫn ghi %s, cần sửa tay" % (ch["service"],
+                                                                                         ch["new_image"]))
+        return
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    try:
+        rn.run("cd %s && cp docker-compose.yml docker-compose.yml.bak-%s-rollback-%s && "
+               "sed -i '/^  %s:/,/^  [a-z]/ s|^\\(\\s*image:\\s*\\).*|\\1%s|' docker-compose.yml"
+               % (rn.dcfg["base"], stamp, ch["service"], ch["service"], ch["old_image"]), timeout=60)
+        rn.note("docker-compose.yml: %s trả lại image cũ %s" % (ch["service"], ch["old_image"]))
+    except (RuntimeError, subprocess.TimeoutExpired) as ex:
+        rn.note("trả image cũ lỗi: %s" % str(ex)[:200])
+
+
+def _abort_next(rn, ch, pc, point_main):
+    """Bản mới không đạt: (nếu đã chuyển) nginx về bản chính, xoá bản tạm, trả image cũ."""
+    if point_main:
+        try:
+            rn.run(cmd_write_upstream(rn.dcfg, ch, pc["main_host"]), timeout=120)
+        except (RuntimeError, subprocess.TimeoutExpired) as ex:
+            rn.note("CẢNH BÁO: trỏ nginx về bản chính lỗi: %s" % str(ex)[:200])
+    try:
+        rn.run("docker logs --tail 60 %s 2>&1; docker rm -f %s" % (q(pc["next"]), q(pc["next"])), timeout=120)
+    except (RuntimeError, subprocess.TimeoutExpired):
+        pass
+    _restore_image(rn, ch)
+
+
+def bluegreen_part(rn, ch):
+    """Rollout bluegreen một phần. → "ok" | "fallback" (server chưa sẵn sàng, chưa đụng gì). Lỗi → RolloutError."""
+    dcfg = rn.dcfg
+    pc = part_cfg(dcfg, ch)
+    minutes = float(dcfg.get("bg_health_minutes", 10))
+    ok, why = parse_preflight(rn.run(cmd_preflight(dcfg, ch), timeout=60, quiet=True, fake="PREFLIGHT:OK"))
+    if not ok:
+        rn.note("bluegreen %s: server chưa sẵn sàng (%s) → dùng cách 'service'" % (ch["part"].upper(), why))
+        return "fallback"
+    rn.note("bluegreen %s: %s → %s qua container tạm %s" % (ch["part"].upper(), ch.get("old_image"),
+                                                              ch["new_image"], pc["next"]))
+    # 1. trạng thái sạch: trang chính trỏ bản chính, không còn bản tạm của lần trước
+    rn.run(cmd_write_upstream(dcfg, ch, pc["main_host"]), timeout=120)
+    # 2-3. dựng + kiểm tra bản tạm
+    try:
+        rn.run(cmd_next_start(dcfg, ch), timeout=600)
+        good, last = wait_healthy(rn, ch, pc["next"], pc["next"], minutes)
+        if good:
+            if ch["part"] == "be" and dcfg.get("bg_be_aliases", True):
+                rn.run(cmd_next_net(dcfg, ch, [ch["container"]]), timeout=120)
+            else:
+                rn.run(cmd_next_net(dcfg, ch, [], only_if_service_alias=True), timeout=120)
+            good, last = wait_healthy(rn, ch, pc["next"], pc["next"], 2)
+    except (RuntimeError, subprocess.TimeoutExpired) as ex:
+        good, last = False, str(ex).splitlines()[-1][:200] if str(ex) else repr(ex)
+    if not good:
+        _abort_next(rn, ch, pc, point_main=False)
+        raise RolloutError("%s bản mới %s không lên (%s) — đã xoá container tạm, trang GIỮ bản cũ %s"
+                           % (ch["part"].upper(), ch["new_image"], last, ch.get("old_image")))
+    # 4. chuyển trang chính sang bản tạm
+    try:
+        rn.run(cmd_write_upstream(dcfg, ch, pc["next"]), timeout=120)
+    except (RuntimeError, subprocess.TimeoutExpired) as ex:
+        _abort_next(rn, ch, pc, point_main=True)
+        raise RolloutError("%s: nginx không chuyển được sang bản tạm (%s) — trang GIỮ bản cũ"
+                           % (ch["part"].upper(), str(ex).splitlines()[-1][:200]))
+    if not rn.dry and not public_ok(dcfg, ch):
+        _abort_next(rn, ch, pc, point_main=True)
+        raise RolloutError("%s: sau khi chuyển nginx, URL công khai không trả đúng bản mới — đã trỏ lại bản cũ"
+                           % ch["part"].upper())
+    rn.note("%s: trang chính đang chạy bản tạm %s (%s)" % (ch["part"].upper(), pc["next"], ch["new_image"]))
+    # 5. tạo lại container chính bằng image mới (trang vẫn phục vụ từ bản tạm)
+    try:
+        rn.run(cmd_recreate_main(dcfg, ch), timeout=900)
+        good, last = wait_healthy(rn, ch, pc["main_host"], ch["container"], minutes)
+    except (RuntimeError, subprocess.TimeoutExpired) as ex:
+        good, last = False, str(ex).splitlines()[-1][:200] if str(ex) else repr(ex)
+    if not good:
+        try:
+            rn.run("docker update --restart unless-stopped %s" % q(pc["next"]), timeout=60)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            pass
+        raise RolloutError("%s: container chính %s chưa lên với image mới (%s) — trang VẪN CHẠY bằng container tạm "
+                           "%s (bản mới). Cần xem tay: sửa %s rồi trỏ %s về %s:%d, nginx -s reload, docker rm -f %s"
+                           % (ch["part"].upper(), ch["container"], last, pc["next"], ch["container"], pc["file"],
+                              pc["main_host"], pc["port"], pc["next"]))
+    # 6. trỏ về bản chính, drain, xoá bản tạm
+    rn.run(cmd_write_upstream(dcfg, ch, pc["main_host"]), timeout=120)
+    rn.sleep(int(dcfg.get("bg_drain_seconds", 15)))
+    try:
+        # reload lần nữa sau khi xoá: nginx phân giải tên lúc nạp cấu hình, không giữ IP của bản tạm đã xoá
+        rn.run("docker rm -f %s && %s" % (q(pc["next"]), nginx_reload_cmd(dcfg)), timeout=120)
+    except (RuntimeError, subprocess.TimeoutExpired) as ex:
+        rn.note("xoá %s / reload nginx lỗi (%s) — xem tay" % (pc["next"], str(ex)[:120]))
+    rn.note("%s: xong, trang chính chạy %s trên %s" % (ch["part"].upper(), ch["new_image"], ch["container"]))
+    return "ok"
+
+
+def plan_parts(dcfg, changes, strategy=None):
+    """→ [(change, cách)] với cách ∈ bluegreen | service; strategy recreate → [] (rollout chạy compose cũ)."""
+    strategy = strategy or dcfg.get("deploy_strategy") or "bluegreen"
+    if strategy not in STRATEGIES:
+        raise RolloutError("DEPLOY_STRATEGY=%s không hợp lệ (%s)" % (strategy, "|".join(STRATEGIES)))
+    if strategy == "recreate":
+        return []
+    parts = [p.lower() for p in (dcfg.get("bg_parts") or [])]
+    out = []
+    for ch in changes:
+        how = "bluegreen" if strategy == "bluegreen" and ch["part"] in parts else "service"
+        if how == "bluegreen" and ch["part"] == "be" and ch.get("destructive") \
+                and dcfg.get("bg_be_destructive", "fallback") != "ignore":
+            how = "service"
+        out.append((ch, how))
+    return out
+
+
+def rollout(dcfg, changes, logf=None, dry=False, strategy=None):
+    """Đưa các image mới (changes từ deploy_fe / deploy_be) vào chạy theo DEPLOY_STRATEGY. Ghi compose-live như
+    compose_up để dashboard theo dõi. Lỗi → ném lỗi (run_all báo DEPLOY 86 LỖI, không QA)."""
+    strategy = strategy or dcfg.get("deploy_strategy") or "bluegreen"
+    if strategy == "recreate":
+        if dry:
+            print("$ cd %s && docker compose up -d --force-recreate   # strategy recreate (cách cũ)" % dcfg["base"])
+            return
+        compose_up(dcfg, logf)
+        return
+    plan = plan_parts(dcfg, changes, strategy)
+    rn = Runner(dcfg, logf, dry)
+    if not dry:
+        with open(COMPOSE_LIVE, "w", encoding="utf-8") as live:
+            live.write("# deploy %s@%s:%s — %s — bắt đầu %s\n" % (
+                dcfg["user"], dcfg["host"], dcfg["base"], strategy, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        _compose_state(running=True, started_at=datetime.now().isoformat(timespec="seconds"), last_code=None,
+                       result=None, host=dcfg["host"])
+    result, errors = "error", []
+    try:
+        service_list = []
+        for ch, how in plan:
+            if how == "service" and ch["part"] == "be" and ch.get("destructive") and strategy == "bluegreen":
+                rn.note("BE có migration phá cấu trúc → không chạy song song bản cũ / mới, dùng 'service': %s"
+                        % "; ".join(ch["destructive"][:3]))
+            if how == "bluegreen":
+                try:
+                    if bluegreen_part(rn, ch) == "ok":
+                        continue
+                except RolloutError as ex:  # phần này giữ bản cũ / bản tạm; vẫn làm tiếp phần còn lại
+                    rn.note("LỖI: %s" % ex)
+                    errors.append(str(ex))
+                    continue
+            service_list.append(ch["service"])
+        if service_list:
+            rn.note("tạo lại (dừng ngắn): %s" % ", ".join(service_list))
+            rn.run(cmd_service_up(dcfg, service_list), timeout=1800)
+        if errors:
+            raise RolloutError(" | ".join(errors))
+        result = "ok"
+    finally:
+        if not dry:
+            with open(COMPOSE_LIVE, "a", encoding="utf-8") as live:
+                live.write("\n# kết thúc %s — %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                      "THÀNH CÔNG" if result == "ok" else "LỖI"))
+            _compose_state(running=False, result=result, finished_at=datetime.now().isoformat(timespec="seconds"))
 
 
 def revive_be(dcfg, logf=None):
@@ -1191,12 +1688,13 @@ def run_all(dry_run=False, only=None, auto_only=False, force=False):
         logf = open(os.path.join(root, "deploy-%s.log" % datetime.now().strftime("%m%d-%H%M")), "w", encoding="utf-8")
         af.notify("[DEPLOY 86]", "Bắt đầu deploy: FE %d commit, BE %d commit" % (len(commits["FE"]), len(commits["BE"])))
         try:
+            changes = []
             if commits["FE"]:
-                fe_version = deploy_fe(acfg, dcfg, root, logf)
+                fe_version = deploy_fe(acfg, dcfg, root, logf, changes)
                 deployed_parts.append("FE %s" % fe_version)
             if commits["BE"]:
-                deployed_parts.append("BE %s:%s" % (dcfg["be_image"], deploy_be(acfg, dcfg, root, logf)))
-            compose_up(dcfg, logf)
+                deployed_parts.append("BE %s:%s" % (dcfg["be_image"], deploy_be(acfg, dcfg, root, logf, changes)))
+            rollout(dcfg, changes, logf)
         except Exception as ex:  # noqa: BLE001
             msg = "deploy lỗi: %s (log %s)" % (str(ex).splitlines()[0][:300], logf.name)
             log(msg)
@@ -1351,6 +1849,28 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         return
     save_pending(set(waiting) - done | set(remaining), "")
 
+def print_rollout_plan(parts, strategy=None, destructive=False):
+    """--rollout-plan: in lệnh sẽ chạy (dry-run, không ssh). Mật khẩu không in."""
+    dcfg = dict(DEFAULTS)
+    dcfg.update(envconf.overlay(envconf.deploy_config(), ROLLOUT_ENV))
+    dcfg.setdefault("base", "~/soar_v2.0")
+    changes = []
+    if "fe" in parts:
+        changes.append({"part": "fe", "service": dcfg["fe_service"], "container": dcfg["fe_container"],
+                        "old_image": "%s:<bản-cũ>" % dcfg["fe_image"], "new_image": "%s:<VERSION>" % dcfg["fe_image"],
+                        "version": "<VERSION>"})
+    if "be" in parts:
+        changes.append({"part": "be", "service": dcfg["be_service"], "container": dcfg["be_container"],
+                        "old_image": "%s:<bản-cũ>" % dcfg["be_image"], "new_image": "%s:<TAG>" % dcfg["be_image"],
+                        "version": "<TAG>", "destructive": ["<dropColumn ...> (giả định)"] if destructive else []})
+    strategy = strategy or dcfg.get("deploy_strategy") or "bluegreen"
+    print("# strategy=%s, server %s:%s (dry-run: preflight / kiểm tra sống coi như đạt)"
+          % (strategy, dcfg.get("host", "?"), dcfg["base"]))
+    for ch, how in plan_parts(dcfg, changes, strategy):
+        print("# %s → %s" % (ch["part"].upper(), how))
+    rollout(dcfg, changes, dry=True, strategy=strategy)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Deploy lên server test 86 rồi QA tự động từng ticket.")
     parser.add_argument("--dry-run", action="store_true", help="chỉ liệt kê commit / ticket chưa deploy")
@@ -1362,7 +1882,16 @@ def main():
                              "(op-watch gọi định kỳ)")
     parser.add_argument("--resume", action="store_true",
                         help="QA tiếp hàng chờ (ticket dở do server bị cập nhật); có commit mới thì deploy trước")
+    parser.add_argument("--rollout-plan", nargs="*", choices=["fe", "be"], metavar="fe|be",
+                        help="chỉ IN các lệnh rollout (bluegreen / service / recreate) sẽ chạy trên server cho FE/BE "
+                             "(mặc định cả hai) với image giả định — không ssh, không build, không đổi gì")
+    parser.add_argument("--strategy", choices=STRATEGIES, help="cùng --rollout-plan: thử cách khác DEPLOY_STRATEGY")
+    parser.add_argument("--destructive", action="store_true",
+                        help="cùng --rollout-plan: giả định BE có migration phá cấu trúc")
     args = parser.parse_args()
+    if args.rollout_plan is not None:
+        print_rollout_plan(args.rollout_plan or ["fe", "be"], args.strategy, args.destructive)
+        return
     if args.review_watch:
         review_watch()
         return
