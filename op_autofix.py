@@ -465,6 +465,24 @@ Sau đó: từng file → mỗi phía đổi gì → đã gộp thế nào (ho�
 """
 
 
+
+OFFLINE_MISS = "in offline mode and the artifact"
+
+
+def run_build(cmd, cwd, out, acfg, timeout=1800):
+    """Chạy lệnh build, ghi log vào out. mvn -o thiếu dependency mới (chưa có trong ~/.m2) → chạy lại online một lần."""
+    res = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                         env=build_env(acfg), timeout=timeout, universal_newlines=True, errors="replace")
+    out.write(res.stdout)
+    out.flush()
+    if res.returncode != 0 and cmd[:1] == ["mvn"] and "-o" in cmd and OFFLINE_MISS in res.stdout:
+        online = [c for c in cmd if c != "-o"]
+        out.write("\n# thiếu dependency trong ~/.m2 → chạy lại online để tải\n$ %s\n" % " ".join(online))
+        out.flush()
+        res = subprocess.run(online, cwd=cwd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             env=build_env(acfg), timeout=timeout)
+    return res.returncode
+
 def union_properties(text):
     """Gộp các khối xung đột của file .properties: giữ dòng của cả hai bên, bỏ dòng trùng. None nếu cùng một khoá mà
     hai bên đặt giá trị khác nhau (không đoán được bên nào đúng)."""
@@ -715,8 +733,7 @@ def preexisting_test_failures(acfg, repo_dir, commits, tests, log_path):
             out.write("\n# Test lỗi ở bản sửa — chạy lại trên commit trước bản sửa (%s^) để xem có phải lỗi sẵn không\n"
                       "$ %s\n" % (oldest[:9], " ".join(cmd)))
             out.flush()
-            subprocess.run(cmd, cwd=base_dir, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                           env=build_env(acfg), timeout=1800)
+            run_build(cmd, base_dir, out, acfg)
         base_fail = surefire_failures(os.path.join(base_dir, acfg["be_subdir"])) or set()
         new = fix_fail - base_fail
         with open(log_path, "a", encoding="utf-8") as out:
@@ -757,8 +774,7 @@ def verify(acfg, label, repo_dir, commits, log_path):
         for cmd in cmds:
             out.write("\n$ %s\n" % " ".join(cmd))
             out.flush()
-            code = subprocess.run(cmd, cwd=repo_dir, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                  env=build_env(acfg), timeout=1800).returncode
+            code = run_build(cmd, repo_dir, out, acfg)
             if code != 0:
                 if label == "BE" and "test" in cmd:
                     note = preexisting_test_failures(acfg, repo_dir, commits, tests, log_path)

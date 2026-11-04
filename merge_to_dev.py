@@ -106,8 +106,7 @@ def check_build(acfg, label, work, log_path):
     with open(log_path, "a", encoding="utf-8") as out:
         out.write("\n$ %s\n" % " ".join(cmd))
         out.flush()
-        code = subprocess.run(cmd, cwd=work, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                              env=af.build_env(acfg), timeout=1800).returncode
+        code = af.run_build(cmd, work, out, acfg)
     if code != 0:
         raise RuntimeError("%s `%s` lỗi sau khi merge (xem %s)" % (label, " ".join(cmd[:3]), log_path))
 
