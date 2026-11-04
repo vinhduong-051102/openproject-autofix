@@ -53,8 +53,60 @@ header h1 { font-size: 16px; margin: 0; font-weight: 600; }
 .meta { color: var(--text-3); font-size: 12px; display: flex; gap: 14px; align-items: center; margin-left: auto; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; background: var(--text-3); }
 .dot.on { background: var(--ok-fill); } .dot.off { background: var(--crit-fill); }
-main { display: grid; grid-template-columns: minmax(360px, 460px) minmax(0, 1fr); gap: 20px; padding: 20px 24px; align-items: start; }
-@media (max-width: 960px) { main { grid-template-columns: minmax(0, 1fr); padding: 16px; } header { padding: 12px 16px; flex-wrap: wrap; } .meta { margin-left: 0; } }
+/* Trang không cuộn: header cố định, chỉ vùng nội dung (main) cuộn bên trong. */
+html, body { height: 100%; overflow: hidden; }
+body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+header { flex: 0 0 auto; }
+main { padding: 20px 24px; flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+/* Trang: mỗi lúc chỉ hiện một trang (nav trên header). Autofix chia 2 cột, các trang khác một cột. */
+.view { display: none; }
+.view.on { display: block; }
+.view.split.on { display: grid; grid-template-columns: minmax(360px, 460px) minmax(0, 1fr); gap: 20px; align-items: start; }
+.view:not(.split) { max-width: 1180px; margin: 0 auto; }
+nav.views { display: flex; gap: 2px; }
+nav.views button { border: 0; background: none; border-radius: 6px; padding: 6px 12px; color: var(--text-2); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+nav.views button:hover { background: var(--panel-2); color: var(--text); }
+nav.views button.on { background: var(--accent-soft); color: var(--accent); }
+.vbadge:empty { display: none; }
+.vbadge { font-size: 11px; min-width: 18px; padding: 0 6px; border-radius: 999px; background: var(--warn-fill); color: #000; font-weight: 700; line-height: 18px; text-align: center; }
+.vbadge.live { background: var(--accent); color: #fff; } .vbadge.crit { background: var(--crit-fill); color: #fff; }
+button.health { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; border-radius: 999px; padding: 4px 12px; }
+button.health.crit { border-color: var(--crit-fill); color: var(--crit); }
+details.menu { position: relative; }
+details.menu > summary { list-style: none; cursor: pointer; border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-weight: 700; color: var(--text-2); }
+details.menu > summary::-webkit-details-marker { display: none; }
+details.menu[open] > summary { border-color: var(--accent); color: var(--accent); }
+.menu-box { position: absolute; right: 0; top: calc(100% + 6px); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 12px 30px rgba(0,0,0,.35); padding: 10px; display: grid; gap: 10px; min-width: 250px; z-index: 5; }
+.menu-box label { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-2); font-size: 13px; }
+/* Dịch vụ (trang Hệ thống) */
+.svc { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; padding: 14px 16px; }
+.svc .chip { border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px; font-size: 13px; color: var(--text); }
+.svc .chip small { margin-left: 0; display: block; }
+.svc .chip.bad { border-color: var(--crit-fill); }
+/* Việc cần xử lý */
+.todo-group { padding: 4px 0 8px; border-bottom: 1px solid var(--border); }
+.todo-group:last-child { border-bottom: 0; }
+.todo-group > h3 { font-size: 12.5px; color: var(--text-2); margin: 12px 16px 6px; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+.todo-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 14px; padding: 9px 16px; align-items: center; }
+.todo-item:hover { background: var(--panel-2); }
+.todo-item .t { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.todo-item .t .id { font: 600 13px var(--mono); }
+.todo-item .s { grid-column: 1; color: var(--text-2); font-size: 12.5px; overflow-wrap: anywhere; }
+.todo-item .a { grid-row: 1 / 3; grid-column: 2; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.todo-empty { padding: 40px 16px; text-align: center; color: var(--text-3); }
+.todo-empty b { display: block; font-size: 18px; color: var(--ok); margin-bottom: 6px; }
+@media (max-width: 1100px) { nav.views button { padding: 6px 8px; } header h1 { display: none; } }
+@media (max-width: 960px) {
+  main { padding: 12px 10px 80px; }
+  .view.split.on { grid-template-columns: minmax(0, 1fr); }
+  header { padding: 10px 12px; gap: 8px; }
+  .meta { margin-left: auto; gap: 8px; }
+  /* Điện thoại: thanh trang ở đáy màn hình */
+  nav.views { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--border); justify-content: space-around; padding: 4px 2px calc(4px + env(safe-area-inset-bottom)); z-index: 6; }
+  nav.views button { flex-direction: column; gap: 2px; font-size: 11.5px; padding: 6px 4px; flex: 1; }
+  header h1 { display: block; font-size: 15px; }
+  button.health span.htxt { display: none; }
+}
 section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 20px; }
 section > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-2); margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
 section > h2 .right { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
@@ -266,7 +318,7 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 #imgZoom[hidden] { display: none; }
 #imgZoom img { max-width: 100%; max-height: 100%; }
 section > h2 a.ext { color: var(--accent); text-transform: none; letter-spacing: 0; font-weight: 400; text-decoration: none; }
-.leftcol { position: sticky; top: calc(var(--hdr, 60px) + 20px); height: calc(100vh - var(--hdr, 60px) - 40px);
+.leftcol { height: 100%;
   display: flex; flex-direction: column; gap: 20px; min-height: 0; }
 .leftcol > section { margin-bottom: 0; display: flex; flex-direction: column; min-height: 0; flex: 0 1 auto; }
 .leftcol > #pendingBox, .leftcol > #reviewBox { max-height: 38%; }
@@ -387,44 +439,132 @@ header { flex-wrap: wrap; min-width: 0; }
 .tg-form textarea { width: 100%; min-height: 54px; font: inherit; margin: 0; display: block; }
 .tg-form input[type=text], .tg-form input[type=number], .tg-form input[type=password], .tg-form select { width: 100%; }
 .tg-form h4 { grid-column: 1 / -1; margin: 10px 0 0; font-size: 13px; color: var(--text-2); border-top: 1px solid var(--border); padding-top: 10px; }
+/* Mỗi trang vừa khít trong main (main không cuộn); phần dài tự cuộn trong khung của nó. */
+.view.on { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; gap: 20px; }
+.view > section { margin-bottom: 0; min-height: 0; display: flex; flex-direction: column; }
+.view > section > *, #detail > * { flex-shrink: 0; }
+#todoBox, #tgBox, #opBox { flex: 1 1 0; }
+.switch { white-space: nowrap; }
+#todo, #tgList, #opList { flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; flex-shrink: 1 !important; }
+#reviewBox { flex: 0 0 auto; max-height: 35%; }
+#reviewList { flex: 1 1 auto; min-height: 0; overflow-y: auto; flex-shrink: 1 !important; }
+.view.split.on { display: grid; grid-template-rows: minmax(0, 1fr); }
+.rightcol { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+#detail { flex: 1 1 auto; min-height: 0; margin-bottom: 0; display: flex; flex-direction: column; overflow: hidden; }
+#detail > .log, #detail > #otherLog { flex: 1 1 auto !important; height: auto; min-height: 0; flex-shrink: 1 !important; overscroll-behavior: contain; }
+#detail > .empty { flex: 1 1 auto; }
+/* Hệ thống: Dịch vụ trên cùng; Log compose (trái) | Agent & hạn mức (phải); Inbox dưới log */
+.view[data-view="system"].on { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: "svc svc" "compose prof" "inbox prof"; gap: 20px; max-width: none; }
+#svcBox { grid-area: svc; } #composeBox { grid-area: compose; } #profBox { grid-area: prof; overflow-y: auto; overscroll-behavior: contain; display: block; }
+#inboxBox { grid-area: inbox; }
+#profBox > h2 { position: sticky; top: 0; z-index: 1; background: var(--panel); }
+#composeLog { flex: 1 1 auto !important; height: auto; min-height: 0; flex-shrink: 1 !important; }
+#inboxBox .inbox { max-height: 26vh; }
+/* Điện thoại — đặt cuối để thắng các quy tắc gốc phía trên */
+@media (max-width: 960px) {
+  .view.split.on { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 2fr) minmax(0, 3fr); gap: 12px; }
+  .view.on { gap: 12px; }
+  .view[data-view="system"].on { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr) auto;
+    grid-template-areas: "svc" "compose" "prof" "inbox"; gap: 12px; }
+  .svc { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 8px; }
+  .svc .chip { padding: 6px 8px; font-size: 12px; }
+  #reviewBox { max-height: 40%; }
+  .leftcol { gap: 12px; }
+  /* Khung chi tiết hẹp: cả khung cuộn (đầu + nút + log), log cao cố định thay vì bị ép còn vài dòng */
+  #detail { overflow-y: auto; overscroll-behavior: contain; }
+  #detail > .log, #detail > #otherLog { flex: 0 0 auto !important; height: 60vh; }
+  #composeBox > h2 .sum { display: none; }
+
+  .todo-item { grid-template-columns: minmax(0, 1fr); }
+  .todo-item .a { grid-row: auto; grid-column: 1; justify-content: flex-start; }
+  .act { grid-template-columns: minmax(0, 1fr) auto; }
+  .act .kind { display: none; }
+  .act .sub { grid-column: 1 / 3; }
+  .act .sub, .op-row .subj, .run .verdict { white-space: normal; overflow: visible; text-overflow: clip; }
+  .act .title { flex-wrap: wrap; }
+  .acts { max-height: none; }
+  .op-row { grid-template-columns: 84px minmax(0, 1fr); }
+  .op-row .when { grid-column: 2; text-align: left; }
+  .tabs { padding: 0 6px; }
+  .detail-head h3 { font-size: 16px; }
+  .toolbar .force { flex-basis: 100%; }
+  .tg-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .svc { grid-template-columns: minmax(0, 1fr); }
+}
 </style>
 </head>
 <body>
 <header>
-  <h1>Autofix · theo dõi</h1>
+  <h1>Autofix</h1>
+  <nav class="views" id="views" aria-label="Trang">
+    <button data-view="todo">Cần xử lý <span class="vbadge" id="todoN"></span></button>
+    <button data-view="autofix">Autofix <span class="vbadge live" id="liveN"></span></button>
+    <button data-view="ticket">Ticket</button>
+    <button data-view="telegram">Telegram <span class="vbadge" id="tgN"></span></button>
+    <button data-view="system">Hệ thống <span class="vbadge crit" id="sysN"></span></button>
+  </nav>
   <div class="meta">
-    <span class="chips" id="chips"></span>
+    <button class="health" id="health" title="Tình trạng các dịch vụ — bấm để xem">—</button>
     <button id="newTask" class="primary" title="Mô tả task + đính kèm file, AI soạn theo mẫu tester rồi tạo trên OpenProject (New)">+ Tạo task</button>
-    <button id="pollNow" title="Hỏi OpenProject ngay (task mới / Reopened / comment, ticket Review chờ QA) — không chờ chu kỳ 2 phút">↻ Kiểm tra ngay</button>
-    <span id="updated">—</span>
-    <select id="theme" title="Giao diện">
-      <option value="dark">Tối</option>
-      <option value="light">Sáng</option>
-      <option value="auto">Theo hệ thống</option>
-    </select>
+    <details class="menu" id="menu"><summary aria-label="Thêm">⋯</summary>
+      <div class="menu-box">
+        <button id="pollNow" title="Hỏi OpenProject ngay (task mới / Reopened / comment, ticket Review chờ QA) — không chờ chu kỳ 2 phút">↻ Kiểm tra OpenProject ngay</button>
+        <label>Giao diện <select id="theme" title="Giao diện">
+          <option value="dark">Tối</option>
+          <option value="light">Sáng</option>
+          <option value="auto">Theo hệ thống</option>
+        </select></label>
+        <span class="muted" id="updated">—</span>
+      </div>
+    </details>
   </div>
 </header>
 <main>
-  <div class="leftcol">
+  <div class="view" data-view="todo">
+    <section id="todoBox">
+      <h2>Việc cần bạn xử lý <span class="right" id="todoSum"></span></h2>
+      <div id="todo"><div class="empty">Đang tải…</div></div>
+    </section>
+  </div>
+  <div class="view split" data-view="autofix">
+    <div class="leftcol">
     <section id="pendingBox" hidden>
       <h2>Chờ Claude xem lại <span class="right" id="pendingCount"></span></h2>
       <div class="hint" id="pendingReady"></div>
       <div id="pending"></div>
-    </section>
-    <section id="reviewBox" hidden>
-      <h2>Chờ QA trên server <span class="right" id="reviewCount"></span></h2>
-      <div class="hint" id="reviewHint"></div>
-      <div id="reviewList"></div>
     </section>
     <section id="actBox">
       <h2>Hoạt động <span class="right" id="actCount"></span></h2>
       <div class="filters" id="filters"></div>
       <div class="acts" id="acts"></div>
     </section>
-  </div>
-  <div>
+    </div>
+    <div class="rightcol">
     <section id="detail"><div class="empty">Chọn một mục để xem chi tiết</div></section>
-    <section class="fold" id="tgBox">
+    </div>
+  </div>
+  <div class="view" data-view="ticket">
+    <section id="reviewBox">
+      <h2>Chờ QA trên server <span class="right" id="reviewCount"></span></h2>
+      <div class="hint" id="reviewHint"></div>
+      <div id="reviewList"></div>
+    </section>
+    <section id="opBox">
+      <h2>OpenProject <span class="sum" id="opSum"></span>
+        <span class="right"><a class="ext" id="opExt" href="#" target="_blank" rel="noopener">Mở OpenProject ↗</a></span></h2>
+      <div class="op-bar">
+        <div class="seg" id="opScope"><button data-v="mine" class="on">Của tôi</button><button data-v="all">Cả project</button></div>
+        <div class="seg" id="opStatus"><button data-v="open" class="on">Đang mở</button><button data-v="all">Tất cả</button></div>
+        <input id="opQ" type="search" placeholder="Tìm tiêu đề / nội dung / SOAR-…">
+        <button id="opRefresh" title="Tải lại từ OpenProject">↻</button>
+      </div>
+      <div class="op-list" id="opList"><div class="empty">Đang tải…</div></div>
+      <div class="op-foot" id="opFoot"></div>
+    </section>
+  </div>
+  <div class="view" data-view="telegram">
+    <section id="tgBox">
       <h2>Yêu cầu tester (Telegram) <span class="sum" id="tgSum"></span>
         <span class="right"><span class="badge" id="tgWatcher" title="Tiến trình op-telegram">—</span></span></h2>
       <div class="tg-tiles" id="tgTiles"></div>
@@ -438,24 +578,18 @@ header { flex-wrap: wrap; min-width: 0; }
       </div>
       <div class="op-list" id="tgList"><div class="empty">Đang tải…</div></div>
     </section>
-    <section class="fold" id="opBox">
-      <h2>OpenProject <span class="sum" id="opSum"></span>
-        <span class="right"><a class="ext" id="opExt" href="#" target="_blank" rel="noopener">Mở OpenProject ↗</a></span></h2>
-      <div class="op-bar">
-        <div class="seg" id="opScope"><button data-v="mine" class="on">Của tôi</button><button data-v="all">Cả project</button></div>
-        <div class="seg" id="opStatus"><button data-v="open" class="on">Đang mở</button><button data-v="all">Tất cả</button></div>
-        <input id="opQ" type="search" placeholder="Tìm tiêu đề / nội dung / SOAR-…">
-        <button id="opRefresh" title="Tải lại từ OpenProject">↻</button>
-      </div>
-      <div class="op-list" id="opList"><div class="empty">Đang tải…</div></div>
-      <div class="op-foot" id="opFoot"></div>
+  </div>
+  <div class="view" data-view="system">
+    <section id="svcBox">
+      <h2>Dịch vụ <span class="right muted" id="svcSum"></span></h2>
+      <div class="svc" id="chips"></div>
     </section>
-    <section class="fold" id="composeBox">
+    <section id="composeBox">
       <h2>Log compose server 86 <span class="sum" id="composeSum"></span>
         <span class="right"><span class="badge" id="composeBadge">—</span></span></h2>
       <pre class="log compose" id="composeLog">(chưa có lần deploy nào ghi log)</pre>
     </section>
-    <section class="fold" id="profBox">
+    <section id="profBox">
       <h2>Agent &amp; hạn mức <span class="sum" id="profSum"></span>
         <label class="switch right" title="Gói đang dùng chạm ngưỡng thì lượt sau tự dùng gói khác còn hạn mức">
           <input type="checkbox" id="auto"><span></span>Tự chuyển gói
@@ -796,17 +930,31 @@ function bindSchedule() {
   if ($("skipToday")) $("skipToday").onclick = () => post({action: "merge_skip", until: todayIso()});
   if ($("skipUntil")) $("skipUntil").onclick = () => post({action: "merge_skip", until: $("skipDate").value});
 }
+function jobState(j) {
+  const running = j.active === "activating";
+  const ok = j.loaded && (j.timer ? (j.timer_active === "active" && (running || j.result === "success")) : j.active === "active");
+  const skip = j.schedule && j.schedule.skip_until;
+  const note = j.timer ? (running ? "đang chạy" : !ok ? "lần chạy trước lỗi" : skip ? "hoãn tới hết " + ddmm(skip) : "lượt tới " + sysTime(j.next).slice(6))
+    : (ok ? "đang chạy" : "đã dừng");
+  return {running, ok, note};
+}
 function renderChips() {
-  const jobs = S.jobs || [];
+  const jobs = (S.jobs || []).filter((j) => j.key !== "dashboard");  // trang đang mở thì dashboard chắc chắn chạy
   $("chips").innerHTML = jobs.map((j) => {
-    const running = j.active === "activating";
-    const ok = j.loaded && (j.timer ? (j.timer_active === "active" && (running || j.result === "success")) : j.active === "active");
-    const dot = running ? "busy" : ok ? "on" : "off";
-    const skip = j.schedule && j.schedule.skip_until;
-    const note = j.timer ? (running ? "đang chạy" : skip ? "hoãn tới hết " + ddmm(skip) : "lượt tới " + sysTime(j.next).slice(6)) : (ok ? "" : "dừng");
-    return `<span class="chip ${selKind === "job" && selKey === j.key ? "sel" : ""}" data-job="${j.key}" title="${esc(j.desc)}"><i class="dot ${dot}"></i>${esc(j.name)}${note ? `<small>${esc(note)}</small>` : ""}</span>`;
+    const st = jobState(j);
+    return `<button class="chip ${st.ok ? "" : "bad"}" data-job="${j.key}" title="${esc(j.desc)} — bấm xem log"><span><i class="dot ${st.running ? "busy" : st.ok ? "on" : "off"}"></i><b>${esc(j.name)}</b></span><small>${esc(st.note)}</small></button>`;
   }).join("");
-  document.querySelectorAll("[data-job]").forEach((el) => el.onclick = () => selectOther("job", el.dataset.job));
+  document.querySelectorAll("[data-job]").forEach((el) => el.onclick = () => { selectOther("job", el.dataset.job); showView("autofix"); });
+  const bad = jobs.filter((j) => !jobState(j).ok), busy = jobs.filter((j) => jobState(j).running);
+  const tgw = (TG.data && TG.data.watcher) || {};
+  const tgBad = TG.data && !(tgw.at && Date.now() - new Date(tgw.at).getTime() < 90000 && !tgw.error);
+  const n = bad.length + (tgBad ? 1 : 0);
+  const h = $("health");
+  h.className = "health " + (n ? "crit" : "");
+  h.innerHTML = n ? `<i class="dot off"></i><span class="htxt">${esc(bad.map((j) => j.name).concat(tgBad ? ["Telegram"] : []).join(", "))} lỗi</span>`
+    : `<i class="dot ${busy.length ? "busy" : "on"}"></i><span class="htxt">${busy.length ? esc(busy.map((j) => j.name).join(", ")) + " đang chạy" : "Hệ thống ổn"}</span>`;
+  $("sysN").textContent = n || "";
+  $("svcSum").textContent = n ? `${n} dịch vụ cần xem` : "tất cả đang chạy bình thường";
 }
 function selectOther(kind, key) {
   selKind = kind; selKey = key; sel = null; otherText = ""; otherKey = "";
@@ -958,8 +1106,10 @@ function renderDetail() {
   const [label, cls] = STATE_LABEL[r.state] || [r.state, ""];
   const live = ["queued", "preparing", "running", "shipping"].includes(r.state);
   const opts = S.profiles.filter((p) => p.logged_in).map((p) => `<option ${p.active ? "selected" : ""}>${esc(p.name)}</option>`).join("");
-  const tabs = ["Thao tác"].concat(r.files || []);
-  if (!tabs.includes(tab)) tab = "Thao tác";
+  // Kết quả trước, log sau: Báo cáo → đánh giá → QA → log thao tác → prompt / lỗi.
+  const ORDER = ["Báo cáo", "Gemini", "Claude xem lại", "QA", "Build/test", "Thao tác", "Prompt", "Lỗi Claude"];
+  const tabs = ["Thao tác"].concat(r.files || []).sort((a, b) => (ORDER.indexOf(a) + 99) % 99 - (ORDER.indexOf(b) + 99) % 99 || 0);
+  if (!tab || !tabs.includes(tab)) tab = live || !tabs.includes("Báo cáo") ? "Thao tác" : "Báo cáo";
   $("detail").innerHTML = `
     <div class="detail-head">
       <h3>${esc(r.display_id)} <span class="badge ${cls}">${label}</span></h3>
@@ -980,7 +1130,7 @@ function renderDetail() {
         <input type="checkbox" id="ignoreLimits"> Bỏ qua ngưỡng hạn mức</label>
       ${r.wp_id ? `<a href="${esc(S.op_url)}/work_packages/${esc(r.wp_id)}" target="_blank" rel="noopener"><button>Mở OpenProject ↗</button></a>` : ""}
     </div>
-    <div class="tabs">${tabs.map((t) => `<button class="${t === tab ? "on" : ""}" data-tab="${esc(t)}">${esc(t)}</button>`).join("")}</div>
+    <div class="tabs">${tabs.map((t) => `<button class="${t === tab ? "on" : ""}" data-tab="${esc(t)}">${esc(t === "Thao tác" ? "Log thao tác" : t)}</button>`).join("")}</div>
     <div class="diffline" id="diff"></div>
     <div class="log" id="log"></div>`;
   document.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { tab = b.dataset.tab; fileCache = ""; renderDetail(); loadTab(true); });
@@ -1118,7 +1268,7 @@ async function loadTab(reset) {
   }
   paintLog();
 }
-function select(id) { sel = id; selKind = "run"; selKey = id; tab = "Thao tác"; renderActs(); renderChips(); renderDetail(); loadTab(true); }
+function select(id) { sel = id; selKind = "run"; selKey = id; tab = null; renderActs(); renderChips(); renderDetail(); loadTab(true); }
 
 
 let parDirty = false;
@@ -1146,6 +1296,9 @@ async function refresh() {
     S = await (await fetch("/api/state")).json();
     $("updated").textContent = "Cập nhật " + new Date().toLocaleTimeString("vi-VN");
     renderChips(); renderAgents(); renderProfiles(); renderSummaries(); renderPending(); renderReview(); renderActs(); renderInbox();
+    renderTodo();
+    const live = (S.runs || []).filter((r) => ["queued", "preparing", "running", "shipping"].includes(r.state)).length;
+    $("liveN").textContent = live || "";
     if (selKind !== "run") { renderOther(true); return; }
     if (!sel) { const f = activities()[0]; if (f) { if (f.kind === "run") select(f.key); else selectOther(f.kind, f.key); } return; }
     const r = current(), head = document.querySelector(".detail-head .badge");
@@ -1586,7 +1739,10 @@ function tgRender() {
     const v = {pending: "open", drafting: "open", created: "created", rejected: "rejected"}[b.dataset.tgtile];
     tgSetStatus(v);
   });
-  $("tgChart").innerHTML = tgChartSvg(d.per_day);
+  const anyDay = (d.per_day || []).some((x) => x.n);
+  $("tgChart").innerHTML = anyDay ? tgChartSvg(d.per_day) : "";
+  $("tgChart").hidden = !anyDay;
+  $("tgN").textContent = (c.pending || 0) + (c.draft_ready || 0) || "";
   $("tgSum").textContent = c.pending ? `— ${c.pending} chờ duyệt` : "";
   $("tgList").innerHTML = d.items.length ? d.items.map((r) => `<div class="op-row tg-row" data-tgid="${r.id}">
       <span class="id">#${r.id}</span><span class="subj">${esc(r.title || r.first_text || "(tệp đính kèm)")}</span>
@@ -1892,6 +2048,98 @@ tgAskCount(); setInterval(tgAskCount, 30000);
 
 $("tgBox").querySelector("h2").addEventListener("click", () => setTimeout(tgLoad, 0));
 tgLoad(); setInterval(tgLoad, 15000);
+
+// ---- Trang (nav trên header / đáy màn hình trên điện thoại) ----
+const VIEWS = ["todo", "autofix", "ticket", "telegram", "system"];
+function showView(v) {
+  if (!VIEWS.includes(v)) v = "todo";
+  document.querySelectorAll(".view").forEach((el) => el.classList.toggle("on", el.dataset.view === v));
+  document.querySelectorAll("nav.views [data-view]").forEach((b) => b.classList.toggle("on", b.dataset.view === v));
+  try { localStorage.setItem("view", v); } catch (e) {}
+  if (v === "telegram" && typeof tgLoad === "function") tgLoad();
+  if (v === "ticket" && typeof loadOP === "function") loadOP();
+  if (v === "todo") renderTodo();
+  document.querySelectorAll(".view.on .scroll-reset").forEach((el) => { el.scrollTop = 0; });
+}
+document.querySelectorAll("nav.views [data-view]").forEach((b) => b.onclick = () => showView(b.dataset.view));
+$("health").onclick = () => showView("system");
+document.addEventListener("click", (e) => { const m = $("menu"); if (m.open && !e.target.closest("#menu")) m.open = false; });
+
+// ---- Cần xử lý: gom mọi việc đang chờ chính bạn (ticket chờ quyết, câu hỏi tester, yêu cầu Telegram, lỗi) ----
+const TODO = {tg: null, asks: null};
+const todoHidden = () => { try { return JSON.parse(localStorage.getItem("todoHidden") || "{}"); } catch (e) { return {}; } };
+function todoHide(key) { const h = todoHidden(); h[key] = Date.now(); try { localStorage.setItem("todoHidden", JSON.stringify(h)); } catch (e) {} renderTodo(); }
+async function loadTodoExtra() {
+  try { TODO.tg = await tgFetch("/api/tg/overview?status=open"); } catch (e) { TODO.tg = null; }
+  try { TODO.asks = await tgFetch("/api/tg/asks"); } catch (e) { TODO.asks = null; }
+  renderTodo();
+}
+function renderTodo() {
+  if (!S) return;
+  const hidden = todoHidden(), groups = [];
+  const item = (key, t, sub, acts) => hidden[key] ? null : {key, t, sub, acts};
+  const btn = (label, data, cls) => `<button class="${cls || ""}" ${Object.entries(data).map(([k, v]) => `data-${k}="${esc(v)}"`).join(" ")}>${label}</button>`;
+  const hideBtn = (key) => `<button class="link" data-thide="${esc(key)}" title="Ẩn khỏi danh sách này (không đổi gì trên hệ thống)">Ẩn</button>`;
+  // 1. Ticket UNREVIEWED: tester đã trả lời / AI đề xuất hỏi tester / bạn quyết
+  const asks = ((TODO.asks || {}).items || []).filter((a) => !a.wp_status || /unreviewed/i.test(a.wp_status));
+  const order = {answered: 0, proposed: 1, sent: 2, queued: 2, kept: 3};
+  const g1 = asks.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9)).map((a) => {
+    const k = "ask-" + a.id + "-" + a.status;
+    const lab = {answered: ["ok", "Tester đã trả lời"], proposed: ["warn", "Nên hỏi tester"], sent: ["accent", "Đang chờ tester"], queued: ["accent", "Đang gửi"], kept: ["", "Bạn quyết"]}[a.status] || ["", a.status_label];
+    const acts = a.status === "answered" ? btn("▶ Làm theo trả lời", {treopen: a.id}, "primary") + btn("Xem", {tasks: 1})
+      : a.status === "proposed" ? btn("Xem &amp; gửi tester", {tasks: 1}, "primary") + btn("Mở ticket", {twp: a.wp_id})
+      : btn("Mở ticket", {twp: a.wp_id}, a.status === "kept" ? "primary" : "") + btn("Xem nội dung", {tasks: 1});
+    return item(k, `<span class="id">${esc(a.display_id)}</span><span class="badge ${lab[0]}">${lab[1]}</span>`,
+      esc(a.status === "answered" ? "Trả lời: " + (a.answer || "").slice(0, 200) : a.subject || ""), acts + (a.status === "sent" ? "" : hideBtn(k)));
+  }).filter(Boolean);
+  const scanned = TODO.asks && (TODO.asks.scan || {}).at;
+  groups.push({title: "Ticket chờ quyết định (UNREVIEWED)", items: g1,
+    hint: !scanned && TODO.asks ? `Chưa quét các ticket UNREVIEWED có sẵn. ${btn("🔎 Quét ngay", {tscan: 1})}` : ""});
+  // 2. Yêu cầu tester qua Telegram chờ duyệt / chờ tạo / lỗi
+  const tgItems = ((TODO.tg || {}).items || []).filter((r) => ["pending", "draft_ready", "error"].includes(r.status));
+  groups.push({title: "Yêu cầu tester (Telegram)", items: tgItems.map((r) => item("tg-" + r.id + "-" + r.status,
+    `<span class="id">#${r.id}</span><span class="badge ${TG_BADGE[r.status] || ""}">${esc(r.status_label)}</span>${tgAiTag(r).replace(/^ · /, "")}`,
+    esc(r.title || r.first_text || ""), btn("Xem", {ttg: r.id}, "primary") + hideBtn("tg-" + r.id + "-" + r.status))).filter(Boolean)});
+  // 3. Lượt autofix lỗi / bị ngắt (7 ngày gần nhất)
+  const week = Date.now() / 1000 - 7 * 86400;
+  const bad = (S.runs || []).filter((r) => ["error", "stale"].includes(r.state) && ts(r.updated_at || r.started_at) > week);
+  groups.push({title: "Lượt autofix lỗi / bị ngắt", items: bad.map((r) => { const k = "run-" + r.display_id + "-" + (r.updated_at || ""); return item(k,
+    `<span class="id">${esc(r.display_id)}</span><span class="badge crit">${esc((STATE_LABEL[r.state] || [r.state])[0])}</span><span class="muted">${esc(when(ts(r.updated_at || r.started_at)))}</span>`,
+    esc(r.verdict || ""), btn("Xem", {trun: r.display_id}, "primary") + btn("Chạy lại", {trerun: r.display_id}) + hideBtn(k)); }).filter(Boolean)});
+  // 4. Dịch vụ / job lỗi + gỡ xung đột thất bại trong 24 giờ
+  const jobsBad = (S.jobs || []).filter((j) => j.key !== "dashboard" && !jobState(j).ok);
+  const day = Date.now() / 1000 - 86400;
+  const conf = (S.conflicts || []).filter((c) => !/ĐÃ GỠ/.test(c.verdict) && c.at > day);
+  groups.push({title: "Dịch vụ / job lỗi", items: jobsBad.map((j) => { const k = "job-" + j.key + "-" + (j.exited || j.started || ""); return item(k,
+      `<b>${esc(j.name)}</b><span class="badge crit">${esc(jobState(j).note)}</span>`,
+      esc(j.key === "merge" ? (((S.merge_runs || [])[0] || {}).merge || "") + " " + ((((S.merge_runs || [])[0] || {}).deploy || []).join(" · ")) : j.desc || ""),
+      btn("Xem log", {tjob: j.key}, "primary") + hideBtn(k)); })
+    .concat(conf.map((c) => item("conf-" + c.name, `<b>Gỡ xung đột</b><span class="badge crit">Không gỡ được</span>`, esc(c.name + " · " + c.verdict), btn("Xem", {tconf: c.name}, "primary") + hideBtn("conf-" + c.name))))
+    .filter(Boolean)});
+  const total = groups.reduce((n, g) => n + g.items.length, 0);
+  $("todoN").textContent = total || "";
+  $("todoSum").textContent = total ? `${total} việc` : "";
+  const shown = groups.filter((g) => g.items.length || g.hint);
+  $("todo").innerHTML = !total && !shown.length ? `<div class="todo-empty"><b>✔ Không có việc nào cần bạn</b>Autofix, QA và Telegram đang tự chạy. Việc cần bạn quyết sẽ hiện ở đây.</div>`
+    : shown.map((g) => `<div class="todo-group"><h3>${esc(g.title)} ${g.items.length ? `<span class="badge">${g.items.length}</span>` : ""}</h3>
+      ${g.hint ? `<div class="todo-item"><div class="s">${g.hint}</div></div>` : ""}
+      ${g.items.map((x) => `<div class="todo-item"><div class="t">${x.t}</div><div class="s">${x.sub}</div><div class="a">${x.acts}</div></div>`).join("")}</div>`).join("")
+      + (Object.keys(hidden).length ? `<div class="todo-item"><div class="s muted">Đã ẩn ${Object.keys(hidden).length} mục. <button class="link" id="todoUnhide">Hiện lại</button></div></div>` : "");
+  const $$ = (sel, fn) => document.querySelectorAll("#todo " + sel).forEach((b) => b.onclick = () => fn(b));
+  $$("[data-thide]", (b) => todoHide(b.dataset.thide));
+  $$("[data-tasks]", () => tgAsks(false));
+  $$("[data-twp]", (b) => openWP(String(b.dataset.twp)));
+  $$("[data-treopen]", (b) => confirm("Chuyển ticket sang Reopened để autofix làm theo trả lời của tester?") && post({action: "tg_ask_reopen", id: +b.dataset.treopen}).then(loadTodoExtra));
+  $$("[data-tscan]", () => post({action: "tg_ask_scan"}).then(() => setTimeout(loadTodoExtra, 25000)));
+  $$("[data-ttg]", (b) => tgOpen(+b.dataset.ttg));
+  $$("[data-trun]", (b) => { select(b.dataset.trun); showView("autofix"); });
+  $$("[data-trerun]", (b) => confirm(`Chạy lại autofix cho ${b.dataset.trerun}?`) && post({action: "rerun", display_id: b.dataset.trerun, profile: (S.profiles.find((p) => p.active) || {}).name}));
+  $$("[data-tjob]", (b) => { selectOther("job", b.dataset.tjob); showView("autofix"); });
+  $$("[data-tconf]", (b) => { selectOther("conf", b.dataset.tconf); showView("autofix"); });
+  if ($("todoUnhide")) $("todoUnhide").onclick = () => { try { localStorage.removeItem("todoHidden"); } catch (e) {} renderTodo(); };
+}
+(function () { let v = "todo"; try { v = localStorage.getItem("view") || "todo"; } catch (e) {} showView(v); })();
+loadTodoExtra(); setInterval(loadTodoExtra, 15000);
 </script>
 </body>
 </html>
