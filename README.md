@@ -270,7 +270,15 @@ MINH CHỨNG), kèm câu hỏi gợi ý bổ sung → xem / sửa tiêu đề, m
 OpenProject (New)": tạo work package, upload file, ảnh trong mô tả trỏ tới file đã upload. Giao cho mình thì op-watch
 coi là task New và autofix tự sửa. Bản nháp ở `~/autofix/task-drafts/` (cleanup.py xoá sau 14 ngày).
 
-## Yêu cầu tester qua Telegram (tg_watch.py + tg_requests.py)
+## Yêu cầu qua Telegram (tg_watch.py + tg_requests.py)
+
+**Nguồn chat** (⚙ Cài đặt → Nguồn chat, chọn từ danh sách chat gần đây hoặc nhập @username / t.me/… / ID số): người
+hoặc nhóm, mỗi nguồn có
+- cách nhận yêu cầu: *Mọi tin* | *Khi nhắc tới tôi / trả lời tin của tôi* (mặc định cho nhóm) | *Chỉ tin có hashtag*;
+- cờ **Nhận yêu cầu** (gom tin thành yêu cầu), **Xin ý kiến** (nhận câu hỏi / nhờ test tay), **Trả lời** (tin báo khi
+  tạo task / gắn việc / từ chối / xong).
+Trong nhóm tin được gom theo từng người gửi; AI lọc biết đang đọc tin nhóm. Thêm / bỏ nguồn thì op-telegram tự khởi
+động lại, đổi cách nhận / cờ áp dụng ngay. Cấu hình cũ `TG_TESTERS` / `testers` tự chuyển thành nguồn chat riêng.
 
 Tester nhắn yêu cầu trong **chat riêng hiện tại** với mình trên Telegram → trang theo dõi có mục
 "Yêu cầu tester (Telegram)" → mình duyệt thì mới thành task OpenProject.

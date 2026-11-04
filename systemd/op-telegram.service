@@ -1,5 +1,5 @@
 [Unit]
-Description=op-telegram - nhan yeu cau tester qua Telegram (userbot), tao task OpenProject khi duyet
+Description=op-telegram - nhan yeu cau qua Telegram (nguoi + nhom) (userbot), tao task OpenProject khi duyet
 After=network-online.target
 
 [Service]

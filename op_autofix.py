@@ -221,7 +221,8 @@ Bản sửa trước của ticket đã deploy lên server test và QA tự độ
    controller trong code), bật cấu hình rồi trả lại, tạo dữ liệu QA_AUTO_*, SEARCH mã FE đã deploy… Làm được mà QA bỏ
    qua → `KẾT QUẢ: QA SAI` (kèm cách test đúng). Đọc code thấy bản sửa còn thiếu → sửa như bước 4. Thật sự cần người
    (thao tác giao diện / hệ thống ngoài / dữ liệu không tạo được qua API) → `KẾT QUẢ: CẦN TEST TAY`, mục
-   `## Comment cho tester` ghi bước test tay + kết quả mong đợi. KHÔNG sửa code khi chỉ là không test được.
+   `## Comment cho tester` ghi bước test tay + kết quả mong đợi, kèm `## Người quyết định` + `## Câu hỏi cho tester`
+   như hướng dẫn ở phần Báo cáo (ai test tay được). KHÔNG sửa code khi chỉ là không test được.
 8. Khi `KẾT QUẢ: QA SAI`: thêm mục `## Rule cho QA` gồm 1–3 gạch đầu dòng là rule TỔNG QUÁT để QA tự động không lặp
    lại lỗi này ở ticket khác (không nhắc mã ticket / id dữ liệu cụ thể; nêu cách làm đúng). QA tự động KHÔNG chạy lệnh
    được, chỉ gửi request API; chuỗi dài viết `{{{{rep:<chuỗi>:<số lần>}}}}`. Các rule đang có (đừng viết trùng):
@@ -1008,13 +1009,29 @@ def save_qa_rules(report_text, display_id):
     return len(new)
 
 
-def report_manual_test(api, wp_id, report_text, run_name):
-    """CẦN TEST TAY (QA tự động thật sự không test được): comment bước test tay cho tester, không đổi trạng thái."""
+def report_manual_test(api, wp_id, report_text, run_name, status_id=None):
+    """CẦN TEST TAY (QA tự động thật sự không test được): xử lý như ticket cần duyệt — comment bước test tay + người
+    test (tester / dev), chuyển UNREVIEWED, đưa vào danh sách xin ý kiến (nhờ tester test tay qua Telegram)."""
     body = tester_body(report_text, "Comment cho tester", "Nguyên nhân") or "Xem báo cáo autofix %s." % run_name
-    op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join([
-        "**[QA tự động] Không tự test được trên server test** — cần tester kiểm tra tay theo các bước dưới đây:",
-        "", body])}})
-    return "đã comment bước test tay cho tester"
+    decider, why, question = review_decider(report_text)
+    lines = ["**[Cần duyệt] Cần test tay** — QA tự động không tự test được trên server test, cần kiểm tra tay theo các "
+             "bước dưới đây:", "", body]
+    if decider:
+        lines += ["", "_Người test: %s%s_" % ("Tester — sẽ nhờ qua Telegram" if decider == "tester" else "Dev",
+                                              (" (" + plain_md(why) + ")") if why else "")]
+    op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join(lines)}})
+    w = api.get("/api/v3/work_packages/%s" % wp_id)
+    if status_id:
+        op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp_id, {
+            "lockVersion": w["lockVersion"], "_links": {"status": {"href": "/api/v3/statuses/%s" % status_id}}})
+    try:
+        import tg_requests
+        tg_requests.propose_ask(w.get("displayId") or "WP-%s" % wp_id, int(wp_id), w.get("subject", ""),
+                                decider or "tester", why, for_tester(question or body), for_tester(body), "autofix",
+                                run_name, kind="manual_test")
+    except Exception as ex:  # noqa: BLE001
+        log("xin ý kiến (test tay) qua Telegram lỗi: %s" % ex)
+    return "đã comment bước test tay%s" % (", chuyển UNREVIEWED" if status_id else "")
 
 
 def report_qa_wrong(api, wp_id, display_id, report_text, run_name):
@@ -1158,15 +1175,18 @@ thao tác / kết quả, test lại thế nào; KHÔNG tên file, class, hàm, b
 
 
 # Ai quyết phần "Cần quyết định": tester trả lời được (hỏi qua Telegram) hay để dev (mình) quyết.
-DECIDER_RULES = """  Khi kết quả là CẦN QUYẾT ĐỊNH thêm 2 mục ngay sau mục Cần quyết định:
+DECIDER_RULES = """  Khi kết quả là CẦN QUYẾT ĐỊNH (hoặc CẦN TEST TAY) thêm 2 mục ngay sau mục Cần quyết định:
   `## Người quyết định` — dòng đầu đúng một trong `NGƯỜI QUYẾT: TESTER` | `NGƯỜI QUYẾT: DEV`, dòng sau một câu lý do.
     TESTER khi tester (hoặc BA qua tester) trả lời được: hiểu ticket thế nào / hành vi đúng là phương án nào (nhìn thấy
     trên màn hình / API), kết quả mong đợi, thiếu bước tái hiện, dữ liệu / tài khoản test, xác nhận lỗi còn không.
     DEV khi là lựa chọn kỹ thuật / kiến trúc, ảnh hưởng tính năng khác / code người khác, rủi ro bảo mật, phạm vi /
     chi phí, cần lãnh đạo chốt, hoặc vấn đề của công cụ / môi trường dev.
+    Riêng CẦN TEST TAY: TESTER khi tester tự test tay được trên môi trường test (giao diện, tài khoản test, dữ liệu
+    tạo được trên màn hình); DEV khi cần quyền server / DB / log / công cụ của dev mới kiểm tra được.
   `## Câu hỏi cho tester` — chỉ khi NGƯỜI QUYẾT: TESTER: tin nhắn Telegram gửi tester, tối đa 6 dòng, ngôn ngữ của
     tester (không tên file / class / code), nêu vấn đề + các phương án đánh số 1, 2, 3 để tester trả lời bằng số, kèm
-    phương án đề xuất."""
+    phương án đề xuất. Riêng CẦN TEST TAY: nhờ tester test tay — các bước ngắn + kết quả mong đợi, hỏi kết quả
+    "Đạt" / "Không đạt" (kèm hiện tượng nếu không đạt)."""
 
 # Chế độ dontAsk: lệnh ghép chỉ chạy khi MỌI phần đều khớp ALLOWED_TOOLS — một phần lạ là cả lệnh bị từ chối.
 BASH_RULES = """Quy tắc lệnh Bash (chạy không người duyệt, lệnh ngoài danh sách bị từ chối, không hỏi):
@@ -2708,7 +2728,7 @@ def main():
                 verdict += " → cập nhật ticket lỗi: %s" % str(ex).splitlines()[0][:200]
         elif verdict.startswith("CẦN TEST TAY"):
             try:
-                verdict += " → " + report_manual_test(api, wp_id, report_text, run_name)
+                verdict += " → " + report_manual_test(api, wp_id, report_text, run_name, acfg.get("review_status_id"))
             except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
                 verdict += " (comment lên ticket lỗi: %s)" % ex
         elif verdict.startswith("QA SAI"):

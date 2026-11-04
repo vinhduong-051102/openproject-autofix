@@ -35,7 +35,7 @@ SETTINGS_PATH = envconf.path("TG_CONFIG", os.path.join(envconf.CONFIG_DIR, "tele
 FIELDS = {  # khoá: (biến .env, kiểu, mặc định)
     "api_id": ("TG_API_ID", "int", 0),
     "api_hash": ("TG_API_HASH", "str", ""),
-    "testers": ("TG_TESTERS", "list", []),
+    "chats": ("TG_CHATS", "chats", []),       # nguồn chat: người / nhóm (TG_TESTERS cũ tự chuyển sang)
     "group_window": ("TG_GROUP_WINDOW", "int", 120),
     "detect_mode": ("TG_DETECT_MODE", "str", "all"),
     "request_tags": ("TG_REQUEST_TAGS", "list", ["#bug", "#yc", "#request", "#task", "#feature"]),
@@ -51,14 +51,42 @@ FIELDS = {  # khoá: (biến .env, kiểu, mặc định)
     "ai_model": ("TG_AI_MODEL", "str", "sonnet"),
     "ask_auto": ("TG_ASK_AUTO", "bool", False),
 }
-RESTART_KEYS = ("api_id", "api_hash", "testers")
+RESTART_KEYS = ("api_id", "api_hash", "chats")
+CHAT_MODES = {"all": "Mọi tin", "mention": "Khi nhắc tới tôi / trả lời tin của tôi", "hashtag": "Chỉ tin có hashtag"}
+REF_OK = re.compile(r"^(@[A-Za-z0-9_]{4,32}|-?\d{3,})$")
 SECRET_KEYS = ("api_hash",)
 LIMITS = {"group_window": (10, 3600), "max_media_mb": (1, 200), "sync_minutes": (1, 120)}
 MSG_FIELDS = ("title", "display_id", "reason", "status")
 _SETTINGS = {"mtime": None, "data": None}
 
 
+def norm_ref(ref):
+    """@username | ID số (người: dương, nhóm: -…/-100…) | link t.me/<tên> → dạng chuẩn."""
+    ref = str(ref or "").strip()
+    m = re.match(r"^(?:https?://)?t(?:elegram)?\.me/([A-Za-z0-9_]{4,32})/?$", ref)
+    if m:
+        return "@" + m.group(1)
+    if re.match(r"^[A-Za-z][A-Za-z0-9_]{3,31}$", ref):
+        return "@" + ref
+    return ref
+
+
+def _chat_entry(x, default_mode="all"):
+    if isinstance(x, str):
+        x = {"ref": x}
+    ref = norm_ref(x.get("ref"))
+    group = ref.startswith("-")
+    mode = x.get("mode") if x.get("mode") in CHAT_MODES else ("mention" if group else default_mode)
+    flag = lambda k: x.get(k) if isinstance(x.get(k), bool) else envconf._bool(x[k]) if k in x else True  # noqa: E731
+    return {"ref": ref, "label": str(x.get("label") or "").strip()[:80], "mode": mode,
+            "requests": flag("requests"), "asks": flag("asks"), "notify": flag("notify")}
+
+
 def _conv(kind, v, from_env):
+    if kind == "chats":
+        if isinstance(v, str):  # .env: TG_CHATS=@a,-1001234 (cờ mặc định)
+            v = envconf._list(v)
+        return [_chat_entry(x) for x in v if (x.get("ref") if isinstance(x, dict) else str(x).strip())]
     if kind == "int":
         return int(str(v).strip() or 0)
     if kind == "bool":
@@ -86,6 +114,11 @@ def settings():
             else:
                 out[k], src[k] = default, "mặc định"
         out["detect_mode"] = (out["detect_mode"] or "all").lower()
+        if not out["chats"]:  # cấu hình cũ: danh sách tester (chat riêng) → nguồn chat, cách nhận theo detect_mode cũ
+            old = js.get("testers") or envconf._list(envconf.get("TG_TESTERS", "") or "")
+            if old:
+                out["chats"] = [_chat_entry(r, out["detect_mode"]) for r in old]
+                src["chats"] = "trang (tester cũ)" if js.get("testers") else ".env (TG_TESTERS)"
         out["_source"] = src
         _SETTINGS.update(mtime=mtime, data=out)
     return _SETTINGS["data"]
@@ -100,6 +133,8 @@ def public_settings():
     s["service"] = service_state()
     s["login"] = get_meta("login", {})
     s["watcher"] = get_meta("watcher", {})
+    s["dialogs"] = get_meta("dialogs", {})
+    s["modes"] = CHAT_MODES
     s["defaults"] = {k: FIELDS[k][2] for k in FIELDS if FIELDS[k][1] == "msg"}
     return s
 
@@ -114,7 +149,7 @@ def _check_template(key, text):
 def save_settings(body):
     """Ghi các khoá gửi từ trang vào telegram.json (quyền 600). Trả (thông báo, có cần khởi động lại op-telegram)."""
     cur = envconf._read_json(SETTINGS_PATH)
-    before = {k: settings()[k] for k in RESTART_KEYS}
+    before = _restart_view()
     for k, (env, kind, default) in FIELDS.items():
         if k not in body:
             continue
@@ -123,6 +158,18 @@ def save_settings(body):
             continue  # để trống = giữ nguyên
         if k == "api_id" and not str(v or "").strip():
             cur.pop(k, None)  # trống = dùng .env
+            continue
+        if kind == "chats":
+            if not isinstance(v, list):
+                raise ValueError("danh sách nguồn chat không hợp lệ")
+            v = [_chat_entry(x) for x in v if isinstance(x, (dict, str)) and _chat_entry(x)["ref"]]
+            bad = [x["ref"] for x in v if not REF_OK.match(x["ref"])]
+            if bad:
+                raise ValueError("nguồn chat không hợp lệ: %s (dùng @username, link t.me/…, hoặc ID số)" % ", ".join(bad))
+            if len({x["ref"] for x in v}) != len(v):
+                raise ValueError("có nguồn chat bị trùng")
+            cur.pop("testers", None)  # đã chuyển sang danh sách nguồn chat
+            cur[k] = v
             continue
         if kind == "int":
             try:
@@ -142,10 +189,6 @@ def save_settings(body):
             raise ValueError("chế độ nhận yêu cầu phải là all hoặc hashtag")
         if k == "api_hash" and not re.match(r"^[0-9a-f]{32}$", v):
             raise ValueError("API hash phải là 32 ký tự hex (my.telegram.org → API development tools)")
-        if k == "testers":
-            bad = [t for t in v if not re.match(r"^(@[A-Za-z0-9_]{4,32}|-?\d{3,})$", t)]
-            if bad:
-                raise ValueError("tester không hợp lệ: %s (dùng ID số hoặc @username)" % ", ".join(bad))
         if kind == "msg":
             if not v:
                 cur.pop(k, None)  # trống = dùng mẫu mặc định / .env
@@ -158,8 +201,38 @@ def save_settings(body):
         json.dump(cur, f, ensure_ascii=False, indent=2)
     os.replace(SETTINGS_PATH + ".tmp", SETTINGS_PATH)
     _SETTINGS["data"] = None
-    after = {k: settings()[k] for k in RESTART_KEYS}
-    return "Đã lưu cấu hình Telegram", before != after
+    return "Đã lưu cấu hình Telegram", before != _restart_view()
+
+
+def _restart_view():
+    """Giá trị cần khởi động lại op-telegram khi đổi: API + TẬP nguồn chat (đổi cờ / cách nhận thì áp dụng ngay)."""
+    st = settings()
+    return (st["api_id"], st["api_hash"], tuple(sorted(x["ref"] for x in st["chats"])))
+
+
+def chat_cfg(chat_id):
+    """Thông tin + cờ hiện hành của một chat đang nghe (tg_watch ghi id ↔ ref trong heartbeat; cờ đọc từ cấu hình
+    mỗi lần nên đổi trên trang là áp dụng ngay)."""
+    w = get_meta("watcher", {}) or {}
+    info = next((c for c in w.get("chats") or w.get("testers") or [] if c.get("id") == chat_id), None)
+    if not info:
+        return None
+    entry = next((x for x in settings()["chats"] if x["ref"] == info.get("ref")), None) or _chat_entry(info.get("ref") or "")
+    return dict(entry, id=chat_id, name=entry.get("label") or info.get("name") or str(chat_id),
+                kind=info.get("kind") or ("group" if chat_id < 0 else "user"))
+
+
+def eligible(chat_id, text, mentioned):
+    """Tin này có được mở yêu cầu mới không, theo cách nhận của chat (tin tiếp theo cùng người trong khoảng gom tin
+    vẫn được gộp vào yêu cầu đang mở)."""
+    c = chat_cfg(chat_id) or {"mode": "all", "requests": True}
+    if not c["requests"]:
+        return False
+    if c["mode"] == "hashtag":
+        return _tagged(text)
+    if c["mode"] == "mention":
+        return bool(mentioned) or _tagged(text)
+    return True
 
 
 def service_state():
@@ -312,6 +385,8 @@ def db():
         for col in MIGRATE:
             if col.split()[0] not in have:
                 c.execute("ALTER TABLE requests ADD COLUMN " + col)
+        if "kind" not in {r[1] for r in c.execute("PRAGMA table_info(asks)")}:
+            c.execute("ALTER TABLE asks ADD COLUMN kind TEXT DEFAULT 'decision'")  # decision | manual_test
         _LOCAL.conn = c
     return c
 
@@ -369,8 +444,9 @@ def _attach(rid, mid, date_iso):
 
 
 def ingest(chat_id, tg_msg_id, is_tester, sender_name, text, date, media_path=None, media_type=None,
-           reply_to=None, live=True):
-    """Lưu một tin nhắn. Tin của tester (live) được gom vào yêu cầu. Trả về id yêu cầu (nếu có)."""
+           reply_to=None, live=True, can_open=True):
+    """Lưu một tin nhắn. Tin của người khác (live) được gom vào yêu cầu theo (chat, người gửi): trong nhóm mỗi người
+    một yêu cầu. can_open: được mở yêu cầu mới (theo cách nhận của chat — eligible()). Trả về id yêu cầu (nếu có)."""
     date_iso = date.astimezone().isoformat(timespec="seconds")
     cur = db().execute(
         "INSERT OR IGNORE INTO messages (chat_id, tg_msg_id, sender, sender_name, text, media_path, media_type, date,"
@@ -388,19 +464,14 @@ def ingest(chat_id, tg_msg_id, is_tester, sender_name, text, date, media_path=No
             if req and req["status"] in ("collecting", "pending"):
                 _attach(req["id"], mid, date_iso)
                 return req["id"]
-    open_req = row("SELECT * FROM requests WHERE chat_id=? AND status='collecting' ORDER BY id DESC LIMIT 1",
-                   (chat_id,))
+    open_req = row("SELECT * FROM requests WHERE chat_id=? AND tester_name IS ? AND status='collecting'"
+                   " ORDER BY id DESC LIMIT 1", (chat_id, sender_name))
     within = bool(open_req) and (date - parse(open_req["last_message_at"])).total_seconds() <= settings()["group_window"]
-    tagged = _tagged(text)
-    if settings()["detect_mode"] == "hashtag":
-        if within and not tagged:
-            _attach(open_req["id"], mid, date_iso)
-            return open_req["id"]
-        if not tagged:
-            return None
-    elif within:
+    if within:
         _attach(open_req["id"], mid, date_iso)
         return open_req["id"]
+    if not can_open:
+        return None
     if open_req:
         update(open_req["id"], status=_after_collect())
     rid = _new_request(chat_id, sender_name, date_iso, text)
@@ -449,9 +520,14 @@ def overview(status="open", q="", days=14):
     items = rows("SELECT r.*, (SELECT COUNT(*) FROM messages m WHERE m.request_id=r.id) AS n_messages,"
                  " (SELECT text FROM messages m WHERE m.request_id=r.id ORDER BY date LIMIT 1) AS first_text"
                  " FROM requests r WHERE %s ORDER BY r.id DESC LIMIT 200" % where, tuple(args))
+    names = {}
     for it in items:
         it["status_label"] = STATUS_LABELS.get(it["status"], it["status"])
         _ai_fields(it, live=it["status"] in ("pending", "triage"))
+        if it["chat_id"] not in names:
+            c = chat_cfg(it["chat_id"])
+            names[it["chat_id"]] = c["name"] if c and c["kind"] != "user" else ""
+        it["chat_name"] = names[it["chat_id"]]
     counts = {k: 0 for k in STATUS_LABELS}
     for r in rows("SELECT status, COUNT(*) AS n FROM requests GROUP BY status"):
         counts[r["status"]] = r["n"]
@@ -564,7 +640,8 @@ def _files_for(msgs):
 def _queue_reply(req, key, **extra):
     """Xếp tin trả lời tester (mẫu `key` trong cấu hình). Mẫu sai thì dùng mẫu mặc định — không được làm hỏng thao tác
     vừa xong (vd task đã tạo mà báo lỗi → bấm chạy lại sẽ tạo trùng)."""
-    if not settings()["notify_tester"]:
+    c = chat_cfg(req["chat_id"])
+    if not settings()["notify_tester"] or (c and not c["notify"]):
         return
     first = row("SELECT tg_msg_id FROM messages WHERE request_id=? AND sender='tester' ORDER BY date LIMIT 1",
                 (req["id"],))
@@ -723,6 +800,9 @@ def action(body):
         return approve(int(rid), bool(body.get("auto", True)), (body.get("note") or "").strip(), bool(body.get("force")))
     if str(kind).startswith("tg_ask_"):
         return ask_action(kind, body)
+    if kind == "tg_dialogs":
+        queue_command("dialogs")
+        return "Đang lấy danh sách chat gần đây từ Telegram…"
     if kind == "tg_delete":
         return delete(int(rid))
     if kind == "tg_triage":
@@ -782,8 +862,8 @@ def action(body):
 
 # ---------------------------------------------------------------- lọc việc bằng AI (tg_watch.py gọi nền)
 
-TRIAGE_PROMPT = """Bạn lọc việc từ tin nhắn Telegram giữa tester ({tester}) và dev ({me}) của dự án SOAR. Chạy nền, chỉ
-trả kết quả JSON, không dùng công cụ nào.
+TRIAGE_PROMPT = """Bạn lọc việc từ tin nhắn Telegram của {tester} gửi dev ({me}) {where} — dự án SOAR. Chạy nền,
+chỉ trả kết quả JSON, không dùng công cụ nào.
 
 ## Tin cần lọc (mỗi dòng có [mã tin])
 {messages}
@@ -996,8 +1076,11 @@ def triage(rid):
     prev = rows("SELECT id, title, display_id, status FROM requests WHERE status IN ('created','linked','drafting',"
                 "'draft_ready') AND id!=? ORDER BY id DESC LIMIT 40", (rid,))
     watcher = get_meta("watcher", {}) or {}
+    c = chat_cfg(req["chat_id"])
+    where = ("trong nhóm “%s” (nhiều người cùng nhắn; ngữ cảnh có tin của người khác)" % c["name"]
+             if c and c["kind"] != "user" else "trong chat riêng")
     prompt = TRIAGE_PROMPT.format(
-        tester=req["tester_name"] or "tester", me=watcher.get("me") or "dev",
+        tester=req["tester_name"] or "người gửi", me=watcher.get("me") or "dev", where=where,
         messages="\n".join(_msg_line(m) for m in msgs), context="\n".join(_msg_line(m) for m in ctx) or "(không có)",
         refs="\n".join(_fmt_wp(x) + _fmt_autofix(x["display_id"]) for x in refs) or "(không có)",
         recent=_recent_wps(api, cfg),
@@ -1081,7 +1164,11 @@ def ask_update(aid, **f):
     db().execute("UPDATE asks SET %s WHERE id=:_id" % ",".join("%s=:%s" % (k, k) for k in f), dict(f, _id=aid))
 
 
-def propose_ask(display_id, wp_id, subject, decider, why, question, reason, source="autofix", run_name=None):
+ASK_KINDS = {"decision": "Cần quyết định", "manual_test": "Cần test tay"}
+
+
+def propose_ask(display_id, wp_id, subject, decider, why, question, reason, source="autofix", run_name=None,
+                kind="decision"):
     """Ghi đề xuất ai quyết (gọi từ bước viết yêu cầu cần duyệt của autofix). Câu hỏi cũ của ticket thì đóng.
     Tester quyết + bật TG_ASK_AUTO → xếp gửi ngay; không thì chờ mình bấm gửi / để mình quyết."""
     ts = now()
@@ -1091,21 +1178,35 @@ def propose_ask(display_id, wp_id, subject, decider, why, question, reason, sour
     status = "kept" if decider == "dev" else ("queued" if settings()["ask_auto"] and question else "proposed")
     cur = db().execute(
         "INSERT INTO asks (display_id, wp_id, subject, decider, why, question, reason, source, run_name, status,"
-        " chat_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " chat_id, created_at, updated_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (display_id, wp_id, subject, decider, why, question or "", reason, source, run_name, status,
-         _default_tester() if status == "queued" else None, ts, ts))
+         _default_tester() if status == "queued" else None, ts, ts, kind if kind in ASK_KINDS else "decision"))
     return cur.lastrowid
 
 
+def ask_chats():
+    """Chat nhận câu hỏi xin ý kiến (cờ "Xin ý kiến")."""
+    w = get_meta("watcher", {}) or {}
+    out = []
+    for c in w.get("chats") or w.get("testers") or []:
+        cfg = chat_cfg(c["id"])
+        if cfg and cfg["asks"]:
+            out.append({"id": c["id"], "name": cfg["name"], "kind": cfg["kind"]})
+    return out
+
+
 def _default_tester():
-    t = (get_meta("watcher", {}) or {}).get("testers") or []
+    t = ask_chats()
     return t[0]["id"] if t else None
 
 
 def ask_text(a):
     url = "%s/work_packages/%s/activity" % (_op_url(), a["wp_id"]) if a.get("wp_id") else ""
-    return "❓ Xin ý kiến %s — %s\n\n%s\n\n%s(Trả lời bằng cách reply vào tin này)" % (
-        a["display_id"], (a.get("subject") or "")[:150], (a.get("question") or "").strip(), url + "\n" if url else "")
+    head = "🧪 Nhờ test tay" if a.get("kind") == "manual_test" else "❓ Xin ý kiến"
+    tail = "(Trả lời Đạt / Không đạt bằng cách reply vào tin này)" if a.get("kind") == "manual_test" \
+        else "(Trả lời bằng cách reply vào tin này)"
+    return "%s %s — %s\n\n%s\n\n%s%s" % (head, a["display_id"], (a.get("subject") or "")[:150],
+                                       (a.get("question") or "").strip(), url + "\n" if url else "", tail)
 
 
 def pending_asks():
@@ -1191,7 +1292,7 @@ def scan_unreviewed():
         reason = ""
         for act in reversed(api.activities(w["id"])):
             raw = ((act.get("comment") or {}).get("raw") or "")
-            if "[Cần duyệt]" in raw:
+            if "[Cần duyệt]" in raw or "Không tự test được trên server test" in raw:
                 reason = raw
                 break
         if not reason:
@@ -1200,7 +1301,8 @@ def scan_unreviewed():
             d, why, q = classify_ask(did, w.get("subject", ""), reason)
         except Exception as ex:  # noqa: BLE001
             d, why, q = "dev", "AI xác định lỗi: %s" % str(ex)[:200], ""
-        propose_ask(did, w["id"], w.get("subject", ""), d, why, q, reason, "quét", None)
+        propose_ask(did, w["id"], w.get("subject", ""), d, why, q, reason, "quét", None,
+                    kind="manual_test" if "Cần test tay" in reason or "Không tự test được" in reason else "decision")
         done += 1
     return done
 
@@ -1212,12 +1314,14 @@ def asks_overview(status="open"):
         items = rows("SELECT * FROM asks ORDER BY id DESC LIMIT 100")
     for a in items:
         a["status_label"] = ASK_LABELS.get(a["status"], a["status"])
+        a["kind"] = a.get("kind") or "decision"
+        a["kind_label"] = ASK_KINDS.get(a["kind"], a["kind"])
         cur = _live_wp(a["display_id"]) if a["status"] in ASK_OPEN else None
         a["wp_status"] = (cur or {}).get("status")
     counts = {k: 0 for k in ASK_LABELS}
     for r in rows("SELECT status, COUNT(*) AS n FROM asks GROUP BY status"):
         counts[r["status"]] = r["n"]
-    return {"items": items, "counts": counts, "testers": (get_meta("watcher", {}) or {}).get("testers") or [],
+    return {"items": items, "counts": counts, "testers": ask_chats(),
             "op_url": _op_url(), "ask_auto": settings()["ask_auto"], "scanning": _SCAN_LOCK.locked()}
 
 
@@ -1253,6 +1357,19 @@ def ask_action(kind, body):
     if kind == "tg_ask_close":
         ask_update(a["id"], status="closed")
         return "Đã đóng câu hỏi %s" % a["display_id"]
+    if kind == "tg_ask_resolve":
+        # Tester test tay đạt → Resolved (như QA tự động đạt).
+        import task_create
+        import op_watch
+        import op_autofix as af
+        cfg, acfg, _ = task_create.load()
+        api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+        af.op_write(api, "POST", "/api/v3/work_packages/%s/activities" % a["wp_id"], {"comment": {"raw":
+                    "**[Test tay] Tester xác nhận ĐẠT** — chuyển Resolved." + (
+                        "\n\n> " + a["answer"].replace("\n", "\n> ") if a.get("answer") else "")}})
+        af.set_wp_status(api, a["wp_id"], acfg["resolved_status_id"])
+        ask_update(a["id"], status="closed")
+        return "Đã chuyển %s sang Resolved (tester test tay đạt)" % a["display_id"]
     if kind == "tg_ask_reopen":
         # Làm theo trả lời: chuyển Reopened → op-watch chạy autofix, prompt đọc comment trả lời mới nhất của tester.
         import task_create

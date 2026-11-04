@@ -431,6 +431,11 @@ header { flex-wrap: wrap; min-width: 0; }
 .tg-ask-md { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px; max-height: 340px; overflow: auto; overscroll-behavior: contain; }
 .tg-ask-md > :first-child { margin-top: 6px; } .tg-ask-md > :last-child { margin-bottom: 6px; }
 .tg-ask .ans { border-left: 3px solid var(--accent); padding-left: 8px; white-space: pre-wrap; }
+table.tg-chats { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.tg-chats th { text-align: left; font-weight: 600; color: var(--text-2); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+table.tg-chats td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.tg-chats td.c { text-align: center; } table.tg-chats td input[type=text] { margin-top: 4px; font-size: 12.5px; padding: 3px 6px; }
+table.tg-chats select { max-width: 220px; }
 .tg-ai { display: grid; gap: 6px; margin: 8px 0 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); font-size: 13px; }
 .tg-form { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 10px 14px; align-items: start; }
 .tg-form > label { padding-top: 7px; font-weight: 600; font-size: 13px; }
@@ -565,7 +570,7 @@ header { flex-wrap: wrap; min-width: 0; }
   </div>
   <div class="view" data-view="telegram">
     <section id="tgBox">
-      <h2>Yêu cầu tester (Telegram) <span class="sum" id="tgSum"></span>
+      <h2>Yêu cầu qua Telegram <span class="sum" id="tgSum"></span>
         <span class="right"><span class="badge" id="tgWatcher" title="Tiến trình op-telegram">—</span></span></h2>
       <div class="tg-tiles" id="tgTiles"></div>
       <div class="tg-chart" id="tgChart"></div>
@@ -1730,7 +1735,7 @@ function tgRender() {
   const wb = $("tgWatcher");
   wb.className = "badge " + (fresh && !w.error ? "ok" : "crit");
   wb.textContent = fresh ? (w.error ? "Lỗi: " + w.error.slice(0, 40) : "Telegram: " + (w.me || "đã kết nối")) : "op-telegram chưa chạy";
-  wb.title = fresh ? "Đang nghe: " + (w.testers || []).map((t) => t.name).join(", ") : "Chạy: systemctl --user start op-telegram (xem README)";
+  wb.title = fresh ? "Đang nghe: " + (w.chats || w.testers || []).map((t) => t.name).join(", ") : "Chạy: systemctl --user start op-telegram (xem README)";
   TG.opUrl = d.op_url || TG.opUrl;
   const tiles = [["pending", "Chờ duyệt", c.pending + c.collecting + c.triage], ["drafting", "Đang soạn / chờ tạo", c.drafting + c.draft_ready + c.error],
     ["created", "Đã tạo task", c.created + c.linked], ["rejected", "Từ chối", c.rejected]];
@@ -1747,7 +1752,7 @@ function tgRender() {
   $("tgList").innerHTML = d.items.length ? d.items.map((r) => `<div class="op-row tg-row" data-tgid="${r.id}">
       <span class="id">#${r.id}</span><span class="subj">${esc(r.title || r.first_text || "(tệp đính kèm)")}</span>
       <span class="when">${tgTime(r.created_at)}</span>
-      <span class="tags"><span class="badge ${TG_BADGE[r.status] || ""}">${esc(r.status_label)}</span>${esc(r.tester_name || "")} · ${r.n_messages} tin
+      <span class="tags"><span class="badge ${TG_BADGE[r.status] || ""}">${esc(r.status_label)}</span>${esc(r.tester_name || "")}${r.chat_name ? ` · 👥 ${esc(r.chat_name)}` : ""} · ${r.n_messages} tin
         ${r.display_id ? ` · <a class="ext" href="${esc(r.wp_url || "#")}" target="_blank" rel="noopener">${esc(r.display_id)}${r.wp_status ? " · " + esc(r.wp_status) : ""} ↗</a>` : ""}
         ${r.error ? ` · <span class="badge crit" title="${esc(r.error)}">lỗi</span>` : ""}${tgAiTag(r)}</span></div>`).join("")
     : `<div class="empty">Không có yêu cầu${TG.status === "open" ? " đang chờ" : ""}.</div>`;
@@ -1844,13 +1849,13 @@ async function tgOpen(id, keep) {
   });
 }
 async function tgChat(chatId) {
-  const chats = (TG.data && TG.data.chats) || [], testers = ((TG.data && TG.data.watcher) || {}).testers || [];
+  const chats = (TG.data && TG.data.chats) || [], testers = ((TG.data && TG.data.watcher) || {}).chats || ((TG.data && TG.data.watcher) || {}).testers || [];
   const all = [...chats.map((c) => ({id: c.chat_id, name: c.name || c.chat_id}))];
   testers.forEach((t) => { if (!all.some((c) => c.id === t.id)) all.push({id: t.id, name: t.name}); });
   if (!chatId && all.length) chatId = all[0].id;
   TG.chat = chatId; TG.cur = null;
-  tgShow(); $("tgmTitle").textContent = "Cuộc trò chuyện với tester";
-  if (!chatId) { $("tgmBody").innerHTML = `<div class="empty">Chưa có tester (TG_TESTERS) hoặc op-telegram chưa chạy.</div>`; return; }
+  tgShow(); $("tgmTitle").textContent = "Cuộc trò chuyện";
+  if (!chatId) { $("tgmBody").innerHTML = `<div class="empty">Chưa có nguồn chat nào (⚙ Cài đặt → Nguồn chat) hoặc op-telegram chưa chạy.</div>`; return; }
   const d = await tgFetch(`/api/tg/chat?chat_id=${chatId}`);
   $("tgmBody").innerHTML = `
     <div class="tabs">${all.map((c) => `<button class="${c.id === chatId ? "on" : ""}" data-tgchat="${c.id}">${esc(c.name)}</button>`).join("")}</div>
@@ -1882,7 +1887,6 @@ async function tgSettings() {
   TG.cur = null; TG.chat = null;
   tgShow(); $("tgmTitle").textContent = "Cài đặt nhận yêu cầu qua Telegram";
   const w = (TG.data && TG.data.watcher) || {}, src = st._source || {};
-  const found = (w.testers || []).map((t) => `${esc(t.name)} (${t.id})`).join(", ");
   const S = (k) => `<span class="src">${esc(src[k] || "")}</span>`;
   const msg = (k, label, vars) => `<label for="tgs_${k}">${label}${S(k)}</label><div><textarea id="tgs_${k}" rows="2" placeholder="${esc(st.defaults[k])}">${src[k] === "mặc định" ? "" : esc(st[k])}</textarea><div class="hint">Biến: ${vars}. Để trống = mẫu mặc định.</div></div>`;
   $("tgmBody").innerHTML = `
@@ -1892,15 +1896,12 @@ async function tgSettings() {
       <label>Đăng nhập Telegram</label><div id="tgsLogin"></div>
       <label for="tgs_api_id">API ID${S("api_id")}</label><div><input type="text" id="tgs_api_id" inputmode="numeric" value="${st.api_id || ""}"><div class="hint">Lấy ở my.telegram.org → API development tools.</div></div>
       <label for="tgs_api_hash">API hash${S("api_hash")}</label><div><input type="password" id="tgs_api_hash" autocomplete="off" placeholder="${st.api_hash_set ? "đã đặt — để trống nếu giữ nguyên" : "chưa đặt"}"><div class="hint">Không hiển thị lại sau khi lưu. Lưu API id / hash trước rồi đăng nhập ở trên.</div></div>
-      <label for="tgs_testers">Tester${S("testers")}</label><div><textarea id="tgs_testers" rows="3" placeholder="mỗi dòng một ID số hoặc @username">${esc((st.testers || []).join("\n"))}</textarea>
-        <div class="hint">${found ? "Đang nghe: " + found : "ID số hoặc @username của tester (xem trong hồ sơ Telegram của họ)."}</div></div>
+      <h4>Nguồn chat${S("chats")}</h4>
+      <div style="grid-column:1/-1" id="tgsChats"></div>
       <h4>Gom tin thành yêu cầu</h4>
-      <label for="tgs_ai_filter">Lọc việc bằng AI${S("ai_filter")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_ai_filter" ${st.ai_filter ? "checked" : ""}> Claude đọc tin của tester: tách việc, bỏ qua trò chuyện, đánh dấu việc đã có trên OpenProject (mọi việc vẫn chờ bạn duyệt)</label></div>
+      <label for="tgs_ai_filter">Lọc việc bằng AI${S("ai_filter")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_ai_filter" ${st.ai_filter ? "checked" : ""}> Claude đọc tin nhắn: tách việc, bỏ qua trò chuyện, đánh dấu việc đã có trên OpenProject (mọi việc vẫn chờ bạn duyệt)</label></div>
       <label for="tgs_ai_model">Model lọc${S("ai_model")}</label><div><input type="text" id="tgs_ai_model" value="${esc(st.ai_model || "")}"><div class="hint">vd sonnet, haiku, opus.</div></div>
-      <label for="tgs_detect_mode">Nhận yêu cầu${S("detect_mode")}</label><div><select id="tgs_detect_mode">
-        <option value="all" ${st.detect_mode === "all" ? "selected" : ""}>Mọi tin của tester</option>
-        <option value="hashtag" ${st.detect_mode === "hashtag" ? "selected" : ""}>Chỉ tin có hashtag</option></select></div>
-      <label for="tgs_request_tags">Hashtag${S("request_tags")}</label><div><input type="text" id="tgs_request_tags" value="${esc((st.request_tags || []).join(", "))}"><div class="hint">Dùng khi chọn "Chỉ tin có hashtag", cách nhau dấu phẩy.</div></div>
+      <label for="tgs_request_tags">Hashtag${S("request_tags")}</label><div><input type="text" id="tgs_request_tags" value="${esc((st.request_tags || []).join(", "))}"><div class="hint">Dùng cho nguồn chat nhận “Chỉ tin có hashtag” (và cũng mở yêu cầu ở chế độ “Khi nhắc tới tôi”), cách nhau dấu phẩy.</div></div>
       <label for="tgs_group_window">Khoảng gom tin (giây)${S("group_window")}</label><div><input type="number" id="tgs_group_window" min="10" max="3600" value="${st.group_window}"><div class="hint">Tin liên tiếp cách nhau không quá khoảng này gộp thành một yêu cầu; hết khoảng → Chờ duyệt.</div></div>
       <label for="tgs_max_media_mb">Tệp tối đa (MB)${S("max_media_mb")}</label><div><input type="number" id="tgs_max_media_mb" min="1" max="200" value="${st.max_media_mb}"></div>
       <h4>Trả lời tester</h4>
@@ -1914,6 +1915,7 @@ async function tgSettings() {
       ${msg("msg_done", "Mẫu: việc xong", "{title} {display_id} {status}")}
     </div>
     <div class="tg-acts"><div class="tm-row"><button class="primary" id="tgsSave">Lưu cài đặt</button><span class="muted">Nguồn của từng mục ghi dưới nhãn (trang / .env / mặc định).</span></div></div>`;
+  tgChatsRender(st);
   tgLoginRender(st);
   clearInterval(TG.loginTimer);
   TG.loginTimer = setInterval(async () => {
@@ -1922,7 +1924,7 @@ async function tgSettings() {
   }, 2500);
   $("tgsSave").onclick = async () => {
     const v = (id) => $("tgs_" + id).value;
-    const body = {api_id: v("api_id").trim(), testers: v("testers"), detect_mode: v("detect_mode"), request_tags: v("request_tags"),
+    const body = {api_id: v("api_id").trim(), chats: tgChatsValue(), request_tags: v("request_tags"),
       group_window: v("group_window"), max_media_mb: v("max_media_mb"), notify_tester: $("tgs_notify_tester").checked,
       done_statuses: v("done_statuses"), sync_minutes: v("sync_minutes"), ai_filter: $("tgs_ai_filter").checked, ai_model: v("ai_model"), ask_auto: $("tgs_ask_auto").checked,
       msg_created: v("msg_created"), msg_linked: v("msg_linked"), msg_rejected: v("msg_rejected"), msg_done: v("msg_done")};
@@ -1932,6 +1934,52 @@ async function tgSettings() {
   };
 }
 
+// Nguồn chat: người / nhóm, mỗi nguồn có cách nhận + cờ Nhận yêu cầu / Xin ý kiến / Trả lời.
+const TG_KIND = {user: "👤", group: "👥", channel: "📢"};
+function tgChatsRender(st, rows) {
+  const box = $("tgsChats"); if (!box) return;
+  const w = st.watcher || {}, live = w.chats || w.testers || [], missing = w.missing || [];
+  const dlg = (st.dialogs || {}).items || [];
+  rows = rows || (st.chats || []).map((x) => ({...x}));
+  TG.chatRows = rows;
+  const info = (ref) => live.find((c) => c.ref === ref) || dlg.find((d) => d.ref === ref || String(d.id) === ref);
+  const modes = st.modes || {all: "Mọi tin", mention: "Khi nhắc tới tôi", hashtag: "Chỉ tin có hashtag"};
+  const used = new Set(rows.map((r) => r.ref));
+  box.innerHTML = `<table class="tg-chats"><thead><tr><th>Chat</th><th>Cách nhận yêu cầu</th><th title="Gom tin thành yêu cầu chờ duyệt">Nhận yêu cầu</th><th title="Nhận câu hỏi xin ý kiến / nhờ test tay">Xin ý kiến</th><th title="Gửi tin trả lời khi tạo task / gắn việc / từ chối / việc xong">Trả lời</th><th></th></tr></thead><tbody>
+    ${rows.map((r, i) => { const x = info(r.ref), miss = missing.find((m) => m.ref === r.ref), on = live.some((c) => c.ref === r.ref);
+      return `<tr data-i="${i}"><td><div>${x ? `${TG_KIND[x.kind] || ""} <b>${esc(x.name)}</b>` : `<b>${esc(r.ref)}</b>`}
+          ${miss ? ` <span class="badge crit" title="${esc(miss.error)}">không tìm thấy</span>` : on ? ` <span class="badge ok">đang nghe</span>` : ` <span class="badge">lưu xong sẽ nghe</span>`}</div>
+        <div class="muted" style="font-size:11.5px">${esc(r.ref)}</div><input type="text" data-k="label" value="${esc(r.label || "")}" placeholder="tên hiển thị (tuỳ chọn)"></td>
+        <td><select data-k="mode">${Object.entries(modes).map(([k, l]) => `<option value="${k}" ${r.mode === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></td>
+        ${["requests", "asks", "notify"].map((k) => `<td class="c"><input type="checkbox" data-k="${k}" ${r[k] !== false ? "checked" : ""} aria-label="${k}"></td>`).join("")}
+        <td><button class="link" data-del="${i}" title="Bỏ nguồn này" aria-label="Bỏ ${esc(r.ref)}">✕</button></td></tr>`; }).join("")
+      || `<tr><td colspan="6" class="muted">Chưa có nguồn chat nào — chọn bên dưới.</td></tr>`}
+    </tbody></table>
+    <div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+      <select id="tgsDlg" style="max-width:340px"><option value="">— Chọn chat gần đây (${dlg.length}) —</option>${dlg.filter((d) => !used.has(d.ref)).map((d) => `<option value="${esc(d.ref)}" data-kind="${d.kind}">${TG_KIND[d.kind] || ""} ${esc(d.name)}${d.members ? " · " + d.members + " người" : ""}</option>`).join("")}</select>
+      <button id="tgsDlgAdd">+ Thêm</button>
+      <input type="text" id="tgsRef" placeholder="hoặc @username / t.me/… / ID số" style="max-width:240px"><button id="tgsRefAdd">+ Thêm</button>
+      <button class="link" id="tgsDlgReload" title="Đọc lại danh sách chat gần đây từ Telegram">↻ tải lại danh sách chat</button>
+    </div>
+    <div class="hint">Nhóm mặc định chỉ mở yêu cầu khi có người <b>nhắc tới bạn</b> hoặc <b>trả lời tin của bạn</b> (hoặc có hashtag), tránh mọi câu chuyện trong nhóm thành yêu cầu. Trong nhóm, tin được gom theo từng người gửi. Thêm / bỏ nguồn thì op-telegram tự khởi động lại; đổi cách nhận / cờ áp dụng ngay.</div>`;
+  const sync = () => box.querySelectorAll("tr[data-i]").forEach((tr) => { const r = rows[+tr.dataset.i];
+    tr.querySelectorAll("[data-k]").forEach((el) => { r[el.dataset.k] = el.type === "checkbox" ? el.checked : el.value; }); });
+  box.querySelectorAll("[data-k]").forEach((el) => el.onchange = sync);
+  box.querySelectorAll("[data-del]").forEach((b) => b.onclick = () => { sync(); rows.splice(+b.dataset.del, 1); tgChatsRender(st, rows); });
+  const add = (ref, kind) => { sync(); if (!ref || rows.some((r) => r.ref === ref)) return;
+    const grp = kind ? kind !== "user" : /^-/.test(ref);
+    rows.push({ref, label: "", mode: grp ? "mention" : "all", requests: true, asks: !grp, notify: true}); tgChatsRender(st, rows); };
+  $("tgsDlgAdd").onclick = () => { const o = $("tgsDlg").selectedOptions[0]; if (o && o.value) add(o.value, o.dataset.kind); };
+  $("tgsRefAdd").onclick = () => { let v = $("tgsRef").value.trim().replace(/^(https?:\/\/)?t(elegram)?\.me\//, "@").replace(/\/$/, "");
+    if (/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(v)) v = "@" + v; add(v, ""); };
+  $("tgsDlgReload").onclick = () => post({action: "tg_dialogs"}).then(() => setTimeout(async () => { const s2 = await tgFetch("/api/tg/settings"); sync(); tgChatsRender(s2, rows); }, 4000));
+}
+function tgChatsValue() {
+  const box = $("tgsChats"); if (!box || !TG.chatRows) return undefined;
+  box.querySelectorAll("tr[data-i]").forEach((tr) => { const r = TG.chatRows[+tr.dataset.i];
+    tr.querySelectorAll("[data-k]").forEach((el) => { r[el.dataset.k] = el.type === "checkbox" ? el.checked : el.value; }); });
+  return TG.chatRows;
+}
 // Đăng nhập Telegram qua trang: lệnh đi qua hàng lệnh tới op-telegram (tiến trình duy nhất giữ file phiên).
 function tgLoginRender(st) {
   const box = $("tgsLogin"); if (!box) return;
@@ -1999,21 +2047,25 @@ async function tgAsks(all) {
     return `<div class="tg-ask" data-ask="${a.id}">
       <div><a href="${esc(wpUrl(a))}" target="_blank" rel="noopener"><b>${esc(a.display_id)}</b> ↗</a> ${esc(a.subject || "")}</div>
       <div><span class="badge ${ASK_BADGE[a.status] || ""}">${esc(a.status_label)}</span>
-        <span class="badge ${a.decider === "tester" ? "accent" : ""}">AI đề xuất: ${a.decider === "tester" ? "hỏi tester" : "bạn quyết"}</span>
+        ${a.kind === "manual_test" ? `<span class="badge warn">🧪 Cần test tay</span>` : ""}
+        <span class="badge ${a.decider === "tester" ? "accent" : ""}">AI đề xuất: ${a.kind === "manual_test" ? (a.decider === "tester" ? "nhờ tester test tay" : "bạn test") : a.decider === "tester" ? "hỏi tester" : "bạn quyết"}</span>
         ${a.wp_status ? `<span class="muted">· ticket: ${esc(a.wp_status)}</span>` : ""} <span class="muted">· ${esc(a.source || "")} ${tgTime(a.created_at)}</span></div>
       ${a.why ? `<div class="muted">Lý do: ${esc(a.why)}</div>` : ""}
       ${a.reason ? `<div class="tm-label">Nội dung cần duyệt</div><div class="md tg-ask-md">${renderMd(a.reason)}</div>` : ""}
       ${canSend ? `<div class="tm-label">Câu hỏi gửi tester</div><textarea data-askq>${esc(a.question || "")}</textarea>
         <div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           ${testers.length > 1 ? `<select data-askchat>${testers.map((t) => `<option value="${t.id}" ${t.id === a.chat_id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select>` : ""}
-          <button class="${a.decider === "tester" ? "primary" : ""}" data-askact="send">📨 Gửi tester</button>
+          <button class="${a.decider === "tester" ? "primary" : ""}" data-askact="send">📨 ${a.kind === "manual_test" ? "Nhờ tester test tay" : "Gửi tester"}</button>
           ${a.status !== "kept" ? `<button data-askact="keep">Giữ lại — tôi quyết</button>` : ""}
           <button data-askact="close">Đóng</button></div>` : ""}
       ${a.error ? `<div class="badge crit" style="white-space:normal">Gửi lỗi: ${esc(a.error)}</div>` : ""}
       ${["queued", "sent", "answered"].includes(a.status) && !canSend ? `<div class="tm-label">Đã hỏi${a.sent_at ? " lúc " + tgTime(a.sent_at) : ""}</div><div class="q">${esc(a.question || "")}</div>` : ""}
       ${a.answer ? `<div class="tm-label">Trả lời của ${esc(a.answer_by || "tester")} (${tgTime(a.answered_at)}) — đã comment lên ticket</div><div class="ans">${esc(a.answer)}</div>` : ""}
       ${open && !canSend ? `<div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap">
-        ${a.status === "answered" ? `<button class="primary" data-askact="reopen" title="Chuyển ticket sang Reopened: autofix chạy lại và làm theo trả lời">▶ Làm theo trả lời (chuyển Reopened)</button>` : ""}
+        ${a.status === "answered" && a.kind === "manual_test" ? `<button class="primary" data-askact="resolve" title="Tester test tay đạt: comment + chuyển Resolved">✔ Đạt → Resolved</button>
+          <button data-askact="reopen" title="Tester test tay không đạt: chuyển Reopened, autofix sửa theo mô tả của tester">✖ Không đạt → Reopened</button>` : ""}
+        ${a.status === "answered" && a.kind !== "manual_test" ? `<button class="primary" data-askact="reopen" title="Chuyển ticket sang Reopened: autofix chạy lại và làm theo trả lời">▶ Làm theo trả lời (chuyển Reopened)</button>` : ""}
+        ${a.kind === "manual_test" && ["kept", "sent"].includes(a.status) ? `<button data-askact="resolve" title="Bạn đã tự test tay đạt">✔ Tôi test đạt → Resolved</button>` : ""}
         <button data-askact="close">Đóng</button></div>` : ""}
     </div>`;
   };
@@ -2035,6 +2087,7 @@ async function tgAsks(all) {
     const body = {action: "tg_ask_" + act, id};
     if (act === "send") { body.question = box.querySelector("[data-askq]").value; const c = box.querySelector("[data-askchat]"); if (c) body.chat_id = +c.value; }
     if (act === "reopen" && !confirm("Chuyển ticket sang Reopened để autofix làm theo trả lời của tester?")) return;
+    if (act === "resolve" && !confirm("Xác nhận test tay ĐẠT: comment lên ticket và chuyển Resolved?")) return;
     if (await post(body)) setTimeout(() => tgAsks(all), act === "send" ? 2500 : 300);
   });
 }
@@ -2085,15 +2138,17 @@ function renderTodo() {
   const order = {answered: 0, proposed: 1, sent: 2, queued: 2, kept: 3};
   const g1 = asks.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9)).map((a) => {
     const k = "ask-" + a.id + "-" + a.status;
-    const lab = {answered: ["ok", "Tester đã trả lời"], proposed: ["warn", "Nên hỏi tester"], sent: ["accent", "Đang chờ tester"], queued: ["accent", "Đang gửi"], kept: ["", "Bạn quyết"]}[a.status] || ["", a.status_label];
-    const acts = a.status === "answered" ? btn("▶ Làm theo trả lời", {treopen: a.id}, "primary") + btn("Xem", {tasks: 1})
+    const mt = a.kind === "manual_test";
+    const lab = {answered: ["ok", "Tester đã trả lời"], proposed: ["warn", mt ? "Nên nhờ tester test tay" : "Nên hỏi tester"], sent: ["accent", "Đang chờ tester"], queued: ["accent", "Đang gửi"], kept: ["", mt ? "Bạn test tay" : "Bạn quyết"]}[a.status] || ["", a.status_label];
+    const acts = a.status === "answered" && mt ? btn("✔ Đạt → Resolved", {tresolve: a.id}, "primary") + btn("✖ Không đạt → Reopened", {treopen: a.id}) + btn("Xem", {tasks: 1})
+      : a.status === "answered" ? btn("▶ Làm theo trả lời", {treopen: a.id}, "primary") + btn("Xem", {tasks: 1})
       : a.status === "proposed" ? btn("Xem &amp; gửi tester", {tasks: 1}, "primary") + btn("Mở ticket", {twp: a.wp_id})
       : btn("Mở ticket", {twp: a.wp_id}, a.status === "kept" ? "primary" : "") + btn("Xem nội dung", {tasks: 1});
-    return item(k, `<span class="id">${esc(a.display_id)}</span><span class="badge ${lab[0]}">${lab[1]}</span>`,
+    return item(k, `<span class="id">${esc(a.display_id)}</span>${mt ? `<span class="badge warn">🧪 Cần test tay</span>` : ""}<span class="badge ${lab[0]}">${lab[1]}</span>`,
       esc(a.status === "answered" ? "Trả lời: " + (a.answer || "").slice(0, 200) : a.subject || ""), acts + (a.status === "sent" ? "" : hideBtn(k)));
   }).filter(Boolean);
   const scanned = TODO.asks && (TODO.asks.scan || {}).at;
-  groups.push({title: "Ticket chờ quyết định (UNREVIEWED)", items: g1,
+  groups.push({title: "Ticket chờ quyết định / test tay (UNREVIEWED)", items: g1,
     hint: !scanned && TODO.asks ? `Chưa quét các ticket UNREVIEWED có sẵn. ${btn("🔎 Quét ngay", {tscan: 1})}` : ""});
   // 2. Yêu cầu tester qua Telegram chờ duyệt / chờ tạo / lỗi
   const tgItems = ((TODO.tg || {}).items || []).filter((r) => ["pending", "draft_ready", "error"].includes(r.status));
@@ -2129,6 +2184,7 @@ function renderTodo() {
   $$("[data-thide]", (b) => todoHide(b.dataset.thide));
   $$("[data-tasks]", () => tgAsks(false));
   $$("[data-twp]", (b) => openWP(String(b.dataset.twp)));
+  $$("[data-tresolve]", (b) => confirm("Tester test tay ĐẠT: comment lên ticket và chuyển Resolved?") && post({action: "tg_ask_resolve", id: +b.dataset.tresolve}).then(loadTodoExtra));
   $$("[data-treopen]", (b) => confirm("Chuyển ticket sang Reopened để autofix làm theo trả lời của tester?") && post({action: "tg_ask_reopen", id: +b.dataset.treopen}).then(loadTodoExtra));
   $$("[data-tscan]", () => post({action: "tg_ask_scan"}).then(() => setTimeout(loadTodoExtra, 25000)));
   $$("[data-ttg]", (b) => tgOpen(+b.dataset.ttg));

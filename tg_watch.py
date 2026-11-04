@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-tg_watch: userbot Telegram (Telethon) đăng nhập bằng tài khoản của mình, chỉ nghe chat riêng với các tester trong
-TG_TESTERS, lưu tin nhắn + ảnh/file và gom thành yêu cầu chờ duyệt (xem tg_requests.py). Kèm các việc nền:
+tg_watch: userbot Telegram (Telethon) đăng nhập bằng tài khoản của mình, chỉ nghe các NGUỒN CHAT đã chọn (người hoặc
+nhóm — ⚙ Cài đặt trên trang theo dõi, mỗi nguồn có cách nhận + cờ riêng), lưu tin nhắn + ảnh/file và gom thành yêu cầu chờ duyệt (xem tg_requests.py). Kèm các việc nền:
 gom tin quá hạn → Chờ duyệt, theo dõi bản nháp AI → tạo task, gửi phản hồi cho tester (outbox), nhập tin cũ, đồng bộ
 trạng thái work package.
 
   Đăng nhập: trang theo dõi → Telegram → ⚙ Cài đặt (số điện thoại → mã → mật khẩu 2 bước); service chưa đăng nhập thì
   chờ lệnh đăng nhập từ trang. Hoặc trên terminal:
   python3 tg_watch.py --login      # nhập số điện thoại, mã xác nhận, mật khẩu 2 bước (nếu có)
-  python3 tg_watch.py --dialogs    # liệt kê chat riêng gần đây (lấy ID / @username cho TG_TESTERS)
+  python3 tg_watch.py --dialogs    # liệt kê chat gần đây (người + nhóm) — trang theo dõi cũng chọn được
   python3 tg_watch.py              # chạy liên tục (service op-telegram)
 
 Cần: pip install --user telethon; TG_API_ID / TG_API_HASH lấy ở https://my.telegram.org → API development tools.
@@ -28,8 +28,8 @@ import envconf  # noqa: E402
 import tg_requests as tr  # noqa: E402
 
 try:
-    from telethon import TelegramClient, errors, events
-    from telethon.tl.types import User
+    from telethon import TelegramClient, errors, events, utils
+    from telethon.tl.types import Channel, Chat, User
 except ImportError:  # pragma: no cover
     sys.exit("Thiếu Telethon: python3 -m pip install --user telethon")
 
@@ -57,7 +57,7 @@ def client(wait=False):
                      " trong .env (https://my.telegram.org → API development tools)")
         log.error(msg + " — chờ cấu hình")
         while not (tr.settings()["api_id"] and tr.settings()["api_hash"]):
-            tr.set_meta("watcher", {"at": tr.now(), "pid": os.getpid(), "testers": [], "error": msg})
+            tr.set_meta("watcher", {"at": tr.now(), "pid": os.getpid(), "chats": [], "testers": [], "error": msg})
             time.sleep(5)
         restart_self()
     os.makedirs(os.path.dirname(SESSION), exist_ok=True)
@@ -69,6 +69,18 @@ def restart_self():
     log.info("chạy lại tg_watch.py")
     logging.shutdown()
     os.execv(sys.executable, [sys.executable, "-u", os.path.abspath(__file__)] + sys.argv[1:])
+
+
+def chat_kind(ent):
+    if isinstance(ent, User):
+        return "user"
+    if isinstance(ent, Channel):
+        return "channel" if getattr(ent, "broadcast", False) else "group"
+    return "group" if isinstance(ent, Chat) else "user"
+
+
+def chat_title(ent):
+    return getattr(ent, "title", None) or name_of(ent)
 
 
 def mask_phone(p):
@@ -85,7 +97,8 @@ def secure_session():
 class Watcher:
     def __init__(self, c):
         self.c = c
-        self.testers = {}  # chat_id (= user id) → tên
+        self.chats = {}  # peer id (= msg.chat_id; nhóm là số âm) → {"ref", "name", "kind"}
+        self._names = {}  # sender id → tên (nhóm: mỗi tin một người gửi)
         self.me = ""
 
     async def download(self, msg):
@@ -104,28 +117,47 @@ class Watcher:
         path = await msg.download_media(file=os.path.join(folder, fname.replace("/", "_")))
         return ("%s/%s" % (msg.chat_id, os.path.basename(path)) if path else None), kind
 
+    async def sender_name(self, msg):
+        chat = self.chats[msg.chat_id]
+        if msg.out:
+            return self.me or "Tôi"
+        if chat["kind"] == "user":
+            return chat["name"]
+        sid = msg.sender_id
+        if sid not in self._names:
+            try:
+                ent = await msg.get_sender()
+                self._names[sid] = chat_title(ent) if ent else str(sid)
+            except Exception:  # noqa: BLE001
+                self._names[sid] = str(sid)
+        return self._names[sid]
+
     async def store(self, msg, live):
-        if msg.chat_id not in self.testers:
+        if msg.chat_id not in self.chats:
             return
+        who = await self.sender_name(msg)
         if live and not msg.out and (msg.message or "").strip():
             # Trả lời câu hỏi xin ý kiến (ticket UNREVIEWED) → comment lên ticket, không gom thành yêu cầu.
             try:
                 handled = await self.run_blocking(tr.handle_ask_reply, msg.chat_id, msg.reply_to_msg_id, msg.message,
-                                                  self.testers[msg.chat_id])
+                                                  who)
             except Exception:  # noqa: BLE001
                 log.exception("lỗi ghi trả lời xin ý kiến")
                 handled = False
             if handled:
-                tr.ingest(msg.chat_id, msg.id, True, self.testers[msg.chat_id], msg.message or "", msg.date, None, None,
+                tr.ingest(msg.chat_id, msg.id, True, who, msg.message or "", msg.date, None, None,
                           msg.reply_to_msg_id, False)
-                log.info("tester %s trả lời câu hỏi xin ý kiến", self.testers[msg.chat_id])
+                log.info("%s trả lời câu hỏi xin ý kiến", who)
                 return
-        media, kind = await self.download(msg)
-        rid = tr.ingest(msg.chat_id, msg.id, not msg.out,
-                        self.testers[msg.chat_id] if not msg.out else (self.me or "Tôi"),
-                        msg.message or "", msg.date, media, kind, msg.reply_to_msg_id, live)
+        # Cách nhận của chat (mọi tin / khi nhắc tới tôi hoặc trả lời tin của tôi / hashtag); msg.mentioned của
+        # Telethon = tin nhắc @tôi hoặc reply vào tin của tôi.
+        can_open = live and not msg.out and tr.eligible(msg.chat_id, msg.message or "", getattr(msg, "mentioned", False))
+        c = tr.chat_cfg(msg.chat_id)
+        media, kind = await self.download(msg) if (c is None or c["requests"] or msg.out) else (None, None)
+        rid = tr.ingest(msg.chat_id, msg.id, not msg.out, who, msg.message or "", msg.date, media, kind,
+                        msg.reply_to_msg_id, live and (c is None or c["requests"]), can_open)
         if rid and live:
-            log.info("tin mới của %s → yêu cầu #%s", self.testers[msg.chat_id], rid)
+            log.info("tin mới của %s (%s) → yêu cầu #%s", who, self.chats[msg.chat_id]["name"], rid)
 
     async def on_new(self, event):
         try:
@@ -137,8 +169,24 @@ class Watcher:
         tr.edit_message(event.chat_id, event.message.id, event.message.message or "")
 
     def heartbeat(self, error=None):
-        tr.set_meta("watcher", {"me": self.me, "testers": [{"id": k, "name": v} for k, v in self.testers.items()],
+        chats = [dict(v, id=k) for k, v in self.chats.items()]
+        tr.set_meta("watcher", {"me": self.me, "chats": chats, "testers": chats, "missing": getattr(self, "missing", []),
                                 "at": tr.now(), "pid": os.getpid(), "error": error})
+
+    async def save_dialogs(self):
+        """Chat gần đây (người + nhóm) để chọn nguồn trên trang theo dõi."""
+        out = []
+        async for d in self.c.iter_dialogs(limit=150):
+            e = d.entity
+            if isinstance(e, User) and (e.bot or e.is_self):
+                continue
+            kind = chat_kind(e)
+            uname = getattr(e, "username", None)
+            pid = utils.get_peer_id(e)
+            out.append({"id": pid, "ref": "@" + uname if uname else str(pid), "name": chat_title(e), "kind": kind,
+                        "members": getattr(e, "participants_count", None)})
+        tr.set_meta("dialogs", {"at": tr.now(), "items": out})
+        return len(out)
 
     async def run_blocking(self, fn, *args):
         return await asyncio.get_event_loop().run_in_executor(None, fn, *args)
@@ -173,7 +221,11 @@ class Watcher:
                     if cmd["kind"].startswith("login_"):
                         tr.finish_command(cmd["id"], "đã đăng nhập sẵn")
                         continue
-                    if cmd["kind"] == "import" and args.get("chat_id") in self.testers:
+                    if cmd["kind"] == "dialogs":
+                        n = await self.save_dialogs()
+                        tr.finish_command(cmd["id"], "đã đọc %d chat" % n)
+                        continue
+                    if cmd["kind"] == "import" and args.get("chat_id") in self.chats:
                         n = 0
                         async for m in self.c.iter_messages(args["chat_id"], limit=args.get("limit", 200)):
                             await self.store(m, False)
@@ -267,20 +319,29 @@ class Watcher:
         secure_session()
         self.me = name_of(await self.c.get_me())
         self.login_state("done", me=self.me)
-        for ref in tr.settings()["testers"]:
+        try:
+            await self.save_dialogs()
+        except Exception:  # noqa: BLE001
+            log.exception("không đọc được danh sách chat")
+        self.missing = []
+        for entry in tr.settings()["chats"]:
+            ref = entry["ref"]
             try:
                 ent = await self.c.get_entity(int(ref) if ref.lstrip("-").isdigit() else ref)
-                self.testers[ent.id] = name_of(ent)
+                self.chats[utils.get_peer_id(ent)] = {"ref": ref, "name": entry["label"] or chat_title(ent),
+                                                       "kind": chat_kind(ent)}
             except Exception as ex:  # noqa: BLE001
-                log.error("không tìm thấy tester %s: %s", ref, ex)
-        if not self.testers:
-            self.heartbeat("chưa có tester nào (⚙ Cài đặt → Tester) hoặc không tìm thấy tester")
-            log.error("danh sách tester trống hoặc không tìm thấy tester nào — chỉ chạy việc nền")
+                log.error("không tìm thấy chat %s: %s", ref, ex)
+                self.missing.append({"ref": ref, "error": str(ex)[:200]})
+        if not self.chats:
+            self.heartbeat("chưa có nguồn chat nào (⚙ Cài đặt → Nguồn chat) hoặc không tìm thấy")
+            log.error("chưa có nguồn chat nào — chỉ chạy việc nền")
         else:
-            chats = list(self.testers)
-            self.c.add_event_handler(self.on_new, events.NewMessage(chats=chats))
-            self.c.add_event_handler(self.on_edit, events.MessageEdited(chats=chats))
-            log.info("đăng nhập %s, nghe chat với: %s", self.me, ", ".join(self.testers.values()))
+            peers = list(self.chats)
+            self.c.add_event_handler(self.on_new, events.NewMessage(chats=peers))
+            self.c.add_event_handler(self.on_edit, events.MessageEdited(chats=peers))
+            log.info("đăng nhập %s, nghe: %s", self.me, ", ".join("%s (%s)" % (v["name"], v["kind"])
+                                                                for v in self.chats.values()))
         self.heartbeat()
         await self.background()
 
@@ -302,10 +363,12 @@ async def dialogs(c=None):
         await c.connect()
         if not await c.is_user_authorized():
             sys.exit("Chưa đăng nhập: python3 tg_watch.py --login")
-    print("\nChat riêng gần đây (điền ID hoặc @username vào ⚙ Cài đặt → Tester trên trang theo dõi, hoặc TG_TESTERS):")
+    print("\nChat gần đây (chọn trên trang theo dõi → Telegram → ⚙ Cài đặt → Nguồn chat, hoặc điền ID / @username):")
     async for d in c.iter_dialogs(limit=80):
-        if isinstance(d.entity, User) and not d.entity.bot and not d.entity.is_self:
-            print("  %14s  %s" % (d.entity.id, name_of(d.entity)))
+        e = d.entity
+        if isinstance(e, User) and (e.bot or e.is_self):
+            continue
+        print("  %16s  %-7s %s" % (utils.get_peer_id(e), chat_kind(e), chat_title(e)))
     if own:
         await c.disconnect()
 
