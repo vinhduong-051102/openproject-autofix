@@ -223,3 +223,49 @@ soạn tiêu đề + mô tả theo mẫu ticket gần nhất của người QA (
 MINH CHỨNG), kèm câu hỏi gợi ý bổ sung → xem / sửa tiêu đề, mô tả, loại, ưu tiên, người nhận → "Tạo task trên
 OpenProject (New)": tạo work package, upload file, ảnh trong mô tả trỏ tới file đã upload. Giao cho mình thì op-watch
 coi là task New và autofix tự sửa. Bản nháp ở `~/autofix/task-drafts/` (cleanup.py xoá sau 14 ngày).
+
+## Yêu cầu tester qua Telegram (tg_watch.py + tg_requests.py)
+
+Tester nhắn yêu cầu trong **chat riêng hiện tại** với mình trên Telegram → trang theo dõi có mục
+"Yêu cầu tester (Telegram)" → mình duyệt thì mới thành task OpenProject.
+
+- `tg_watch.py` (service `op-telegram`): userbot Telethon đăng nhập bằng **tài khoản Telegram của mình**, chỉ nghe chat
+  với `TG_TESTERS`; lưu tin của cả hai bên + ảnh / file vào `~/autofix/.telegram/` (SQLite `requests.db`, `media/`).
+  Các tin liên tiếp của tester cách nhau ≤ `TG_GROUP_WINDOW` giây (hoặc trả lời vào tin của yêu cầu chưa duyệt) gom thành
+  một yêu cầu; hết khoảng đó → **Chờ duyệt**. `TG_DETECT_MODE=hashtag` thì chỉ tin có `#bug`, `#yc`… mới tạo yêu cầu.
+- Trên trang theo dõi (bấm một yêu cầu):
+  - **Duyệt → AI soạn & tạo task**: dùng luồng "+ Tạo task" (Claude soạn theo mẫu ticket của tester, đính kèm ảnh) rồi tự
+    tạo task **New giao cho mình** → op-watch thấy task New → autofix sửa như thường.
+  - **Duyệt → xem bản nháp trước**: AI soạn xong, nút "Xem bản nháp & tạo task" mở hộp Tạo task để sửa rồi tạo.
+  - **Gắn vào việc có sẵn** (số WP hoặc SOAR-xxxx): comment nội dung tester + đính kèm file vào việc đó.
+  - **Từ chối** (kèm lý do) / **Bỏ qua** (không phải yêu cầu) / **Đưa về chờ duyệt**.
+  - **💬 Chat**: xem toàn bộ cuộc trò chuyện, **nhập tin cũ** (tg_watch.py đọc lịch sử), chọn tin → tạo yêu cầu.
+- **⚙ Cài đặt** (trong mục Telegram trên trang theo dõi): API id / hash, danh sách tester, cách gom tin, hashtag, gửi tin
+  trả lời, trạng thái coi là xong, các mẫu tin. Lưu vào `~/.config/op-watch/telegram.json` (quyền 600, đổi đường dẫn bằng
+  `TG_CONFIG`), **ghi đè** `TG_*` trong `.env`. Đổi API / tester thì trang tự khởi động lại `op-telegram`; mục khác áp
+  dụng ngay. API hash không hiển thị lại trên trang.
+  **Đăng nhập trên trang**: "Cài & bật op-telegram" → nhập số điện thoại → mã Telegram gửi về → mật khẩu 2 bước (nếu có);
+  có nút Đăng xuất. op-telegram chưa đăng nhập thì không thoát mà chờ lệnh đăng nhập; số điện thoại / mã / mật khẩu đi
+  qua hàng lệnh trong `requests.db` (quyền 600) và bị xoá ngay khi đọc, lệnh quá 10 phút bỏ qua.
+- **Lọc việc bằng AI** (`TG_AI_FILTER`, mặc định bật; model `TG_AI_MODEL`): gom tin xong → Claude tách việc, bỏ qua trò
+  chuyện, đánh dấu việc đã có (đọc trạng thái ticket được nhắc + 200 ticket cập nhật trong 21 ngày + yêu cầu cũ). Mọi
+  việc vẫn chờ mình duyệt; việc AI cho là đã có thì phải xác nhận "Vẫn tạo việc mới".
+- `TG_NOTIFY_TESTER=1`: tg_watch.py trả lời tester (từ tài khoản mình, reply vào tin đầu của yêu cầu) khi tạo task /
+  gắn việc / từ chối, và khi task sang `TG_DONE_STATUSES`. Mẫu tin: `TG_MSG_*` trong `.env`.
+
+Cài đặt:
+
+Toàn bộ làm được trên trang (⚙ Cài đặt). Cách dùng terminal (tuỳ chọn):
+
+```bash
+python3 -m pip install --user telethon
+# .env: TG_API_ID, TG_API_HASH (https://my.telegram.org → API development tools)
+python3 tg_watch.py --login      # nhập số điện thoại, mã Telegram gửi về, mật khẩu 2 bước (nếu có)
+python3 tg_watch.py --dialogs    # lấy ID / @username tester → TG_TESTERS
+./install.sh op-telegram         # cài + chạy service
+systemctl --user restart op-dashboard
+journalctl --user -u op-telegram -f
+```
+
+File phiên `TG_SESSION` (mặc định `~/.config/op-watch/telegram.session`, quyền 600) có toàn quyền vào tài khoản
+Telegram: không chia sẻ / commit; thu hồi ở Telegram → Settings → Devices. Nên báo tester là tin nhắn được ghi nhận tự động.

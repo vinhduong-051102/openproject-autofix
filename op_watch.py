@@ -222,8 +222,15 @@ def poll(cfg, api, me_id, state, notify_existing):
                 event = "REOPENED" if cfg["statuses"].get(info["status_id"]) == "Reopened" else "NEW"
                 emit(cfg, event, info, "tạo bởi %s" % info["author"] if event == "NEW" and info["author"] else "")
         else:
-            if prev["status_id"] != info["status_id"] and cfg["statuses"].get(info["status_id"]) == "Reopened":
-                emit(cfg, "REOPENED", info)
+            if prev["status_id"] != info["status_id"]:
+                # Đổi giữa các trạng thái đang theo dõi (vd Reopened → New) cũng phải báo: trước đây chỉ báo khi
+                # sang Reopened nên chuyển về New không kích hoạt autofix.
+                to = cfg["statuses"].get(info["status_id"])
+                frm = cfg["statuses"].get(prev["status_id"]) or "trạng thái %s" % prev["status_id"]
+                if to == "Reopened":
+                    emit(cfg, "REOPENED", info)
+                elif to == "New":
+                    emit(cfg, "NEW", info, "chuyển từ %s sang New" % frm)
             if prev["updated_at"] != info["updated_at"]:
                 acts = api.activities(info["id"])
                 for act in acts:

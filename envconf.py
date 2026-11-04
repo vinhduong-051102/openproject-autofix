@@ -198,6 +198,8 @@ TOKEN_DIR = path("CLAUDE_TOKEN_DIR", os.path.join(CONFIG_DIR, "tokens"))
 STATE_PATH = path("OP_WATCH_STATE", "~/.local/state/op-watch/state.json")
 CACHE_DIR = path("OP_WATCH_CACHE_DIR", "~/.cache/op-watch")
 DASHBOARD_PORT = int(get("DASHBOARD_PORT", "8765"))
+# IP nghe thêm ngoài 127.0.0.1 (vd IP Tailscale 100.x), cách nhau dấu phẩy. Trống = chỉ localhost.
+DASHBOARD_EXTRA_BIND = [h.strip() for h in get("DASHBOARD_EXTRA_BIND", "").split(",") if h.strip()]
 
 
 def _read_json(p):

@@ -26,6 +26,9 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+import urllib.error
+import urllib.parse
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envconf  # noqa: E402
@@ -597,6 +600,9 @@ def set_merge_schedule(times, days):
 def action(body):
     cfg, acfg, root = load()
     kind = body.get("action")
+    if str(kind).startswith("tg_"):  # yêu cầu tester qua Telegram
+        import tg_requests
+        return tg_requests.action(body)
     names = [p["name"] for p in af.profiles(acfg)]
     if kind == "set_parallel":
         msgs = []
@@ -873,9 +879,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def local_host(self):
-        # Chặn DNS rebinding: chỉ nhận Host là 127.0.0.1 / localhost.
+        # Chặn DNS rebinding: chỉ nhận Host là 127.0.0.1 / localhost / IP nghe thêm (DASHBOARD_EXTRA_BIND).
         host = (self.headers.get("Host") or "").split(":")[0]
-        return host in ("127.0.0.1", "localhost")
+        return host in ("127.0.0.1", "localhost") or host in envconf.DASHBOARD_EXTRA_BIND
 
     def do_GET(self):
         if not self.local_host():
@@ -892,6 +898,37 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, run_events(q.get("id", ""), int(q.get("from", "0"))))
             if url.path == "/api/joblog":
                 return self.send(200, {"text": job_log(q.get("key", ""))})
+            if url.path == "/api/op":
+                return self.send(200, op_work_packages(q.get("scope", "mine"), q.get("status", "open"), q.get("q", ""),
+                                                       q.get("page", "1") or 1, q.get("refresh") == "1"))
+            if url.path == "/api/op/statuses":
+                try:
+                    return self.send(200, op_allowed_statuses(q.get("id", "")))
+                except ValueError as ex:
+                    return self.send(400, {"error": str(ex)})
+                except OPError as ex:
+                    return self.send(502, {"error": str(ex)})
+            if url.path == "/api/op/wp":
+                return self.send(200, op_wp_detail(q.get("id", "")))
+            if url.path == "/api/op/att":
+                got = op_attachment(q.get("id", ""))
+                if not got:
+                    return self.send(404, {"error": "không lấy được file đính kèm"})
+                data, ctype, name = got
+                inline = bool(_ATT_INLINE.match(ctype)) and q.get("dl") != "1"
+                # Loại khác (html, svg, ...) luôn tải về, không hiển thị trong origin của dashboard
+                self.send_response(200)
+                self.send_header("Content-Type", ctype if inline else "application/octet-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition", "%s; filename*=UTF-8''%s" % (
+                    "inline" if inline else "attachment", urllib.parse.quote(name)))
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                self.wfile.write(data)
+                return None
+            if url.path == "/api/compose-log":
+                return self.send(200, compose_log(int(q.get("from", "0") or 0)))
             if url.path == "/api/qa":
                 return self.send(200, {"text": qa_report(q.get("name", ""))})
             if url.path == "/api/taskdraft":
@@ -905,6 +942,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"text": conflict_report(q.get("name", ""))})
             if url.path == "/api/file":
                 return self.send(200, {"text": run_file(q.get("id", ""), q.get("name", ""))})
+            if url.path.startswith("/api/tg/"):  # yêu cầu tester qua Telegram (tg_requests.py)
+                import tg_requests
+                try:
+                    code, body, ctype = tg_requests.http_get(url.path, q)
+                except ValueError as ex:
+                    return self.send(400, {"error": str(ex)})
+                return self.send(code, body, ctype)
             return self.send(404, {"error": "not found"})
         except Exception as ex:  # noqa: BLE001 — trả lỗi cho trang, không làm chết server
             return self.send(500, {"error": str(ex)})
@@ -915,13 +959,350 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, {"error": "forbidden"})
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            if length > 200000:
+                raise ValueError("dữ liệu quá lớn")
             body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("body phải là JSON object")
+            if urlparse(self.path).path == "/api/op/status":
+                try:
+                    return self.send(200, op_set_status(body.get("id"), body.get("status_id"), body.get("lock_version")))
+                except OPError as ex:
+                    return self.send(502, {"error": str(ex)})
+            if urlparse(self.path).path == "/api/op/comment":
+                try:
+                    return self.send(200, op_comment(body.get("id"), body.get("text")))
+                except OPError as ex:
+                    return self.send(502, {"error": str(ex)})
             res = action(body)
             return self.send(200, res if isinstance(res, dict) else {"message": res})
         except ValueError as ex:
             return self.send(400, {"error": str(ex)})
         except Exception as ex:  # noqa: BLE001
             return self.send(500, {"error": str(ex)})
+
+
+COMPOSE_TAIL = 256 * 1024  # lần đầu (from=0) hoặc file bị ghi đè: chỉ gửi đuôi chừng này byte
+
+
+_OP_CACHE = {}
+_OP_LOCK = threading.Lock()
+
+
+_OP_PREFIX = {}
+
+
+def _op_prefix(api, cfg):
+    """Tiền tố mã hiển thị của project (SOAR trong SOAR-2598), học từ một work package bất kỳ, nhớ lại."""
+    key = cfg.get("project")
+    if key not in _OP_PREFIX:
+        try:
+            d = api.get("/api/v3/projects/%s/work_packages" % key, {"pageSize": 1})
+            el = (d.get("_embedded") or {}).get("elements") or []
+            m = re.match(r"([A-Za-z]+)-\d+$", (el[0].get("displayId") or "") if el else "")
+            _OP_PREFIX[key] = m.group(1) if m else ""
+        except Exception:  # noqa: BLE001
+            return ""
+    return _OP_PREFIX[key]
+
+
+def op_work_packages(scope="mine", status="open", q="", page=1, refresh=False):
+    """Work package OpenProject cho tab OpenProject (đọc qua API token trong config, cache 60s).
+    scope: mine (giao cho tôi) | all (cả project); status: open | all; q: tìm theo tiêu đề / nội dung / SOAR-xxx."""
+    scope = "all" if scope == "all" else "mine"
+    status = "all" if status == "all" else "open"
+    q, page = (q or "").strip()[:100], max(1, min(int(page or 1), 200))
+    key = (scope, status, q, page)
+    with _OP_LOCK:
+        hit = _OP_CACHE.get(key)
+        if hit and not refresh and time.time() - hit[0] < 60:
+            return hit[1]
+    cfg = load()[0]
+    api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    filters = []
+    if scope == "mine":
+        filters.append({"assignee": {"operator": "=", "values": ["me"]}})
+    if status == "open":
+        filters.append({"status": {"operator": "o", "values": []}})
+    if q and re.fullmatch(r"#?\d{1,7}", q):
+        # Gõ số (2598 / #2598): mã hiển thị <tiền tố>-2598 (vd SOAR-2598), không có thì id nội bộ 2598
+        n = q.lstrip("#")
+        prefix = _op_prefix(api, cfg)
+        tries = (["%s-%s" % (prefix, n)] if prefix else []) + [n]
+    elif q and re.fullmatch(r"[A-Za-z]+-\d+", q):
+        tries = [q.upper()]
+    else:
+        tries = []
+    if tries:
+        # Tìm đúng mã (SOAR-2577 / 2577): filter search không khớp displayId → lấy thẳng work package đó
+        # (không theo bộ lọc Của tôi / Đang mở: gõ mã là muốn thấy đúng ticket đó)
+        data = {"_embedded": {"elements": []}, "total": 0}
+        for t in tries:
+            try:
+                data = {"_embedded": {"elements": [api.get("/api/v3/work_packages/%s" % t)]}, "total": 1}
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        filters = None
+    elif q:
+        filters.append({"search": {"operator": "**", "values": [q]}})
+    size = 50
+    try:
+        data = data if filters is None else api.get("/api/v3/projects/%s/work_packages" % cfg["project"], {
+            "filters": json.dumps(filters), "pageSize": size, "offset": page,
+            "sortBy": json.dumps([["updatedAt", "desc"]])})
+    except Exception as ex:  # noqa: BLE001
+        return {"error": "Không gọi được OpenProject: %s" % str(ex)[:200], "items": [], "total": 0}
+    base = cfg["url"].rstrip("/")
+    items = []
+    for e in data.get("_embedded", {}).get("elements", []):
+        L = e.get("_links", {})
+        t = lambda k: (L.get(k) or {}).get("title") or ""  # noqa: E731
+        items.append({"id": e.get("id"), "display_id": e.get("displayId") or "#%s" % e.get("id"),
+                      "subject": e.get("subject") or "", "status": t("status"), "type": t("type"),
+                      "priority": t("priority"), "assignee": t("assignee"), "updated": e.get("updatedAt") or "",
+                      "url": "%s/work_packages/%s" % (base, e.get("id"))})
+    out = {"items": items, "total": data.get("total", len(items)), "page": page, "page_size": size,
+           "fetched": datetime.now().strftime("%H:%M:%S"), "op_url": base}
+    with _OP_LOCK:
+        if len(_OP_CACHE) > 200:
+            _OP_CACHE.clear()
+        _OP_CACHE[key] = (time.time(), out)
+    return out
+
+
+_OP_API = {}
+
+
+def op_api():
+    """Một client OpenProject dùng chung (giữ cache tên user giữa các lần gọi)."""
+    cfg = load()[0]
+    key = (cfg["url"], cfg["api_key"])
+    if key not in _OP_API:
+        _OP_API.clear()
+        _OP_API[key] = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    return _OP_API[key], cfg
+
+
+_OP_ME = {}
+
+
+def op_me_id(api):
+    """id user của API token (bình luận của tôi trong khung chat), cache theo url."""
+    if api.url not in _OP_ME:
+        try:
+            _OP_ME[api.url] = str(api.me().get("id") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+    return _OP_ME[api.url]
+
+
+class OPError(Exception):
+    """Lỗi do OpenProject trả về khi ghi (trả 502 cho client kèm thông báo của OP)."""
+
+
+def op_comment(wp_id, text):
+    """Gửi bình luận (markdown) lên work package. Ghi thật lên OpenProject."""
+    wp_id = str(wp_id or "").strip()
+    text = (text or "").strip() if isinstance(text, str) else ""
+    if not re.fullmatch(r"\d{1,12}", wp_id):
+        raise ValueError("mã work package không hợp lệ")
+    if not text:
+        raise ValueError("bình luận trống")
+    if len(text) > 20000:
+        raise ValueError("bình luận quá dài (tối đa 20000 ký tự)")
+    api, _cfg = op_api()
+    try:
+        res = af.op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": text}},
+                          normalize=False)
+    except urllib.error.HTTPError as ex:
+        try:
+            msg = json.loads(ex.read().decode("utf-8", "replace")).get("message") or ""
+        except Exception:  # noqa: BLE001
+            msg = ""
+        raise OPError("OpenProject trả %s%s" % (ex.code, (": " + msg) if msg else ""))
+    except Exception as ex:  # noqa: BLE001
+        raise OPError("Không gọi được OpenProject: %s" % str(ex)[:200])
+    with _OP_LOCK:
+        _OP_CACHE.clear()  # danh sách sắp theo updatedAt → làm mới
+    print("op-dashboard: [ghi OP] bình luận wp %s (%d ký tự) → activity %s" % (wp_id, len(text), (res or {}).get("id")),
+          flush=True)
+    return {"ok": True, "activity_id": (res or {}).get("id")}
+
+
+def _op_http_error(ex):
+    try:
+        msg = json.loads(ex.read().decode("utf-8", "replace")).get("message") or ""
+    except Exception:  # noqa: BLE001
+        msg = ""
+    return OPError("OpenProject trả %s%s" % (ex.code, (": " + msg) if msg else ""))
+
+
+def op_allowed_statuses(wp_id):
+    """Trạng thái được phép chuyển tới (theo workflow của OpenProject cho user của API token).
+    Dùng form API (POST /form chỉ kiểm tra, không ghi gì)."""
+    wp_id = str(wp_id or "").strip()
+    if not re.fullmatch(r"\d{1,12}", wp_id):
+        raise ValueError("mã work package không hợp lệ")
+    api, _cfg = op_api()
+    try:
+        w = api.get("/api/v3/work_packages/%s" % wp_id)
+        form = af.op_write(api, "POST", "/api/v3/work_packages/%s/form" % wp_id, {"lockVersion": w["lockVersion"]})
+    except urllib.error.HTTPError as ex:
+        raise _op_http_error(ex)
+    except Exception as ex:  # noqa: BLE001
+        raise OPError("Không gọi được OpenProject: %s" % str(ex)[:200])
+    st = ((form.get("_embedded") or {}).get("schema") or {}).get("status") or {}
+    cur = ((w.get("_links") or {}).get("status") or {}).get("href", "").rstrip("/").split("/")[-1]
+    allowed = [{"id": x["href"].rstrip("/").split("/")[-1], "title": x.get("title") or ""}
+               for x in (st.get("_links") or {}).get("allowedValues") or []]
+    return {"writable": bool(st.get("writable", True)), "current": cur, "statuses": allowed,
+            "lock_version": w["lockVersion"]}
+
+
+def op_set_status(wp_id, status_id, lock_version=None):
+    """Đổi trạng thái work package (ghi thật lên OpenProject). Chỉ nhận trạng thái nằm trong danh sách được phép.
+    lock_version (lúc mở chi tiết) khác hiện tại → báo người khác vừa sửa, không ghi đè."""
+    status_id = str(status_id or "").strip()
+    if not re.fullmatch(r"\d{1,6}", status_id):
+        raise ValueError("trạng thái không hợp lệ")
+    info = op_allowed_statuses(wp_id)
+    if not info["writable"]:
+        raise ValueError("tài khoản API token không được đổi trạng thái ticket này")
+    names = {x["id"]: x["title"] for x in info["statuses"]}
+    if status_id not in names:
+        raise ValueError("không được chuyển sang trạng thái này theo workflow OpenProject")
+    if lock_version not in (None, "") and str(lock_version) != str(info["lock_version"]):
+        raise OPError("Ticket vừa được người khác cập nhật — tải lại chi tiết rồi đổi lại")
+    api, _cfg = op_api()
+    try:
+        af.op_write(api, "PATCH", "/api/v3/work_packages/%s" % str(wp_id).strip(), {
+            "lockVersion": info["lock_version"], "_links": {"status": {"href": "/api/v3/statuses/%s" % status_id}}})
+    except urllib.error.HTTPError as ex:
+        raise _op_http_error(ex)
+    except Exception as ex:  # noqa: BLE001
+        raise OPError("Không gọi được OpenProject: %s" % str(ex)[:200])
+    with _OP_LOCK:
+        _OP_CACHE.clear()
+    print("op-dashboard: [ghi OP] đổi trạng thái wp %s → %s (%s)" % (wp_id, names[status_id], status_id), flush=True)
+    return {"ok": True, "status": names[status_id]}
+
+
+def op_html(html, base):
+    """HTML từ OpenProject (đã được OP làm sạch): ảnh đính kèm → qua dashboard (/api/op/att), link work package
+    → mở chi tiết trong dashboard (#wp-<id>). Máy xem qua Tailscale không vào được op.cytech.ai."""
+    html = html or ""
+    b = re.escape(base)
+    html = re.sub(r'(?:%s)?/api/v3/attachments/(\d+)/content' % b, r'/api/op/att?id=\1', html)
+    html = re.sub(r'href="(?:%s)?(?:/projects/[^/"]+)?/work_packages/(\d+)(?:/[^"]*)?"' % b, r'href="#wp-\1"', html)
+    return html
+
+
+def op_wp_detail(wp_id):
+    wp_id = (wp_id or "").strip()
+    if not re.fullmatch(r"\d+|[A-Za-z]+-\d+", wp_id):
+        return {"error": "mã work package không hợp lệ"}
+    api, cfg = op_api()
+    base = cfg["url"].rstrip("/")
+    try:
+        w = api.get("/api/v3/work_packages/%s" % wp_id.upper())
+        acts = api.get("/api/v3/work_packages/%s/activities" % w["id"]).get("_embedded", {}).get("elements", [])
+        atts = api.get("/api/v3/work_packages/%s/attachments" % w["id"]).get("_embedded", {}).get("elements", [])
+    except urllib.error.HTTPError as ex:
+        return {"error": "OpenProject trả %s cho %s" % (ex.code, wp_id)}
+    except Exception as ex:  # noqa: BLE001
+        return {"error": "Không gọi được OpenProject: %s" % str(ex)[:200]}
+    L = w.get("_links", {})
+    t = lambda k: (L.get(k) or {}).get("title") or ""  # noqa: E731
+    parent = L.get("parent") or {}
+    pid = (parent.get("href") or "").rstrip("/").split("/")[-1]
+    me = op_me_id(api)
+    activities = []
+    for a in acts:
+        comment = ((a.get("comment") or {}).get("html") or "").strip()
+        details = [d.get("html") or d.get("raw") or "" for d in a.get("details") or []]
+        if not comment and not details:
+            continue
+        uhref = ((a.get("_links") or {}).get("user") or {}).get("href") or ""
+        activities.append({"id": a.get("id"), "mine": bool(me) and uhref.rstrip("/").split("/")[-1] == me,
+                           "user": api.user_name(uhref),
+                           "at": a.get("createdAt") or "", "comment": op_html(comment, base),
+                           "details": details, "internal": bool(a.get("internal"))})
+    return {
+        "id": w.get("id"), "display_id": w.get("displayId") or "#%s" % w.get("id"), "subject": w.get("subject") or "",
+        "lock_version": w.get("lockVersion"),
+        "type": t("type"), "status": t("status"), "priority": t("priority"), "assignee": t("assignee"),
+        "responsible": t("responsible"), "author": t("author"), "version": t("version"), "category": t("category"),
+        "parent": {"id": pid, "title": parent.get("title") or ""} if pid.isdigit() else None,
+        "created": w.get("createdAt") or "", "updated": w.get("updatedAt") or "",
+        "start": w.get("startDate"), "due": w.get("dueDate"), "done": w.get("percentageDone"),
+        "description": op_html((w.get("description") or {}).get("html"), base),
+        "attachments": [{"id": a.get("id"), "name": a.get("fileName") or "", "size": a.get("fileSize") or 0,
+                         "type": a.get("contentType") or "", "author": ((a.get("_links") or {}).get("author") or {}).get("title") or "",
+                         "at": a.get("createdAt") or ""} for a in atts],
+        "activities": activities, "url": "%s/work_packages/%s" % (base, w.get("id")),
+    }
+
+
+_ATT_INLINE = re.compile(r"^(image/(png|jpe?g|gif|webp|bmp)|application/pdf|text/plain|video/(mp4|webm))$")
+
+
+def op_attachment(att_id):
+    """(bytes, content-type, tên file) của file đính kèm; None nếu không lấy được. Giới hạn 50 MB."""
+    if not re.fullmatch(r"\d{1,12}", att_id or ""):
+        return None
+    api, cfg = op_api()
+    try:
+        meta = api.get("/api/v3/attachments/%s" % att_id)
+        if (meta.get("fileSize") or 0) > 50 * 1024 * 1024:
+            return None
+        req = urllib.request.Request(cfg["url"] + "/api/v3/attachments/%s/content" % att_id, headers=api.headers)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read(50 * 1024 * 1024 + 1)
+    except Exception:  # noqa: BLE001
+        return None
+    return data, meta.get("contentType") or "application/octet-stream", meta.get("fileName") or "file"
+
+
+def compose_log(start=0):
+    """Log docker compose của deploy server (deploy_qa ghi ~/autofix/.compose-live.log từng dòng).
+    from=<offset byte> → phần mới từ offset; file ngắn hơn offset (deploy mới ghi đè) → gửi lại từ đầu (reset)."""
+    root = load()[2]
+    path = os.path.join(root, ".compose-live.log")
+    try:
+        with open(os.path.join(root, ".compose-live.json"), encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        st = {}
+    try:
+        size, mtime = os.path.getsize(path), os.path.getmtime(path)
+    except OSError:
+        return {"exists": False, "text": "", "next": 0, "reset": start > 0, "state": st}
+    reset = start > size or start < 0
+    tail = reset or start == 0
+    if tail:
+        start = max(0, size - COMPOSE_TAIL)
+    with open(path, "rb") as f:
+        f.seek(start)
+        data = f.read(size - start)
+    if tail and start > 0:  # nhảy vào giữa file: bỏ dòng dở đầu
+        data = data[data.find(b"\n") + 1:]
+    return {"exists": True, "text": data.decode("utf-8", "replace"), "next": size, "reset": reset,
+            "size": size, "mtime": datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
+            "running": bool(st.get("running")), "state": st}
+
+
+def serve_extra(host, port):
+    """Nghe thêm trên host (vd IP Tailscale). IP chưa có (tailscaled chưa lên lúc boot) → thử lại mỗi 30s."""
+    while True:
+        try:
+            srv = ThreadingHTTPServer((host, port), Handler)
+        except OSError as ex:
+            print("op-dashboard: chưa nghe được %s:%d (%s) — thử lại sau 30s" % (host, port, ex), flush=True)
+            time.sleep(30)
+            continue
+        print("op-dashboard: http://%s:%d" % (host, port), flush=True)
+        srv.serve_forever()
 
 
 def main():
@@ -934,6 +1315,8 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = "http://127.0.0.1:%d" % args.port
     print("op-dashboard: %s (Ctrl+C để dừng)" % url, flush=True)
+    for host in envconf.DASHBOARD_EXTRA_BIND:
+        threading.Thread(target=serve_extra, args=(host, args.port), daemon=True).start()
     if args.open:
         webbrowser.open(url)
     try:

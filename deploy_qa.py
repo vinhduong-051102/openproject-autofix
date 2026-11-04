@@ -19,10 +19,12 @@ Cấu hình server + tài khoản test: biến DEPLOY_* / QA_* trong .env và/ho
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -51,6 +53,10 @@ DEFAULTS = {
     "wait_minutes": 15,
     "alive_wait_minutes": 5,   # chưa deploy gì: chờ server sống tối đa N phút trước khi QA
     "be_restart_tries": 3,     # BE thoát sau compose up (DB chưa sẵn sàng) → docker start lại tối đa N lần
+    # compose up lỗi (vd playbook chưa kịp healthy khi cả stack recreate → nginx/bootstrap chưa được start):
+    # chờ rồi chạy lại "docker compose up -d" (không recreate) tối đa N lần.
+    "compose_retry_tries": 3,
+    "compose_retry_wait_seconds": 45,
     # QA bằng Gemini (agy, chỉ đọc): mỗi vòng Gemini trả JSON các request cần gọi, tool gọi qua soar_api.py rồi gửi
     # kết quả lại. "claude" = Claude headless tự gọi soar_api.py (tốn hạn mức Claude).
     "qa_engine": "gemini",
@@ -75,11 +81,45 @@ DEFAULTS = {
 }
 
 FAIL_COUNT = os.path.join(envconf.autofix_root(), "qa-fail-count.json")
+# Rule rút ra từ các lần Claude kết luận QA SAI (op_autofix.report_qa_wrong ghi thêm); đưa vào prompt mọi lần QA sau.
+QA_RULES = os.path.join(envconf.autofix_root(), "qa-rules.md")
+QA_TOOL_ERROR = "(lỗi công cụ QA — QA lại lượt sau)"
+
+
+def load_qa_rules(limit=6000):
+    """Nội dung qa-rules.md (giữ phần mới nhất nếu quá dài) để chèn vào prompt QA."""
+    try:
+        with open(QA_RULES, encoding="utf-8") as f:
+            text = f.read().strip()
+    except OSError:
+        return "(chưa có)"
+    if len(text) > limit:
+        text = "…\n" + text[-limit:].split("\n", 1)[-1]
+    return text or "(chưa có)"
+
+
+REPEAT_RX = re.compile(r"\{\{rep:(.{1,20}?):(\d{1,6})\}\}", re.S)
+
+
+def expand_repeat(text, notes):
+    """{{rep:<chuỗi>:<số lần>}} → chuỗi lặp đúng số lần (model tự gõ chuỗi dài hay đếm sai). Ghi chú độ dài vào notes."""
+    if not text or "{{rep:" not in text:
+        return text
+
+    def sub(m):
+        n = min(int(m.group(2)), 200000)
+        out = m.group(1) * n
+        notes.append("{{rep:%s:%s}} → %d ký tự" % (m.group(1), m.group(2), len(out)))
+        return out
+    return REPEAT_RX.sub(sub, text)
 # Có file này = đang QA trên server: đợt test lại bằng Gemini (op_autofix --review) chờ, nhường agy cho QA.
 QA_ACTIVE = os.path.join(envconf.autofix_root(), ".qa-active")
 AUTOFIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "op_autofix.py")
 
 PENDING = os.path.join(envconf.autofix_root(), "qa-pending.json")
+# Log docker compose (deploy server) ghi từng dòng trong lúc chạy để dashboard theo dõi trực tiếp.
+COMPOSE_LIVE = os.path.join(envconf.autofix_root(), ".compose-live.log")
+COMPOSE_STATE = os.path.join(envconf.autofix_root(), ".compose-live.json")
 TRANSIENT = re.compile(r"^HTTP 50[234]\b|URLError|Connection refused|Connection reset|timed out|RemoteDisconnected",
                        re.M)
 
@@ -148,6 +188,9 @@ Gọi API: mỗi phần tử `calls` gồm
 - why: gọi để kiểm tra gì
 - parallel: true trên các request của CÙNG một vòng → các request đó được gửi đồng thời (test tranh chấp / gửi trùng)
 Tối đa {max_calls} request mỗi vòng; response dài bị cắt.
+CHUỖI DÀI / LẶP (test giới hạn độ dài…): KHÔNG tự gõ chuỗi dài (dễ đếm sai). Viết `{{{{rep:<chuỗi>:<số lần>}}}}` trong
+body / target / file_name / file_content, công cụ thay bằng chuỗi lặp đúng số lần và ghi lại độ dài thực gửi. Ví dụ tên
+256 ký tự: `"name":"{{{{rep:A:256}}}}"`; "QA_AUTO_" + 248 ký tự: `"QA_AUTO_{{{{rep:A:248}}}}"`.
 
 Tài khoản: mặc định QA_superadmin (FULL quyền).
 TÀI KHOẢN TESTER TRONG TICKET — ƯU TIÊN: ticket ghi sẵn tài khoản tester (tên + mật khẩu, kể cả mật khẩu chỉ ghi ở
@@ -185,6 +228,9 @@ Kết thúc (done=true) khi đã đủ bằng chứng, với verdict ĐẠT | KH
 result (ngắn gọn cho tester: đã test gì, kết quả), evidence (request → mã HTTP + phần response quan trọng),
 notes (dữ liệu đã tạo / chưa kiểm tra được). Chưa xong: done=false, verdict=CHƯA, calls = các request tiếp theo.
 
+# RULE TỪ CÁC LẦN QA SAI TRƯỚC (BẮT BUỘC TUÂN THEO)
+{qa_rules}
+
 Vòng {round}/{rounds}.{last_round}
 
 # TICKET
@@ -213,6 +259,20 @@ QA_SCHEMA = {
 }
 
 
+def clean_output(data):
+    """Output của soar_api.py (bytes) → chuỗi an toàn để đưa vào prompt Gemini: bỏ ký tự điều khiển / null
+    (null làm lệnh gọi Gemini lỗi "embedded null byte"); body nhị phân (vd file xlsx export) → chỉ ghi kích thước."""
+    text = data.decode("utf-8", "replace") if isinstance(data, bytes) else (data or "")
+    head, sep, body = text.partition("\n\n")
+    if not sep:
+        head, body = "", text
+    bad = sum(1 for c in body if c == "\ufffd" or (ord(c) < 32 and c not in "\n\r\t"))
+    if body and ("\x00" in body or bad > max(8, len(body) // 20)):
+        body = "[nội dung nhị phân ~%d byte — đã lược, không đưa vào prompt; bắt đầu bằng %r]" % (
+            len(body.encode("utf-8", "replace")), body[:8].encode("utf-8", "replace")[:8])
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", head + sep + body)
+
+
 def soar_call(qa_dir, call, dcfg=None):
     """Một request Gemini yêu cầu → chạy soar_api.py. Trả chuỗi kết quả (đã cắt)."""
     method = (call.get("method") or "GET").upper()
@@ -223,6 +283,11 @@ def soar_call(qa_dir, call, dcfg=None):
             return "BỊ CHẶN: DELETE chỉ cho đường dẫn khớp %s" % (dcfg or {}).get("qa_delete_allow")
     elif method not in ("GET", "POST", "PUT", "PATCH", "UPLOAD"):
         return "BỊ CHẶN: chỉ cho GET / POST / PUT / PATCH / UPLOAD / SEARCH / DELETE (giới hạn)"
+    rep_notes = []
+    call = dict(call)
+    for k in ("target", "body", "file_name", "file_content"):
+        if isinstance(call.get(k), str):
+            call[k] = expand_repeat(call[k], rep_notes)
     cmd = ["python3", SOAR_API]
     if call.get("account"):
         cmd += ["--as", call["account"]]
@@ -253,8 +318,8 @@ def soar_call(qa_dir, call, dcfg=None):
         cmd.append(body)
     def once():
         try:
-            return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
-                                  timeout=120, stdin=subprocess.DEVNULL).stdout
+            return clean_output(subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                               timeout=120, stdin=subprocess.DEVNULL).stdout)
         except subprocess.TimeoutExpired:
             return "HẾT THỜI GIAN (120s) timed out"
 
@@ -267,15 +332,20 @@ def soar_call(qa_dir, call, dcfg=None):
         out = once()
         if TRANSIENT.search(out[:3000]):
             raise ServerChanged("server không phản hồi (%s)" % out.strip().splitlines()[0][:120])
-    out = sent_note + out
+    out = ("(công cụ đã mở rộng: %s)\n" % "; ".join(rep_notes) if rep_notes else "") + sent_note + out
     return out if len(out) <= 4000 else out[:4000] + "\n… (cắt, tổng %d ký tự)" % len(out)
 
 
 def fe_bundle(dcfg):
-    """Tải index.html + mọi asset JS/CSS của FE đang chạy (theo import trong code), lưu đệm theo version."""
+    """
+    Tải index.html + mọi asset JS/CSS của FE đang chạy (theo import trong code), lưu đệm theo version + dấu index.html.
+    Hai bản build khác nhau có thể trùng số version (người khác deploy tay mà không push version-tags.json): tên asset
+    có hash nội dung nên index.html khác nhau → không dùng nhầm bộ đệm của bản cũ.
+    """
     html = urllib.request.urlopen(dcfg["fe_url"] + "/", timeout=30).read().decode("utf-8", "replace")
     m = re.search(r'<meta name="version" content="([^"]*)"', html)
-    cache = os.path.join(envconf.autofix_root(), "fe-bundle-%s" % (m.group(1) if m else "unknown"))
+    cache = os.path.join(envconf.autofix_root(), "fe-bundle-%s-%s" % (
+        m.group(1) if m else "unknown", hashlib.sha1(html.encode("utf-8")).hexdigest()[:8]))
     done_flag = os.path.join(cache, ".complete")
     if not os.path.exists(done_flag):
         os.makedirs(cache, exist_ok=True)
@@ -352,24 +422,46 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
             display_id=display_id, deployed=deployed, api_url=dcfg["api_url"], fe_url=dcfg["fe_url"],
             max_calls=dcfg["qa_calls_per_round"], delete_allow=", ".join(dcfg.get("qa_delete_allow", [])) or "không",
             ticket_accounts=", ".join(dcfg.get("qa_ticket_accounts") or []) or "trống — không dùng",
-            round=rnd, rounds=rounds, ticket=ticket, diff=diff,
+            round=rnd, rounds=rounds, ticket=ticket, diff=diff, qa_rules=load_qa_rules(),
             last_round=" ĐÂY LÀ VÒNG CUỐI: phải done=true và kết luận." if last else "",
             transcript="\n\n".join(transcript)[-60000:] or "(chưa gọi gì)")
+        prompt = prompt.replace("\x00", "")
         cmd = [os.path.expanduser(acfg["gemini_cmd"]), "-p", prompt, "--mode", "plan", "--output-format", "json",
                "--json-schema", schema, "--print-timeout", "%ds" % (acfg["gemini_timeout"] - 30)]
         if dcfg.get("qa_model") or acfg.get("gemini_model"):
             cmd += ["--model", dcfg.get("qa_model") or acfg["gemini_model"]]
-        try:
-            res = subprocess.run(cmd, cwd=qa_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 universal_newlines=True, timeout=acfg["gemini_timeout"], stdin=subprocess.DEVNULL)
-            line = [l for l in res.stdout.splitlines() if l.startswith("{")]
-            answer = (json.loads(line[-1]).get("structured_output") or {}) if line else {}
-        except (OSError, subprocess.TimeoutExpired, ValueError) as ex:
-            answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC", "result": "Gemini lỗi: %s" % ex}
+        answer, diag = {}, []
+        for attempt in (1, 2):
+            # Gemini trả rỗng / JSON hỏng (thường do lỗi tạm của CLI / hạn mức): ghi stderr rồi thử lại vòng đó 1 lần.
+            try:
+                res = subprocess.run(cmd, cwd=qa_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     universal_newlines=True, errors="replace", timeout=acfg["gemini_timeout"],
+                                     stdin=subprocess.DEVNULL)
+                line = [l for l in res.stdout.splitlines() if l.startswith("{")]
+                try:
+                    answer = (json.loads(line[-1]).get("structured_output") or {}) if line else {}
+                except ValueError:
+                    answer = {}
+                if not answer:
+                    diag.append({"attempt": attempt, "rc": res.returncode, "stderr": res.stderr[-1500:],
+                                 "stdout_tail": res.stdout[-500:]})
+            except (OSError, subprocess.TimeoutExpired, ValueError) as ex:
+                diag.append({"attempt": attempt, "error": str(ex)[:300]})
+                answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC", "result": "Gemini lỗi: %s" % ex}
+                break
+            if answer:
+                break
+            if attempt == 1:
+                log("%s: Gemini không trả kết quả vòng %d (mã %s) → thử lại" % (display_id, rnd, diag[-1].get("rc")))
+                time.sleep(20)
         with open(os.path.join(qa_dir, "gemini-rounds.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps({"round": rnd, "answer": answer}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"round": rnd, "answer": answer, "diag": diag} if diag else
+                               {"round": rnd, "answer": answer}, ensure_ascii=False) + "\n")
         if not answer:
-            answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC", "result": "Gemini không trả kết quả (vòng %d)" % rnd}
+            err = next((d.get("stderr") or d.get("error") for d in reversed(diag) if d.get("stderr") or d.get("error")), "")
+            answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC",
+                      "result": "Gemini không trả kết quả (vòng %d, đã thử lại)%s" % (
+                          rnd, ": " + err.strip().splitlines()[-1][:300] if err.strip() else "")}
         if answer.get("done") or not answer.get("calls"):
             break
         calls = answer["calls"][:dcfg["qa_calls_per_round"]]
@@ -547,7 +639,12 @@ def deploy_be(acfg, dcfg, root, logf):
         with open(built, "w", encoding="utf-8") as f:
             json.dump(images, f, indent=1)
         module = os.path.join(work, acfg["be_subdir"])
-        sh(["docker", "build", "-t", image, "-f", "docker/dev/Dockerfile", "."], cwd=module, logf=logf, timeout=5400)
+        # Thông tin bản build cho GET /api/v1/system/version (như docker/dev/build-image.sh): không truyền thì BE báo
+        # version "dev", commit / nhánh "unknown".
+        commit = af.run(["git", "rev-parse", "--short", "HEAD"], cwd=work).strip()
+        sh(["docker", "build", "-t", image, "-f", "docker/dev/Dockerfile",
+            "--build-arg", "SOAR_VERSION=" + tag, "--build-arg", "GIT_COMMIT=" + commit,
+            "--build-arg", "GIT_BRANCH=" + release, "."], cwd=module, logf=logf, timeout=5400)
         tar = os.path.join(root, "%s.tar" % dcfg["be_image"])
         sh(["docker", "save", "-o", tar, image], logf=logf)
         upload(dcfg, tar, "%s/images/%s.tar" % (dcfg["base"], dcfg["be_image"]), logf)
@@ -557,6 +654,117 @@ def deploy_be(acfg, dcfg, root, logf):
         return tag
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo, check=False)
+
+
+def _compose_state(**kw):
+    try:
+        with open(COMPOSE_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        st = {}
+    st.update(kw, updated_at=datetime.now().isoformat(timespec="seconds"))
+    tmp = COMPOSE_STATE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(st, f, ensure_ascii=False)
+    os.replace(tmp, COMPOSE_STATE)
+
+
+def remote_stream(dcfg, command, logf=None, timeout=1800):
+    """Như remote() nhưng đọc output từng dòng và ghi ngay vào COMPOSE_LIVE (dashboard đọc trực tiếp).
+    Mã != 0 → RuntimeError kèm đuôi output (giống sh()); quá timeout → kill + TimeoutExpired."""
+    env = dict(os.environ, SSHPASS=dcfg["password"])
+    cmd = ["sshpass", "-e", "ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=20",
+           "%s@%s" % (dcfg["user"], dcfg["host"]), command]
+    return _stream(cmd, command, env, logf, timeout)
+
+
+def _stream(cmd, label, env=None, logf=None, timeout=1800):
+    started = time.time()
+    out = []
+    with open(COMPOSE_LIVE, "a", encoding="utf-8") as live:
+        live.write("\n===== %s  $ %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), label))
+        live.flush()
+        _compose_state(running=True, command=label)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                                env=env, stdin=subprocess.DEVNULL, bufsize=1, start_new_session=True)
+
+        def kill():  # cả nhóm tiến trình (sshpass → ssh), không thì ssh con vẫn giữ pipe và vòng đọc không dừng
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        timer = threading.Timer(timeout, kill)
+        timer.start()
+        try:
+            for line in proc.stdout:
+                out.append(line)
+                live.write(line)
+                live.flush()
+            code = proc.wait()
+        finally:
+            timer.cancel()
+        timed_out = time.time() - started >= timeout and code != 0
+        live.write("===== %s  %s (%.0fs)\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                              "HẾT GIỜ" if timed_out else "mã thoát %s" % code, time.time() - started))
+        live.flush()
+    _compose_state(last_code=code)
+    text = "".join(out)
+    if logf:
+        logf.write("\n$ %s\n%s" % (" ".join(cmd), text))
+        logf.flush()
+    if timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout, output=text)
+    if code != 0:
+        raise RuntimeError("%s → mã %s: %s" % (cmd[0], code, text.strip()[-400:]))
+    return text
+
+
+def compose_up(dcfg, logf=None):
+    """docker compose up -d --force-recreate. Lỗi (thường là service healthcheck chưa kịp healthy lúc cả stack
+    khởi động lại → compose bỏ ngang, các service phụ thuộc như nginx chưa start) thì chờ rồi chạy lại
+    "docker compose up -d" (không recreate) để start nốt phần còn thiếu. Hết lượt vẫn lỗi → ném lỗi cuối."""
+    with open(COMPOSE_LIVE, "w", encoding="utf-8") as live:
+        live.write("# deploy %s@%s:%s — bắt đầu %s\n" % (dcfg["user"], dcfg["host"], dcfg["base"],
+                                                       datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    _compose_state(running=True, started_at=datetime.now().isoformat(timespec="seconds"), last_code=None,
+                   result=None, host=dcfg["host"])
+    try:
+        _compose_retry(dcfg, logf)
+        result = "ok"
+    except Exception:
+        result = "error"
+        raise
+    finally:
+        with open(COMPOSE_LIVE, "a", encoding="utf-8") as live:
+            live.write("\n# kết thúc %s — %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                  "THÀNH CÔNG" if result == "ok" else "LỖI"))
+        _compose_state(running=False, result=result, finished_at=datetime.now().isoformat(timespec="seconds"))
+
+
+def _compose_retry(dcfg, logf=None):
+    try:
+        remote_stream(dcfg, "cd %s && docker compose up -d --force-recreate" % dcfg["base"], logf)
+        return
+    except (RuntimeError, subprocess.TimeoutExpired) as ex:
+        last = ex
+    tries, wait = int(dcfg.get("compose_retry_tries", 3)), int(dcfg.get("compose_retry_wait_seconds", 45))
+    for i in range(1, tries + 1):
+        log("compose up lỗi (%s) → chờ %ds rồi chạy lại lần %d/%d"
+            % (str(last).splitlines()[-1][:200], wait, i, tries))
+        note = "\n# compose up lỗi → chờ %ds, chạy lại lần %d/%d\n" % (wait, i, tries)
+        if logf:
+            logf.write(note)
+            logf.flush()
+        with open(COMPOSE_LIVE, "a", encoding="utf-8") as live:
+            live.write(note)
+        time.sleep(wait)
+        try:
+            remote_stream(dcfg, "cd %s && docker compose up -d" % dcfg["base"], logf)
+            log("compose up chạy lại lần %d thành công" % i)
+            return
+        except (RuntimeError, subprocess.TimeoutExpired) as ex:
+            last = ex
+    raise last
 
 
 def revive_be(dcfg, logf=None):
@@ -744,8 +952,9 @@ def handle_fail(api, acfg, dcfg, wp, display_id, qa_path, qa_text, commits=()):
             subprocess.Popen(["python3", AUTOFIX, "--wp", str(wp["id"]), "--event", "QA_FAIL", "--qa-report", qa_path],
                              stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         return " → Claude đang kiểm chứng + sửa (lần %d/%d)" % (n, dcfg["qa_fail_autofix_max"])
-    reason = "## Cần quyết định\nQA tự động trên server test KHÔNG ĐẠT %d lần liên tiếp (autofix đã sửa lại %d lần). " \
-             "Cần người xem.\n\n%s" % (n, n - 1, af.report_section(qa_text, "Kết quả")[:3000])
+    reason = "## Cần quyết định\nQA tự động trên server test KHÔNG ĐẠT / KHÔNG TỰ TEST ĐƯỢC %d lần liên tiếp " \
+             "(autofix đã kiểm chứng / sửa lại %d lần). Cần người xem.\n\n%s" % (
+                 n, n - 1, af.report_section(qa_text, "Kết quả")[:3000])
     af.mark_for_review(api, wp["id"], acfg["review_status_id"], reason, os.path.basename(os.path.dirname(qa_path)))
     return " → quá %d lần, đã chuyển UNREVIEWED" % dcfg["qa_fail_autofix_max"]
 
@@ -775,6 +984,7 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
         prompt = QA_PROMPT.format(display_id=display_id, subject=wp.get("subject", ""), deployed=deployed,
                                   qa_dir=qa_dir, soar_api=SOAR_API, fe_url=dcfg["fe_url"],
                                   ticket_accounts=", ".join(dcfg.get("qa_ticket_accounts") or []) or "trống — không dùng")
+        prompt += "\n\n# RULE TỪ CÁC LẦN QA SAI TRƯỚC (BẮT BUỘC TUÂN THEO)\n" + load_qa_rules()
         with open(os.path.join(qa_dir, "prompt.md"), "w", encoding="utf-8") as f:
             f.write(prompt)
         scope = "/" + qa_dir + "/**"
@@ -809,6 +1019,14 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
         fail_count(display_id, 0)
     elif verdict == "KHÔNG ĐẠT":
         verdict += handle_fail(api, acfg, dcfg, wp, display_id, path, text, commits)
+    elif verdict == "KHÔNG TỰ TEST ĐƯỢC":
+        result = af.report_section(text, "Kết quả")
+        if re.match(r"(Gemini lỗi|Gemini không trả kết quả)", result):
+            # Lỗi của công cụ QA, không phải ticket: không giao Claude, không ghi qa-history → lượt sau QA lại.
+            verdict += " " + QA_TOOL_ERROR
+        else:
+            # Claude kiểm chứng: QA có thể tự test được không (QA SAI → rule cho lần sau), hay cần tester test tay.
+            verdict += handle_fail(api, acfg, dcfg, wp, display_id, path, text, commits)
     elif verdict == "KHÔNG RÕ YÊU CẦU":
         # Không test: comment điểm chưa rõ + câu hỏi, chuyển UNREVIEWED (vẫn giao cho mình) để người quyết định.
         body = af.report_section(text, "Kết quả") or "QA tự động không xác định được cần kiểm tra gì."
@@ -978,7 +1196,7 @@ def run_all(dry_run=False, only=None, auto_only=False, force=False):
                 deployed_parts.append("FE %s" % fe_version)
             if commits["BE"]:
                 deployed_parts.append("BE %s:%s" % (dcfg["be_image"], deploy_be(acfg, dcfg, root, logf)))
-            remote(dcfg, "cd %s && docker compose up -d --force-recreate" % dcfg["base"], logf)
+            compose_up(dcfg, logf)
         except Exception as ex:  # noqa: BLE001
             msg = "deploy lỗi: %s (log %s)" % (str(ex).splitlines()[0][:300], logf.name)
             log(msg)
@@ -1080,7 +1298,7 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         try:
             verdict, path = qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, hashes, deployed, guard)
             log("%s: %s" % (display_id, verdict or "bỏ qua (không phải của mình / không ở Resolved)"))
-            if verdict:
+            if verdict and QA_TOOL_ERROR not in verdict:
                 qa_history(display_id, build, verdict)
         except ServerChanged as ex:
             with mu:

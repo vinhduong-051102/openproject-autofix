@@ -168,7 +168,7 @@ Chỉ sửa trong 2 thư mục này. Không tạo nhánh / worktree khác, khôn
 
 ## Báo cáo (bắt buộc, kể cả khi không sửa được)
 Ghi {run_dir}/report.md bằng tiếng Việt:
-- Dòng đầu: `KẾT QUẢ: ĐÃ SỬA` | `KẾT QUẢ: CẦN QUYẾT ĐỊNH` | `KẾT QUẢ: KHÔNG SỬA ĐƯỢC` (| `KẾT QUẢ: QA SAI` khi có mục QA bên dưới)
+- Dòng đầu: `KẾT QUẢ: ĐÃ SỬA` | `KẾT QUẢ: CẦN QUYẾT ĐỊNH` | `KẾT QUẢ: KHÔNG SỬA ĐƯỢC` (| `KẾT QUẢ: QA SAI` | `KẾT QUẢ: CẦN TEST TAY` khi có mục QA bên dưới)
 - Nguyên nhân; Đã sửa (file, cách sửa); Commit (repo + hash); Kiểm tra (lệnh + kết quả thật);
   `## Kiểm tra hồi quy` — các chỗ dùng đã rà (file / màn hình / API → còn đúng / đã sửa theo / cần quyết định) và test
   đã chạy cho phần bị ảnh hưởng (lệnh + kết quả);
@@ -199,8 +199,8 @@ bị ngắt — ghi lại cho đúng kết quả cuối cùng.
 
 QA_FAIL_NOTE = """
 
-## QA trên server test KHÔNG ĐẠT (lý do lượt chạy này)
-Bản sửa trước của ticket đã deploy lên server test và QA tự động (Gemini) kết luận KHÔNG ĐẠT.
+## QA trên server test kết luận {qa_verdict} (lý do lượt chạy này)
+Bản sửa trước của ticket đã deploy lên server test và QA tự động (Gemini) kết luận {qa_verdict}.
 - Báo cáo QA: {qa_report}
 - Từng request QA đã gửi + response thật: {qa_rounds}
 - Bản đang chạy trên server + commit sửa đã có trong bản đó chưa (kiểm tra bằng git, đây là SỰ THẬT): {deploy_check}
@@ -216,6 +216,15 @@ Bản sửa trước của ticket đã deploy lên server test và QA tự độ
    đầu `KẾT QUẢ: QA SAI`, nêu rõ nguyên nhân thuộc loại nào + bằng chứng (request thực gửi / dòng deploy-check), kèm đề
    xuất cách test đúng cho tester.
 6. Phần cần người quyết định → `KẾT QUẢ: CẦN QUYẾT ĐỊNH` như thường.
+7. QA kết luận KHÔNG TỰ TEST ĐƯỢC: xét QA có tự test được không — tài khoản / quyền khác, endpoint đúng (đối chiếu
+   controller trong code), bật cấu hình rồi trả lại, tạo dữ liệu QA_AUTO_*, SEARCH mã FE đã deploy… Làm được mà QA bỏ
+   qua → `KẾT QUẢ: QA SAI` (kèm cách test đúng). Đọc code thấy bản sửa còn thiếu → sửa như bước 4. Thật sự cần người
+   (thao tác giao diện / hệ thống ngoài / dữ liệu không tạo được qua API) → `KẾT QUẢ: CẦN TEST TAY`, mục
+   `## Comment cho tester` ghi bước test tay + kết quả mong đợi. KHÔNG sửa code khi chỉ là không test được.
+8. Khi `KẾT QUẢ: QA SAI`: thêm mục `## Rule cho QA` gồm 1–3 gạch đầu dòng là rule TỔNG QUÁT để QA tự động không lặp
+   lại lỗi này ở ticket khác (không nhắc mã ticket / id dữ liệu cụ thể; nêu cách làm đúng). QA tự động KHÔNG chạy lệnh
+   được, chỉ gửi request API; chuỗi dài viết `{{{{rep:<chuỗi>:<số lần>}}}}`. Các rule đang có (đừng viết trùng):
+{qa_rules}
 """
 
 
@@ -340,7 +349,51 @@ def report_section(text, heading):
     return m.group(1).strip() if m else ""
 
 
-def op_write(api, method, path, body):
+_TABLE_ROW = re.compile(r"^[ \t]*\|.*\|[ \t]*$")
+_TABLE_SEP = re.compile(r"^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$")
+
+
+def op_markdown(text):
+    """Chuẩn hoá markdown trước khi đăng comment lên OpenProject (báo cáo của Claude hay viết kiểu OP không hiểu):
+    - Bảng nằm thụt lề trong mục danh sách → OP hiện nguyên dấu |: kéo bảng ra lề trái, có dòng trống trước / sau.
+    - Đường dẫn chứa * (vd /api/v1/auth/**) → OP hiểu ** là chữ đậm: bọc trong `…` (ngoài đoạn code sẵn có)."""
+    lines = (text or "").split("\n")
+    out, i, fence = [], 0, False
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith("```"):
+            fence = not fence
+        if not fence and _TABLE_ROW.match(line) and i + 1 < len(lines) and _TABLE_SEP.match(lines[i + 1]):
+            j = i
+            while j < len(lines) and (_TABLE_ROW.match(lines[j]) or _TABLE_SEP.match(lines[j])):
+                j += 1
+            if out and out[-1].strip():
+                out.append("")
+            out.extend(l.strip() for l in lines[i:j])
+            if j < len(lines) and lines[j].strip():
+                out.append("")
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    text, res, fence = "\n".join(out), [], False
+    for block in re.split(r"(```.*?```)", text, flags=re.S):
+        if block.startswith("```"):
+            res.append(block)
+            continue
+        parts = block.split("`")
+        for k in range(0, len(parts), 2):  # chỉ phần ngoài `code`
+            parts[k] = re.sub(r"(?<![\w`])(/[\w.{}:-]*(?:/[\w.{}:-]*)*\*[\w.*/{}:-]*)", r"`\1`", parts[k])
+        res.append("`".join(parts))
+    return "".join(res)
+
+
+def op_write(api, method, path, body, normalize=True):
+    """Ghi lên OpenProject. Comment (POST …/activities) được chuẩn hoá markdown, trừ khi normalize=False
+    (bình luận người dùng tự gõ trên dashboard: giữ nguyên văn)."""
+    if normalize and method == "POST" and path.endswith("/activities") and isinstance(
+            ((body or {}).get("comment") or {}).get("raw"), str):
+        body = dict(body, comment=dict(body["comment"], raw=op_markdown(body["comment"]["raw"])))
     req = op_watch.urllib.request.Request(api.url + path, data=json.dumps(body).encode("utf-8"), method=method,
                                           headers=dict(api.headers, **{"Content-Type": "application/json"}))
     with op_watch.urllib.request.urlopen(req, timeout=30) as resp:
@@ -900,6 +953,74 @@ def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir
         verdict or "không chạy được", "comment + chuyển UNREVIEWED" if review_id else "đã comment")
 
 
+QA_RULES = os.path.join(envconf.autofix_root(), "qa-rules.md")
+
+
+def read_qa_rules():
+    try:
+        with open(QA_RULES, encoding="utf-8") as f:
+            return f.read().strip()[-6000:] or "(chưa có)"
+    except OSError:
+        return "(chưa có)"
+
+
+def save_qa_rules(report_text, display_id):
+    """Mục "## Rule cho QA" của báo cáo QA SAI → thêm vào qa-rules.md (bỏ dòng trùng). Trả số rule mới."""
+    body = report_section(report_text, "Rule cho QA")
+    rules = [re.sub(r"^\s*[-*\d.)]+\s*", "", l).strip() for l in body.splitlines()]
+    rules = [r for r in rules if len(r) > 15]
+    try:
+        with open(QA_RULES, encoding="utf-8") as f:
+            have = f.read()
+    except OSError:
+        have = "# Rule cho QA tự động (rút ra từ các lần Claude kết luận QA SAI)\n" \
+               "# Sửa / xoá dòng sai trực tiếp trong file này. Được đưa vào prompt mọi lần QA sau.\n"
+    norm = lambda x: re.sub(r"\W+", " ", x.lower()).strip()  # noqa: E731
+    known = {norm(l.split("] ", 1)[-1]) for l in have.splitlines() if l.startswith("- ")}
+    new = [r for r in rules if norm(r) not in known]
+    if new:
+        with open(QA_RULES + ".tmp", "w", encoding="utf-8") as f:
+            f.write(have.rstrip("\n") + "\n" + "".join("- [%s %s] %s\n" % (
+                time.strftime("%Y-%m-%d"), display_id, r) for r in new))
+        os.replace(QA_RULES + ".tmp", QA_RULES)
+    return len(new)
+
+
+def report_manual_test(api, wp_id, report_text, run_name):
+    """CẦN TEST TAY (QA tự động thật sự không test được): comment bước test tay cho tester, không đổi trạng thái."""
+    body = tester_body(report_text, "Comment cho tester", "Nguyên nhân") or "Xem báo cáo autofix %s." % run_name
+    op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join([
+        "**[QA tự động] Không tự test được trên server test** — cần tester kiểm tra tay theo các bước dưới đây:",
+        "", body])}})
+    return "đã comment bước test tay cho tester"
+
+
+def report_qa_wrong(api, wp_id, display_id, report_text, run_name):
+    """QA SAI (Claude kiểm chứng: QA tự động trên server test sai cách / công cụ gửi sai, code đúng):
+    comment hướng dẫn test đúng cho tester lên ticket, rồi xoá kết quả QA của ticket trên bản build hiện tại để
+    lượt QA kế tiếp test lại (Gemini đọc comment này trong ticket). Số lần QA không đạt KHÔNG reset — lặp lại quá
+    qa_fail_autofix_max thì deploy_qa vẫn chuyển UNREVIEWED, không chạy Claude mãi."""
+    # Chỉ đăng mục viết cho tester; mục "Nguyên nhân" là phân tích kỹ thuật cho dev (regex, file, annotation).
+    guide = tester_body(report_text, "Comment cho tester") or tester_body(report_text, "Nguyên nhân") \
+        or "Xem báo cáo autofix %s." % run_name
+    lines = ["**[QA tự động] Kết quả \"KHÔNG ĐẠT\" trên server test trước đó chưa chính xác** — Claude kiểm chứng lại: "
+             "nguyên nhân nằm ở cách QA tự động test, không phải ở bản sửa. QA tự động sẽ test lại theo hướng dẫn dưới đây.",
+             "", guide]
+    op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join(lines)}})
+    path = os.path.join(envconf.autofix_root(), "qa-history.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    if data.pop(display_id, None) is not None:
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(path + ".tmp", path)
+    n = save_qa_rules(report_text, display_id)
+    return "đã comment cách test đúng%s, QA lại ở lượt kế tiếp" % (", thêm %d rule QA" % n if n else "")
+
+
 def report_cannot_fix(api, acfg, wp_id, report_text, run_name):
     """KHÔNG SỬA ĐƯỢC: comment lý do cho người xử lý + chuyển UNREVIEWED."""
     body = tester_body(report_text, "Comment cho tester", "Cần quyết định", "Nguyên nhân") \
@@ -1010,6 +1131,7 @@ Các mục: ## Đánh giá từng ý của Gemini (ý → đúng/sai → xử l�
 ## Comment cho tester (chỉ khi SỬA THÊM: đăng nguyên văn lên ticket cho TESTER đọc — đã sửa thêm gì nhìn từ màn hình /
 thao tác / kết quả, test lại thế nào; KHÔNG tên file, class, hàm, biến, commit).
 """
+
 
 
 # Chế độ dontAsk: lệnh ghép chỉ chạy khi MỌI phần đều khớp ALLOWED_TOOLS — một phần lạ là cả lệnh bị từ chối.
@@ -2460,6 +2582,10 @@ def main():
                         extra[key] = os.path.join(run_dir, dest)
                     else:
                         extra[key] = "(không có)"
+                with open(qa_copy, encoding="utf-8") as f:
+                    m = re.search(r"QA:\s*([^\n_]+)", f.read(300))
+                extra["qa_verdict"] = (m.group(1).strip() if m else "KHÔNG ĐẠT")
+                extra["qa_rules"] = read_qa_rules()
                 prompt += QA_FAIL_NOTE.format(qa_report=qa_copy, display_id=display_id, **extra)
             with open(os.path.join(run_dir, "prompt.md"), "w", encoding="utf-8") as f:
                 f.write(prompt)
@@ -2546,6 +2672,16 @@ def main():
                                                          be_dir, report_text)
             except Exception as ex:  # noqa: BLE001
                 verdict += " → cập nhật ticket lỗi: %s" % str(ex).splitlines()[0][:200]
+        elif verdict.startswith("CẦN TEST TAY"):
+            try:
+                verdict += " → " + report_manual_test(api, wp_id, report_text, run_name)
+            except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+                verdict += " (comment lên ticket lỗi: %s)" % ex
+        elif verdict.startswith("QA SAI"):
+            try:
+                verdict += " → " + report_qa_wrong(api, wp_id, display_id, report_text, run_name)
+            except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+                verdict += " (comment lên ticket lỗi: %s)" % ex
         elif verdict.startswith("KHÔNG SỬA ĐƯỢC") and acfg.get("review_status_id"):
             try:
                 report_cannot_fix(api, acfg, wp_id, report_text, run_name)
