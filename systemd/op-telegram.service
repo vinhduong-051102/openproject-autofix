@@ -1,0 +1,15 @@
+[Unit]
+Description=op-telegram - nhan yeu cau tester qua Telegram (userbot), tao task OpenProject khi duyet
+After=network-online.target
+
+[Service]
+WorkingDirectory=@TOOL_DIR@
+Environment=PATH=@EXTRA_PATH@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@PYTHON@ -u @TOOL_DIR@/tg_watch.py
+Restart=on-failure
+RestartSec=30
+# Khởi động lại chỉ dừng tiến trình chính (giống op-dashboard).
+KillMode=process
+
+[Install]
+WantedBy=default.target

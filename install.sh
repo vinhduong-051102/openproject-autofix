@@ -11,6 +11,7 @@ START=1
 if [[ "${1:-}" == "--no-start" ]]; then START=0; shift; fi
 NAMES=("$@")
 [[ ${#NAMES[@]} -eq 0 ]] && NAMES=(op-watch op-dashboard op-merge op-report)
+# op-telegram (yêu cầu tester qua Telegram) cài riêng: ./install.sh op-telegram, hoặc trang theo dõi → Telegram → ⚙ Cài đặt
 
 [[ -f "$TOOL_DIR/.env" ]] || echo "Chưa có $TOOL_DIR/.env — chạy: cp .env.example .env rồi điền giá trị" >&2
 
