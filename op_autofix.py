@@ -104,6 +104,9 @@ ALLOWED_TOOLS = [
     "Bash(git commit*)", "Bash(git branch --show-current)", "Bash(git rev-parse*)", "Bash(git blame*)",
     "Bash(git grep*)", "Bash(npm run build*)", "Bash(npm run lint*)", "Bash(npx tsc*)", "Bash(npx eslint*)",
     "Bash(mvn *)", "Bash(cd *)", "Bash(ls *)", "Bash(grep *)", "Bash(wc *)", "Bash(head *)", "Bash(tail *)",
+    # Prompt bảo dùng `git -C <worktree> …` nên dạng -C cũng phải được phép (không có thì add/commit/rev-parse bị chặn).
+    "Bash(git -C* status*)", "Bash(git -C* diff*)", "Bash(git -C* log*)", "Bash(git -C* show*)", "Bash(git -C* add*)",
+    "Bash(git -C* commit*)", "Bash(git -C* rev-parse*)", "Bash(git -C* blame*)", "Bash(git -C* grep*)",
 ]
 DISALLOWED_TOOLS = [
     # Dạng `git -C <dir> <lệnh>` cũng phải chặn (quy tắc cho phép git -C bên dưới chỉ để đọc lịch sử).
@@ -141,6 +144,7 @@ Chỉ sửa trong 2 thư mục này. Không tạo nhánh / worktree khác, khôn
    KHÔNG dùng `cd … && …` (bị chặn): git luôn dùng `git -C {fe_dir} …` / `git -C {be_dir} …`, Maven dùng `-f`.
    Thư mục làm việc hiện tại ĐÃ LÀ {fe_dir}: chạy FE đúng nguyên văn `npm run build` (không `--prefix`, không `cd`).
    Một lệnh bị từ chối quyền KHÔNG có nghĩa là Bash bị cấm — đổi sang đúng dạng lệnh được phép ở trên rồi làm tiếp.
+{bash_rules}
    Vẫn không chạy được bước kiểm tra nào thì VẪN commit phần đã sửa (công cụ tự build + test lại trước khi push) và
    ghi rõ trong báo cáo; KHÔNG kết luận KHÔNG SỬA ĐƯỢC chỉ vì không chạy được build / test.
 4. TỰ KIỂM TRA HỒI QUY (bắt buộc, trước khi commit) — Gemini sau đó CHỈ test lại ticket, không rà hồi quy thay bạn:
@@ -996,6 +1000,7 @@ Worktree: FE {fe_dir}, BE {be_dir} (module {be_dir}/{be_subdir}); nhánh hiện 
 4. Ý cần người quyết định (đổi hành vi sản phẩm, trái thiết kế người khác cố ý làm, cần dữ liệu môi trường thật) →
    KHÔNG sửa phần đó.
 KHÔNG dùng `cd … && …`; git luôn `git -C`, Maven `-f`. Không push, không fetch/pull/checkout, không gọi mạng.
+{bash_rules}
 
 ## Báo cáo (bắt buộc)
 Ghi {run_dir}/followup.md bằng tiếng Việt. Dòng đầu đúng một trong:
@@ -1006,6 +1011,14 @@ Các mục: ## Đánh giá từng ý của Gemini (ý → đúng/sai → xử l�
 thao tác / kết quả, test lại thế nào; KHÔNG tên file, class, hàm, biến, commit).
 """
 
+
+# Chế độ dontAsk: lệnh ghép chỉ chạy khi MỌI phần đều khớp ALLOWED_TOOLS — một phần lạ là cả lệnh bị từ chối.
+BASH_RULES = """Quy tắc lệnh Bash (chạy không người duyệt, lệnh ngoài danh sách bị từ chối, không hỏi):
+- Mỗi lần gọi Bash MỘT lệnh đơn: không gán biến (`B=…`), không nối `;` / `&&`, không heredoc, không `$(…)`,
+  không `echo` / `cat` / `sed` / `python`. Chỉ được nối `| head` / `| tail` / `| grep`.
+- Xem file / tìm kiếm dùng Read / Grep / Glob. Commit: ghi message bằng Write vào {run_dir}/commit-msg.txt rồi
+  `git -C <worktree> commit -q -F {run_dir}/commit-msg.txt`.
+- Một lệnh bị từ chối KHÔNG có nghĩa Bash bị cấm: tách thành lệnh đơn đúng dạng trên rồi chạy lại, rồi làm tiếp."""
 
 VERIFY_FIX_PROMPT = """Bạn là Claude, đã sửa bug {display_id} — {subject}. Chạy nền, không có người theo dõi.
 Bước KIỂM TRA TỰ ĐỘNG (build / test do script chạy lại, không dựa vào báo cáo) sau khi sửa bị LỖI:
@@ -1024,6 +1037,7 @@ Worktree: FE {fe_dir}, BE {be_dir} (module {be_dir}/{be_subdir}); nhánh hiện 
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 3. Lỗi không do lượt này (test cũ lỗi sẵn trên nhánh chung, môi trường / mạng) → KHÔNG sửa, ghi rõ bằng chứng.
 KHÔNG dùng `cd … && …`; git luôn `git -C`, Maven `-f`. Không push, không fetch/pull/checkout, không gọi mạng.
+{bash_rules}
 
 ## Báo cáo (bắt buộc)
 Ghi {run_dir}/verify-fix.md tiếng Việt. Dòng đầu đúng một trong: `SỬA KIỂM TRA: ĐÃ SỬA` | `SỬA KIỂM TRA: KHÔNG SỬA`.
@@ -1038,7 +1052,8 @@ def claude_fix_verify(acfg, display_id, wp, run_dir, fe_dir, be_dir, err):
     if prof is None:
         return ""
     use_profile(acfg, prof)
-    prompt = VERIFY_FIX_PROMPT.format(display_id=display_id, subject=wp.get("subject", ""), err=err[:2000],
+    prompt = VERIFY_FIX_PROMPT.format(bash_rules=BASH_RULES.format(run_dir=run_dir),
+                                      display_id=display_id, subject=wp.get("subject", ""), err=err[:2000],
                                       run_dir=run_dir, fe_dir=fe_dir, be_dir=be_dir, be_subdir=acfg["be_subdir"])
     with open(os.path.join(run_dir, "verify-fix-prompt.md"), "w", encoding="utf-8") as f:
         f.write(prompt)
@@ -1078,6 +1093,7 @@ def claude_followup(acfg, display_id, wp, run_dir, fe_dir, be_dir, gemini_verdic
     """Claude xem lại nhận xét của Gemini và tự quyết. Trả (quyết định, nội dung followup.md)."""
     commits = "; ".join("%s %s" % (label, ", ".join(c[:8] for c in cs)) for label, _, cs in items)
     prompt = FOLLOWUP_PROMPT.format(
+        bash_rules=BASH_RULES.format(run_dir=run_dir),
         display_id=display_id, subject=wp.get("subject", ""), gemini_verdict=gemini_verdict, run_dir=run_dir,
         commits=commits, fe_dir=fe_dir, be_dir=be_dir, be_subdir=acfg["be_subdir"])
     with open(os.path.join(run_dir, "followup-prompt.md"), "w", encoding="utf-8") as f:
@@ -2428,6 +2444,7 @@ def main():
                 for n in notes)
 
             prompt = PROMPT.format(
+                bash_rules=BASH_RULES.format(run_dir=run_dir),
                 display_id=display_id, wp_id=wp_id, status=wp["_links"]["status"].get("title"), event=event,
                 subject=wp.get("subject", ""), run_dir=run_dir, fe_dir=fe_dir, be_dir=be_dir,
                 fe_auto=branch, be_auto=branch, be_subdir=acfg["be_subdir"], merge_note=merge_note)
