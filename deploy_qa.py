@@ -72,6 +72,9 @@ DEFAULTS = {
     "qa_review_status_ids": [],
     "qa_model": "gemini-3.8-flash-medium",
     "qa_calls_per_round": 8,
+    # Giới hạn MỖI lần gọi Gemini khi QA (một vòng bình thường ~1 phút). Hết giờ thì thử lại vòng đó 1 lần —
+    # trước đây dùng chung GEMINI_TIMEOUT (900s) và treo là bỏ luôn ticket.
+    "qa_call_timeout": 240,
     "be_container": "soar",
     "qa_parallel": 3,  # số ticket QA (Gemini) chạy cùng lúc trên server 86
     # Request gặp 502/503/504 / lỗi kết nối: chờ server lên lại tối đa chừng này phút rồi gọi lại.
@@ -479,8 +482,9 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
             last_round=" ĐÂY LÀ VÒNG CUỐI: phải done=true và kết luận." if last else "",
             transcript="\n\n".join(transcript)[-60000:] or "(chưa gọi gì)")
         prompt = prompt.replace("\x00", "")
+        call_timeout = max(60, int(dcfg.get("qa_call_timeout") or 240))
         cmd = [os.path.expanduser(acfg["gemini_cmd"]), "-p", prompt, "--mode", "plan", "--output-format", "json",
-               "--json-schema", schema, "--print-timeout", "%ds" % (acfg["gemini_timeout"] - 30)]
+               "--json-schema", schema, "--print-timeout", "%ds" % (call_timeout - 15)]
         if dcfg.get("qa_model") or acfg.get("gemini_model"):
             cmd += ["--model", dcfg.get("qa_model") or acfg["gemini_model"]]
         answer, diag = {}, []
@@ -488,7 +492,7 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
             # Gemini trả rỗng / JSON hỏng (thường do lỗi tạm của CLI / hạn mức): ghi stderr rồi thử lại vòng đó 1 lần.
             try:
                 res = subprocess.run(cmd, cwd=qa_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     universal_newlines=True, errors="replace", timeout=acfg["gemini_timeout"],
+                                     universal_newlines=True, errors="replace", timeout=call_timeout,
                                      stdin=subprocess.DEVNULL)
                 line = [l for l in res.stdout.splitlines() if l.startswith("{")]
                 try:
@@ -498,7 +502,16 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
                 if not answer:
                     diag.append({"attempt": attempt, "rc": res.returncode, "stderr": res.stderr[-1500:],
                                  "stdout_tail": res.stdout[-500:]})
-            except (OSError, subprocess.TimeoutExpired, ValueError) as ex:
+            except subprocess.TimeoutExpired:
+                # Gemini treo (không trả gì): thử lại vòng này 1 lần; vẫn treo thì là lỗi công cụ (QA lại lượt sau).
+                diag.append({"attempt": attempt, "error": "Gemini không trả lời sau %ds" % call_timeout})
+                if attempt == 1:
+                    log("%s: Gemini không trả lời vòng %d sau %ds → thử lại" % (display_id, rnd, call_timeout))
+                    continue
+                answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC",
+                          "result": "Gemini lỗi: không trả lời sau %ds (vòng %d, đã thử lại)" % (call_timeout, rnd)}
+                break
+            except (OSError, ValueError) as ex:
                 diag.append({"attempt": attempt, "error": str(ex)[:300]})
                 answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC", "result": "Gemini lỗi: %s" % ex}
                 break

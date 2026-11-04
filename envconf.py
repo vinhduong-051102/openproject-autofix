@@ -176,6 +176,7 @@ DEPLOY_ENV = {
     "QA_MODEL": ("qa_model", "str"),
     "QA_ROUNDS": ("qa_rounds", "int"),
     "QA_CALLS_PER_ROUND": ("qa_calls_per_round", "int"),
+    "QA_CALL_TIMEOUT": ("qa_call_timeout", "int"),
     "QA_FAIL_AUTOFIX_MAX": ("qa_fail_autofix_max", "int"),
     "QA_PARALLEL": ("qa_parallel", "int"),  # chỉnh trên trang → JSON thắng
     "QA_TICKET_ACCOUNTS": ("qa_ticket_accounts", "list"),
