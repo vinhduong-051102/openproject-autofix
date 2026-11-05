@@ -138,11 +138,14 @@ def _job_texts():
     envconf.overlay(a, envconf.AUTOFIX_ENV)
     merge_at = envconf.get("MERGE_SCHEDULE", "*-*-* 12:00:00;*-*-* 18:00:00").replace(";", ", ")
     report_at = envconf.get("REPORT_SCHEDULE", "Mon..Fri *-*-* 08:00:00")
+    limits_at = envconf.get("LIMITS_SCHEDULE", "*-*-* 08:00:00").replace(";", ", ")
     return {
         "merge": "Theo lịch %s: PR %s → %s, %s → %s, rồi deploy server test và QA ticket (lỡ giờ vì tắt máy thì chạy bù "
                  "khi bật máy)" % (merge_at, a["fe_branch"], a["fe_upstream"], a["be_branch"], a["be_upstream"]),
         "report": "Theo lịch %s: tạo %s/bao-cao-DD-MM-YYYY.txt (lỡ giờ thì chạy khi bật máy)" % (
             report_at, envconf.get("DAILY_REPORT_DIR", "~/Downloads/bao-cao-ngay")),
+        "limits": "Theo lịch %s: cập nhật hạn mức 5 giờ / 7 ngày của mọi gói Claude đã đăng nhập (op_autofix.py --probe,"
+                  " mỗi gói một câu rất ngắn); lỡ giờ vì tắt máy thì chạy khi bật máy" % limits_at,
         "dashboard": "Trang này (http://127.0.0.1:%d)" % envconf.DASHBOARD_PORT,
     }
 
@@ -158,6 +161,8 @@ JOBS = (
     {"key": "report", "name": "Báo cáo ngày", "unit": "op-report.service", "timer": "op-report.timer",
      "desc": _TEXTS["report"],
      "inbox": r"\*\*BÁO CÁO NGÀY\*\*"},
+    {"key": "limits", "name": "Cập nhật hạn mức", "unit": "op-limits.service", "timer": "op-limits.timer",
+     "desc": _TEXTS["limits"], "inbox": None},
     {"key": "dashboard", "name": "Dashboard", "unit": "op-dashboard.service",
      "desc": _TEXTS["dashboard"], "inbox": None},
 )
@@ -197,6 +202,31 @@ def conflict_runs(root, n=8):
     return out
 
 
+def qa_procs_alive():
+    """Có tiến trình QA server đang chạy không (deploy_qa.py --qa / --review-watch, hoặc merge_to_dev → deploy + QA)."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as f:
+                cmd = f.read()
+        except OSError:
+            continue
+        if b"deploy_qa.py" in cmd or b"merge_to_dev.py" in cmd:
+            return True
+    return False
+
+
+def _last_write(d):
+    t = os.path.getmtime(d)
+    for name in os.listdir(d):
+        try:
+            t = max(t, os.path.getmtime(os.path.join(d, name)))
+        except OSError:
+            pass
+    return t
+
+
 def qa_runs(root, cfg, merge_running, n=15):
     """Các lượt QA trên server 86 (thư mục <SOAR>-qa-<MMDD-HHMM>), mới nhất trước."""
     final = {}
@@ -209,6 +239,7 @@ def qa_runs(root, cfg, merge_running, n=15):
                     final[os.path.dirname(m.group(3))] = m.group(2)
     dirs = sorted(glob.glob(os.path.join(root, "SOAR-*-qa-*")), key=os.path.getmtime, reverse=True)[:n]
     out = []
+    alive = merge_running or qa_procs_alive()
     for i, d in enumerate(dirs):
         name = os.path.basename(d)
         qa_md = os.path.join(d, "qa.md")
@@ -218,8 +249,10 @@ def qa_runs(root, cfg, merge_running, n=15):
                 m = re.search(r"QA:\s*(KHÔNG RÕ YÊU CẦU|KHÔNG ĐẠT|ĐẠT|KHÔNG TỰ TEST ĐƯỢC)", f.read(300))
             verdict = m.group(1) if m else "không đọc được kết luận"
         if not verdict:
-            # Chưa có qa.md: lượt mới nhất khi job merge còn chạy là đang test, còn lại là bị ngắt giữa chừng.
-            state = "running" if (merge_running and i == 0) else "stale"
+            # Chưa có qa.md: còn tiến trình QA chạy và thư mục vừa được ghi (mỗi vòng Gemini ghi gemini-rounds.jsonl;
+            # một lần gọi tối đa QA_CALL_TIMEOUT × 2 lần thử) → đang test; không thì bị ngắt giữa chừng. Trước đây chỉ
+            # lượt mới nhất khi job merge chạy mới là "đang test" → QA song song / QA từ nút bấm bị báo nhầm "bị ngắt".
+            state = "running" if alive and time.time() - _last_write(d) < 20 * 60 else "stale"
             verdict = "đang test" if state == "running" else "bị ngắt, chưa có kết luận"
         rounds = 0
         rp = os.path.join(d, "gemini-rounds.jsonl")

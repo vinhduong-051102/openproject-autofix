@@ -205,8 +205,8 @@ class Watcher:
                         tr.mark_ask_sent(a["id"], error=str(ex))
                 for o in tr.pending_outbox():
                     try:
-                        await self.c.send_message(o["chat_id"], o["text"], reply_to=o["reply_to"])
-                        tr.mark_outbox(o["id"])
+                        sent = await self.c.send_message(o["chat_id"], o["text"], reply_to=o["reply_to"])
+                        tr.mark_outbox(o["id"], sent_id=getattr(sent, "id", None))
                     except Exception as ex:  # noqa: BLE001
                         tr.mark_outbox(o["id"], str(ex)[:300])
                 for cmd in tr.pending_commands():

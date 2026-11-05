@@ -50,6 +50,7 @@ FIELDS = {  # khoá: (biến .env, kiểu, mặc định)
     "ai_filter": ("TG_AI_FILTER", "bool", True),
     "ai_model": ("TG_AI_MODEL", "str", "sonnet"),
     "ask_auto": ("TG_ASK_AUTO", "bool", False),
+    "clarify_auto": ("TG_CLARIFY_AUTO", "bool", True),  # AI thấy thiếu thông tin → tự hỏi lại (chat có cờ Xin ý kiến)
 }
 RESTART_KEYS = ("api_id", "api_hash", "chats")
 CHAT_MODES = {"all": "Mọi tin", "mention": "Khi nhắc tới tôi / trả lời tin của tôi", "hashtag": "Chỉ tin có hashtag"}
@@ -294,14 +295,18 @@ MAX_ATTACH = 10
 MAX_ATTACH_BYTES = 20 * 1024 * 1024
 
 STATUS_LABELS = {
-    "collecting": "Đang gom tin", "triage": "AI đang lọc", "pending": "Chờ duyệt", "drafting": "AI đang soạn", "draft_ready": "Chờ tạo task",
+    "collecting": "Đang gom tin", "triage": "AI đang lọc", "need_info": "Chờ bổ sung", "pending": "Chờ duyệt", "drafting": "AI đang soạn", "draft_ready": "Chờ tạo task",
     "created": "Đã tạo task", "linked": "Đã gắn việc", "rejected": "Từ chối", "ignored": "Bỏ qua", "error": "Lỗi",
 }
-OPEN_STATES = ("collecting", "triage", "pending", "drafting", "draft_ready", "error")
+OPEN_STATES = ("collecting", "triage", "need_info", "pending", "drafting", "draft_ready", "error")
+CLARIFY_MAX = 2            # tối đa số lượt hỏi lại một yêu cầu
+CLARIFY_WINDOW_H = 2       # người gửi nhắn tiếp trong khoảng này (không reply) cũng coi là trả lời câu hỏi
 AI_KINDS = {"new": "Việc mới", "existing": "Việc đã có", "chat": "Trò chuyện"}
 # Cột thêm sau (DB cũ): kết quả lọc của AI.
 MIGRATE = ("ai_kind TEXT", "ai_type TEXT", "ai_summary TEXT", "ai_reason TEXT", "ai_refs TEXT", "ai_dup TEXT",
-           "ai_at TEXT", "ai_error TEXT")
+           "ai_at TEXT", "ai_error TEXT",
+           # hỏi lại khi thiếu thông tin: câu hỏi (JSON), tin hỏi đã gửi (tg id), lúc gửi, số lượt
+           "ai_missing TEXT", "clarify_msg_id INTEGER", "clarify_at TEXT", "clarify_count INTEGER DEFAULT 0")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -385,6 +390,9 @@ def db():
         for col in MIGRATE:
             if col.split()[0] not in have:
                 c.execute("ALTER TABLE requests ADD COLUMN " + col)
+        if "request_id" not in {r[1] for r in c.execute("PRAGMA table_info(outbox)")}:
+            c.execute("ALTER TABLE outbox ADD COLUMN request_id INTEGER")  # tin hỏi lại: gắn với yêu cầu
+            c.execute("ALTER TABLE outbox ADD COLUMN purpose TEXT")
         if "kind" not in {r[1] for r in c.execute("PRAGMA table_info(asks)")}:
             c.execute("ALTER TABLE asks ADD COLUMN kind TEXT DEFAULT 'decision'")  # decision | manual_test
         _LOCAL.conn = c
@@ -456,6 +464,20 @@ def ingest(chat_id, tg_msg_id, is_tester, sender_name, text, date, media_path=No
     if not cur.rowcount or not is_tester or not live:
         return None
     mid = cur.lastrowid
+    # Trả lời câu hỏi bổ sung (reply vào tin hỏi, hoặc cùng người nhắn tiếp trong CLARIFY_WINDOW_H) → gộp vào yêu cầu,
+    # gom thêm tin trong khoảng gom tin rồi AI lọc lại.
+    need = None
+    if reply_to:
+        need = row("SELECT * FROM requests WHERE chat_id=? AND clarify_msg_id=? AND status='need_info'", (chat_id, reply_to))
+    if not need:
+        cand = row("SELECT * FROM requests WHERE chat_id=? AND tester_name IS ? AND status='need_info'"
+                   " ORDER BY id DESC LIMIT 1", (chat_id, sender_name))
+        if cand and cand["clarify_at"] and (date - parse(cand["clarify_at"])).total_seconds() <= CLARIFY_WINDOW_H * 3600:
+            need = cand
+    if need:
+        _attach(need["id"], mid, date_iso)
+        update(need["id"], status="collecting")
+        return need["id"]
     # Trả lời vào tin thuộc yêu cầu chưa xử lý → bổ sung cho yêu cầu đó
     if reply_to:
         parent = row("SELECT request_id FROM messages WHERE chat_id=? AND tg_msg_id=?", (chat_id, reply_to))
@@ -575,13 +597,35 @@ def detail(rid):
 
 
 def chats():
-    return rows("SELECT chat_id, MAX(CASE WHEN sender='tester' THEN sender_name END) AS name, COUNT(*) AS n,"
-                " MAX(date) AS last FROM messages GROUP BY chat_id ORDER BY last DESC")
+    """Các cuộc trò chuyện đã có tin. Tên lấy từ nguồn chat (tên nhóm / tên hiển thị đặt trên trang) — trước đây lấy
+    tên một người gửi bất kỳ nên nhóm hiện thành tên một thành viên."""
+    out = rows("SELECT chat_id, MAX(CASE WHEN sender='tester' THEN sender_name END) AS name, COUNT(*) AS n,"
+               " MAX(date) AS last FROM messages GROUP BY chat_id ORDER BY last DESC")
+    for r in out:
+        c = chat_cfg(r["chat_id"])
+        r["kind"] = c["kind"] if c else ("group" if r["chat_id"] < 0 else "user")
+        if c:
+            r["name"] = c["name"]
+        elif r["kind"] != "user":
+            r["name"] = "Nhóm %s" % r["chat_id"]  # nhóm không còn trong nguồn chat: không lấy tên thành viên
+    return out
 
 
-def chat_messages(chat_id, limit=300):
+def chat_messages(chat_id, limit=300, around=None):
+    """Tin của một cuộc trò chuyện (cũ → mới). around: id tin (DB) cần xem → đoạn quanh tin đó (nửa trước, nửa sau)
+    thay vì `limit` tin mới nhất — để mở đúng đoạn chat của một yêu cầu cũ."""
+    chat_id, limit = int(chat_id), int(limit)
+    if around:
+        m = row("SELECT date, tg_msg_id FROM messages WHERE id=? AND chat_id=?", (int(around), chat_id))
+        if m:
+            half = max(20, limit // 2)
+            before = rows("SELECT * FROM messages WHERE chat_id=? AND (date<? OR (date=? AND tg_msg_id<?))"
+                          " ORDER BY date DESC, tg_msg_id DESC LIMIT ?", (chat_id, m["date"], m["date"], m["tg_msg_id"], half))
+            after = rows("SELECT * FROM messages WHERE chat_id=? AND (date>? OR (date=? AND tg_msg_id>=?))"
+                         " ORDER BY date, tg_msg_id LIMIT ?", (chat_id, m["date"], m["date"], m["tg_msg_id"], half))
+            return list(reversed(before)) + after
     return list(reversed(rows("SELECT * FROM messages WHERE chat_id=? ORDER BY date DESC, tg_msg_id DESC LIMIT ?",
-                              (int(chat_id), int(limit)))))
+                              (chat_id, limit))))
 
 
 def media_file(rel):
@@ -663,7 +707,7 @@ def approve(rid, auto_create=True, note="", force=False):
     if not force and req.get("ai_kind") in ("existing", "chat"):
         raise ValueError("AI đánh giá là %s%s — xác nhận “Vẫn tạo việc mới” nếu chắc chắn không trùng" % (
             AI_KINDS[req["ai_kind"]].lower(), (" (" + req["ai_dup"] + ")") if req.get("ai_dup") else ""))
-    if req["status"] not in ("pending", "rejected", "ignored", "error", "collecting"):
+    if req["status"] not in ("pending", "rejected", "ignored", "error", "collecting", "need_info"):
         raise ValueError("yêu cầu đang ở trạng thái %s" % req["status_label"])
     msgs = req["messages"]
     if not msgs:
@@ -800,6 +844,11 @@ def action(body):
         return approve(int(rid), bool(body.get("auto", True)), (body.get("note") or "").strip(), bool(body.get("force")))
     if str(kind).startswith("tg_ask_"):
         return ask_action(kind, body)
+    if kind == "tg_clarify":
+        return send_clarify(int(rid), body.get("text"))
+    if kind == "tg_clarify_skip":
+        update(int(rid), status="pending", ai_missing=None)
+        return "Bỏ hỏi lại #%s — chuyển Chờ duyệt" % rid
     if kind == "tg_dialogs":
         queue_command("dialogs")
         return "Đang lấy danh sách chat gần đây từ Telegram…"
@@ -807,7 +856,7 @@ def action(body):
         return delete(int(rid))
     if kind == "tg_triage":
         req = detail(int(rid))
-        if req["status"] not in ("pending", "ignored", "rejected", "error", "draft_ready"):
+        if req["status"] not in ("pending", "ignored", "rejected", "error", "draft_ready", "need_info"):
             raise ValueError("yêu cầu đang ở trạng thái %s" % req["status_label"])
         update(req["id"], status="triage", ai_at=None, ai_error=None, draft_id=None)
         return "Đã chuyển #%s cho AI lọc lại (vài chục giây)" % req["id"]
@@ -893,10 +942,17 @@ Tin của dev ({me}) chỉ là ngữ cảnh, không tự tạo việc. Không b�
 chọn existing kèm lý do. Một tin vừa nhắc ticket cũ vừa nêu yêu cầu mới (vd "verify bug X thì lòi thêm bug Y, Z — hỏi
 AI tại sao rồi cập nhật prompt") → việc mới là phần yêu cầu mới (Task), các bug đã có ticket ghi vào refs.
 
+## Đủ thông tin chưa (chỉ với "new")
+"clear": true khi đủ để viết ticket mà dev làm được: chức năng / màn hình (hoặc API) nào, hiện tượng / yêu cầu cụ thể,
+và với Bug: cách tái hiện + kết quả mong đợi (suy ra được từ tin / ảnh / ngữ cảnh cũng tính là có). Thiếu điều cốt lõi
+→ "clear": false và "missing": tối đa 3 câu hỏi NGẮN, cụ thể, bằng ngôn ngữ của người gửi (xưng "em", gọi "anh/chị"),
+chỉ hỏi điều thật sự cần — không hỏi lại điều đã có, không hỏi chi tiết kỹ thuật dev tự tra được.
+
 ## Kết quả: chỉ một khối JSON
 {{"items": [{{"kind": "new" | "existing" | "chat", "type": "Bug" | "Task" | null, "title": "tiêu đề ngắn tiếng Việt",
   "summary": "1-3 câu: tester muốn gì, đã có gì", "message_ids": [mã tin...], "refs": ["SOAR-xxxx", ...],
-  "duplicate_of": "SOAR-xxxx" | null, "reason": "vì sao phân loại vậy (nêu trạng thái ticket nếu đã có)"}}]}}
+  "duplicate_of": "SOAR-xxxx" | null, "reason": "vì sao phân loại vậy (nêu trạng thái ticket nếu đã có)",
+  "clear": true | false, "missing": ["câu hỏi bổ sung", ...]}}]}}
 Mọi [mã tin] ở phần "Tin cần lọc" phải nằm trong đúng một việc.
 """
 
@@ -955,6 +1011,16 @@ WORK_LABELS = {"done": "đã làm xong", "doing": "đang làm", "review": "đã 
 
 
 def _ai_fields(r, live=False):
+    try:
+        r["ai_missing"] = json.loads(r.get("ai_missing") or "[]")
+    except (ValueError, TypeError):
+        r["ai_missing"] = []
+    if "chat_id" in r:
+        r["can_clarify"] = can_clarify(r["chat_id"])
+    return _ai_fields2(r, live)
+
+
+def _ai_fields2(r, live=False):
     """Thêm nhãn + danh sách ticket liên quan. live: đọc lại trạng thái OpenProject + autofix hiện tại (kết quả lọc chỉ
     là ảnh chụp lúc AI lọc — sau đó autofix có thể đã sửa xong)."""
     r["ai_kind_label"] = AI_KINDS.get(r.get("ai_kind") or "", "")
@@ -1112,9 +1178,12 @@ def triage(rid):
         rlist = [ref_info.get(r.upper()) or {"display_id": r.upper()} for r in (it.get("refs") or []) if r]
         if dup and dup not in [x["display_id"] for x in rlist]:
             rlist.insert(0, ref_info.get(dup) or {"display_id": dup})
+        missing = [str(q).strip()[:300] for q in (it.get("missing") or []) if str(q).strip()][:3] \
+            if kind == "new" and it.get("clear") is False else []
         fields = dict(ai_kind=kind, ai_type=it.get("type") if it.get("type") in ("Bug", "Task") else None,
                       ai_summary=(it.get("summary") or "")[:1000], ai_reason=(it.get("reason") or "")[:1000],
                       ai_refs=json.dumps(rlist, ensure_ascii=False), ai_dup=dup, ai_at=now(), ai_error=None,
+                      ai_missing=json.dumps(missing, ensure_ascii=False) if missing else None,
                       status="ignored" if kind == "chat" else "pending",
                       decided_at=now() if kind == "chat" else None)
         if it.get("title"):
@@ -1126,6 +1195,50 @@ def triage(rid):
         db().execute("UPDATE messages SET request_id=? WHERE id IN (%s)" % ",".join("?" * len(ids)), [target] + ids)
         last = max(m["date"] for m in msgs if m["id"] in ids)
         update(target, last_message_at=last, **fields)
+        if missing:
+            maybe_clarify(target)
+
+
+def can_clarify(chat_id):
+    """Chỉ hỏi lại người gửi khi chat có quyền Xin ý kiến."""
+    c = chat_cfg(chat_id)
+    return bool(c and c["asks"])
+
+
+def clarify_text(req, questions):
+    lines = ["🤖 Để tạo việc “%s”, nhờ %s bổ sung giúp em:" % ((req.get("title") or "")[:120], "anh/chị")]
+    lines += ["%d. %s" % (i + 1, q) for i, q in enumerate(questions)]
+    lines += ["", "(Trả lời bằng cách reply vào tin này)"]
+    return "\n".join(lines)
+
+
+def send_clarify(rid, text=None):
+    """Xếp tin hỏi lại (reply vào tin đầu của yêu cầu) và chuyển yêu cầu sang Chờ bổ sung."""
+    req = row("SELECT * FROM requests WHERE id=?", (rid,))
+    if not req:
+        raise ValueError("không có yêu cầu này")
+    if not can_clarify(req["chat_id"]):
+        raise ValueError("chat này chưa bật quyền Xin ý kiến (⚙ Cài đặt → Nguồn chat) — không hỏi lại được")
+    questions = json.loads(req.get("ai_missing") or "[]")
+    text = (text or "").strip() or clarify_text(req, questions)
+    if not text:
+        raise ValueError("chưa có câu hỏi")
+    first = row("SELECT tg_msg_id FROM messages WHERE request_id=? AND sender='tester' ORDER BY date LIMIT 1", (rid,))
+    db().execute("INSERT INTO outbox (chat_id, text, reply_to, created_at, request_id, purpose) VALUES (?, ?, ?, ?, ?, ?)",
+                 (req["chat_id"], text, first["tg_msg_id"] if first else None, now(), rid, "clarify"))
+    update(rid, status="need_info", clarify_at=now(), clarify_count=(req.get("clarify_count") or 0) + 1)
+    return "Đã xếp tin hỏi lại #%s (vài giây sau gửi)" % rid
+
+
+def maybe_clarify(rid):
+    """Sau khi AI lọc: thiếu thông tin + chat có quyền Xin ý kiến + bật tự hỏi + chưa quá CLARIFY_MAX lượt → hỏi lại."""
+    req = row("SELECT * FROM requests WHERE id=?", (rid,))
+    if not req or not settings()["clarify_auto"] or not can_clarify(req["chat_id"]):
+        return False
+    if (req.get("clarify_count") or 0) >= CLARIFY_MAX:
+        return False
+    send_clarify(rid)
+    return True
 
 
 def triage_due():
@@ -1430,15 +1543,30 @@ def advance_drafts():
     return out
 
 
+def handed_to_tester(wp, me_id, qa_user_id):
+    """Việc đã được chuyển cho tester: người nhận là người QA (QA_USER_ID) — QA tự động ĐẠT thì chuyển cho người QA.
+    Chưa cấu hình QA_USER_ID thì coi là đã chuyển khi người nhận không còn là mình."""
+    href = (((wp.get("_links") or {}).get("assignee") or {}).get("href") or "").rstrip("/")
+    who = href.split("/")[-1] if href else ""
+    if not who:
+        return False
+    return who == str(qa_user_id) if qa_user_id else who != str(me_id)
+
+
 def sync_wp_status():
-    """Cập nhật trạng thái work package của các yêu cầu đã tạo / gắn; xong (TG_DONE_STATUSES) thì báo tester 1 lần."""
+    """Cập nhật trạng thái work package của các yêu cầu đã tạo. Chỉ báo tester "đã xử lý" (1 lần) khi task ở trạng thái
+    xong (TG_DONE_STATUSES) VÀ đã được chuyển cho tester — autofix chuyển Resolved ngay sau khi push, trước khi QA trên
+    server, nên chỉ dựa vào trạng thái thì tester bị báo xong sớm."""
     reqs = rows("SELECT * FROM requests WHERE status='created' AND wp_id IS NOT NULL AND done_notified=0")
     if not reqs:
         return 0
     import task_create
     import op_watch
-    cfg, _, _ = task_create.load()
+    cfg, _, dcfg = task_create.load()
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    qa_user = dcfg.get("qa_user_id") or 0
+    me_id = None if qa_user else api.me()["id"]
+    done = [x.lower() for x in settings()["done_statuses"]]
     for r in reqs:
         try:
             wp = api.get("/api/v3/work_packages/%s" % r["wp_id"])
@@ -1446,7 +1574,7 @@ def sync_wp_status():
             continue
         st = ((wp.get("_links") or {}).get("status") or {}).get("title") or ""
         update(r["id"], wp_status=st, wp_synced_at=now())
-        if st.lower() in [x.lower() for x in settings()["done_statuses"]]:
+        if st.lower() in done and handed_to_tester(wp, me_id, qa_user):
             update(r["id"], done_notified=1)
             _queue_reply(r, "msg_done", status=st)
     return len(reqs)
@@ -1456,8 +1584,14 @@ def pending_outbox():
     return rows("SELECT * FROM outbox WHERE sent_at IS NULL AND error IS NULL ORDER BY id LIMIT 20")
 
 
-def mark_outbox(oid, error=None):
+def mark_outbox(oid, error=None, sent_id=None):
     db().execute("UPDATE outbox SET sent_at=?, error=? WHERE id=?", (None if error else now(), error, oid))
+    o = row("SELECT request_id, purpose FROM outbox WHERE id=?", (oid,))
+    if o and o["purpose"] == "clarify" and o["request_id"]:
+        if error:  # gửi lỗi: đưa về Chờ duyệt để mình tự xử lý
+            update(o["request_id"], status="pending", error="Gửi tin hỏi lại lỗi: %s" % error[:200])
+        elif sent_id:
+            update(o["request_id"], clarify_msg_id=sent_id, clarify_at=now())
 
 
 def pending_commands():
@@ -1488,7 +1622,8 @@ def http_get(path, q):
     if path == "/api/tg/request":
         return 200, detail(q.get("id")), "application/json; charset=utf-8"
     if path == "/api/tg/chat":
-        return 200, {"messages": chat_messages(q.get("chat_id"), q.get("limit", 300))}, "application/json; charset=utf-8"
+        return 200, {"messages": chat_messages(q.get("chat_id"), q.get("limit", 300), q.get("around"))}, \
+            "application/json; charset=utf-8"
     if path == "/api/tg/media":
         p = media_file(q.get("path", ""))
         if not p:

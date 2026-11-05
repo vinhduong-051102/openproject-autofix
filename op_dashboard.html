@@ -228,7 +228,8 @@ select, input { background: var(--panel); border: 1px solid var(--border); borde
 .act.sel { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .act .kind { font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; }
 .act .title { display: flex; gap: 8px; align-items: center; min-width: 0; }
-.act .title .id { font: 600 13px var(--mono); }
+.act .title .id { font: 600 13px var(--mono); white-space: nowrap; flex-shrink: 0; }
+.act .title .badge { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .act .when { color: var(--text-3); font-size: 12px; text-align: right; white-space: nowrap; }
 .act .sub { grid-column: 2 / 4; color: var(--text-2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acts { max-height: calc(100vh - 210px); overflow: auto; }
@@ -466,6 +467,28 @@ table.tg-chats select { max-width: 220px; }
 #profBox > h2 { position: sticky; top: 0; z-index: 1; background: var(--panel); }
 #composeLog { flex: 1 1 auto !important; height: auto; min-height: 0; flex-shrink: 1 !important; }
 #inboxBox .inbox { max-height: 26vh; }
+/* Modal Chat: danh sách cuộc trò chuyện dọc (tìm theo tên) | tin nhắn */
+#tgModal.wide .modal-box { width: min(1180px, 100%); }
+.tg-chatwrap { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 14px; height: calc(94vh - 90px); min-height: 0; }
+.tg-chatlist { display: flex; flex-direction: column; gap: 8px; min-height: 0; border-right: 1px solid var(--border); padding-right: 12px; }
+.tg-chatlist input[type=search] { width: 100%; }
+.tg-chatitems { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 2px; }
+.tg-chatitem { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 0 6px; text-align: left; border: 0; border-radius: 8px; padding: 7px 8px; background: none; }
+.tg-chatitem[hidden] { display: none; }
+.tg-chatitem:hover { background: var(--panel-2); color: var(--text); }
+.tg-chatitem.on { background: var(--accent-soft); color: var(--accent); }
+.tg-chatitem .ic { grid-row: 1 / 3; align-self: center; }
+.tg-chatitem .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tg-chatitem .mt { font-size: 11.5px; color: var(--text-3); }
+.tg-pick.hl > div > .tg-msg { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.tg-pick.hl { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); border-radius: 8px; }
+.tg-focusbar { font-size: 12.5px; padding: 6px 0; color: var(--text-2); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+button.tg-reqlink { font-size: 11px; color: var(--accent); }
+.tg-chatpane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.tg-chathead { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.tg-chatmsgs { flex: 1 1 auto; min-height: 0; max-height: none !important; overflow-y: auto; padding-top: 6px; }
+.tg-chatfoot { display: flex; gap: 10px; align-items: center; padding-top: 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+#tgModal.wide #tgmBody { overflow: hidden; }
 /* Điện thoại — đặt cuối để thắng các quy tắc gốc phía trên */
 @media (max-width: 960px) {
   .view.split.on { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 2fr) minmax(0, 3fr); gap: 12px; }
@@ -476,6 +499,8 @@ table.tg-chats select { max-width: 220px; }
   .svc .chip { padding: 6px 8px; font-size: 12px; }
   #reviewBox { max-height: 40%; }
   .leftcol { gap: 12px; }
+  .tg-chatwrap { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 32%) minmax(0, 1fr); }
+  .tg-chatlist { border-right: 0; padding-right: 0; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
   /* Khung chi tiết hẹp: cả khung cuộn (đầu + nút + log), log cao cố định thay vì bị ép còn vài dòng */
   #detail { overflow-y: auto; overscroll-behavior: contain; }
   #detail > .log, #detail > #otherLog { flex: 0 0 auto !important; height: 60vh; }
@@ -873,9 +898,15 @@ function activities() {
       at: ts(r.updated_at || r.started_at), when: live ? ago(r.started_at) : when(ts(r.updated_at || r.started_at)),
       sub: r.verdict || r.event || "", extra: r.profile || ""});
   });
-  (S.qa_runs || []).forEach((r) => out.push({kind: "qa", key: r.name, id: r.display_id,
-    badge: r.state === "running" ? "Đang test" : r.verdict.split(" → ")[0], cls: qaCls(r), live: r.state === "running",
-    at: r.at, when: when(r.at), sub: [r.verdict.includes("→") ? r.verdict : "", r.rounds ? `${r.rounds} vòng Gemini` : ""].filter(Boolean).join(" · ")}));
+  (S.qa_runs || []).forEach((r) => {
+    // Nhãn chỉ giữ kết luận ("KHÔNG TỰ TEST ĐƯỢC"); ghi chú trong ngoặc / sau "→" xuống dòng mô tả.
+    const head = r.verdict.split(" → ")[0], m = head.match(/^(.*?)\s*\((.+)\)\s*$/);
+    const short = m ? m[1] : head, note = m ? m[2] : "";
+    out.push({kind: "qa", key: r.name, id: r.display_id,
+      badge: r.state === "running" ? "Đang test" : short, cls: qaCls(r), live: r.state === "running",
+      at: r.at, when: when(r.at), sub: [note, r.verdict.includes("→") ? r.verdict.split(" → ").slice(1).join(" → ") : "",
+        r.rounds ? `${r.rounds} vòng Gemini` : ""].filter(Boolean).join(" · ")});
+  });
   (S.merge_runs || []).forEach((r) => out.push({kind: "merge", key: r.key, id: "merge",
     badge: r.state === "running" ? "Đang chạy" : r.state === "error" ? "Lỗi" : "Xong",
     cls: r.state === "running" ? "accent" : r.state === "error" ? "crit" : "ok", live: r.state === "running",
@@ -898,7 +929,7 @@ function renderActs() {
   $("acts").innerHTML = list.length ? list.map((a) => `
     <div class="act ${selKind === a.kind && selKey === a.key ? "sel" : ""}" data-kind="${a.kind}" data-key="${esc(a.key)}">
       <span class="kind">${KIND[a.kind]}</span>
-      <span class="title"><span class="id">${esc(a.id)}</span><span class="badge ${a.cls}">${esc(a.badge)}</span>${a.extra ? `<span class="badge">${esc(a.extra)}</span>` : ""}</span>
+      <span class="title"><span class="id">${esc(a.id)}</span><span class="badge ${a.cls}" title="${esc(a.badge)}">${esc(a.badge)}</span>${a.extra ? `<span class="badge">${esc(a.extra)}</span>` : ""}</span>
       <span class="when">${esc(a.when)}</span>
       <span class="sub" title="${esc(a.sub)}">${esc(a.sub)}</span>
     </div>`).join("") : '<div class="empty">Chưa có hoạt động</div>';
@@ -1003,7 +1034,8 @@ async function renderOther(reload) {
     const b = $("jobRun");
     if (b) b.onclick = async () => {
       const k = selKind === "job" ? selKey : "merge";
-      if (!confirm(k === "watch" ? "Khởi động lại op-watch?" : k === "report" ? "Tạo lại báo cáo hôm nay (ghi đè file)?" : "Chạy merge + deploy + QA ngay? (merge PR vào nhánh chung, deploy server 86)")) return;
+      if (!confirm(k === "watch" ? "Khởi động lại op-watch?" : k === "report" ? "Tạo lại báo cáo hôm nay (ghi đè file)?"
+        : k === "limits" ? "Cập nhật hạn mức mọi gói Claude ngay? (mỗi gói một câu rất ngắn)" : "Chạy merge + deploy + QA ngay? (merge PR vào nhánh chung, deploy server 86)")) return;
       await post({action: "job_start", key: k}); setTimeout(refresh, 1500);
     };
     reload = true;
@@ -1691,7 +1723,7 @@ window.addEventListener("hashchange", () => { const m = location.hash.match(/^#w
 <script>
 // ---- Yêu cầu tester qua Telegram: chờ duyệt → AI soạn theo mẫu tester → task New trên OpenProject (autofix tự sửa) ----
 const TG = {status: "open", q: "", data: null, cur: null, timer: null, chat: null};
-const TG_BADGE = {collecting: "", triage: "accent", pending: "warn", drafting: "accent", draft_ready: "accent", created: "ok", linked: "ok",
+const TG_BADGE = {collecting: "", triage: "accent", need_info: "accent", pending: "warn", drafting: "accent", draft_ready: "accent", created: "ok", linked: "ok",
   rejected: "crit", ignored: "", error: "crit"};
 const TG_AI_BADGE = {new: "ok", existing: "warn", chat: ""};
 const TG_WORK_BADGE = {done: "ok", doing: "accent", review: "warn", todo: "crit"};
@@ -1790,7 +1822,18 @@ async function tgOpen(id, keep) {
   if (keep && document.activeElement && document.activeElement.closest("#tgModal input, #tgModal textarea")) return;  // đang gõ: không vẽ lại
   tgShow();
   $("tgmTitle").textContent = `#${r.id} · ${r.tester_name || ""}`;
-  const open = ["pending", "collecting", "rejected", "ignored"].includes(r.status);
+  const open = ["pending", "collecting", "rejected", "ignored", "need_info"].includes(r.status);
+  const miss = r.ai_missing || [];
+  const clarifyText = () => `🤖 Để tạo việc “${(r.title || "").slice(0, 120)}”, nhờ anh/chị bổ sung giúp em:\n${miss.map((q, i) => `${i + 1}. ${q}`).join("\n")}\n\n(Trả lời bằng cách reply vào tin này)`;
+  const clarifyBox = !miss.length ? "" : r.status === "need_info"
+    ? `<div class="tg-ai"><div><span class="badge accent">Chờ bổ sung</span> Đã hỏi lại người gửi${r.clarify_at ? " lúc " + tgTime(r.clarify_at) : ""} (lượt ${r.clarify_count || 1}/2) — trả lời xong AI lọc lại.</div>
+        <div class="muted">Đã hỏi:</div><ol style="margin:0 0 0 18px">${miss.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>
+        <div class="tm-row"><button id="tgClarifySkip">Bỏ hỏi lại → Chờ duyệt</button></div></div>`
+    : `<div class="tg-ai"><div><span class="badge warn">Thiếu thông tin</span> AI thấy chưa đủ để viết ticket:</div>
+        <ol style="margin:0 0 0 18px">${miss.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>
+        ${r.can_clarify ? `<textarea id="tgClarifyText" rows="4">${esc(clarifyText())}</textarea>
+          <div class="tm-row"><button class="primary" id="tgClarify">📨 Hỏi lại người gửi</button><button id="tgClarifySkip">Không cần hỏi</button></div>`
+          : `<div class="muted">Chat này chưa bật quyền <b>Xin ý kiến</b> (⚙ Cài đặt → Nguồn chat) nên không hỏi lại — bạn tự bổ sung khi duyệt.</div>`}</div>`;
   const dupish = ["existing", "chat"].includes(r.ai_kind);
   let acts = "";
   if (r.status === "triage") acts = `<div class="muted">⏳ AI đang lọc tin của tester: tách việc, kiểm tra việc đã có trên OpenProject…</div>`;
@@ -1812,6 +1855,7 @@ async function tgOpen(id, keep) {
     <button id="tgTriage" title="Bỏ bản nháp, cho AI đọc lại tin và kiểm tra việc đã có">🔄 AI lọc lại</button></div>`;
   else if (r.status === "error") acts = `<div class="badge crit" style="white-space:normal">${esc(r.error || "lỗi")}</div><div class="tm-row"><button class="primary" id="tgRetry">Chạy lại</button><button id="tgRestore">Đưa về chờ duyệt</button></div>`;
   else if (r.display_id) acts = `<div>Đã ${r.status === "linked" ? "gắn vào" : "tạo"} <a href="${esc(r.wp_url || "#")}" target="_blank" rel="noopener">${esc(r.display_id)}</a>${r.wp_status ? " · " + esc(r.wp_status) : ""}</div>`;
+  const prevTop = keep && $("tgReqMsgs") ? $("tgReqMsgs").scrollTop : null;
   $("tgmBody").innerHTML = `
     <div class="tm-row" style="display:flex;gap:8px;align-items:center"><span class="badge ${TG_BADGE[r.status] || ""}">${esc(r.status_label)}</span>
       <input type="text" id="tgTitle" value="${esc(r.title || "")}" ${open ? "" : "disabled"}>${open ? `<button id="tgSaveTitle">Lưu</button>` : ""}</div>
@@ -1821,8 +1865,9 @@ async function tgOpen(id, keep) {
         ${r.ai_reason ? `<div class="muted">Lý do: ${esc(r.ai_reason)}</div>` : ""}
         ${r.ai_refs.length ? `<div>Việc liên quan đã có (trạng thái hiện tại):${r.ai_refs.map(tgRefLink).join("")}</div>` : ""}` : ""}
       ${r.ai_error ? `<div class="badge crit" style="white-space:normal">AI lọc lỗi: ${esc(r.ai_error)}</div>` : ""}</div>` : ""}
+    ${clarifyBox}
     <div class="tm-label">Tin nhắn (${r.messages.length}) <button class="link" id="tgOpenChat">mở toàn bộ cuộc trò chuyện</button></div>
-    <div class="tg-msgs">${r.context.map((m) => tgMsgHtml(m, true)).join("")}${r.messages.map((m) => tgMsgHtml(m)).join("")}</div>
+    <div class="tg-msgs" id="tgReqMsgs">${r.context.map((m) => tgMsgHtml(m, true)).join("")}${r.messages.map((m, i) => `<div data-mid="${m.id}" ${i === 0 ? 'id="tgReqFirst"' : ""}>${tgMsgHtml(m)}</div>`).join("")}</div>
     <div class="tg-acts">${acts}
       ${r.status !== "drafting" && r.status !== "triage" ? `<div class="tm-row" style="justify-content:flex-end"><button class="danger" id="tgDelete" title="Xoá yêu cầu khỏi danh sách; tin nhắn vẫn còn trong lịch sử chat">🗑 Xoá yêu cầu</button></div>` : ""}</div>`;
   const on = (id, fn) => { const b = $(id); if (b) b.onclick = fn; };
@@ -1833,6 +1878,8 @@ async function tgOpen(id, keep) {
   on("tgLinkDup", () => post({action: "tg_link", id, wp: r.ai_dup, note: $("tgNote").value}).then(tgLoad));
   on("tgIgnoreDup", () => post({action: "tg_status", id, status: "ignored"}).then(tgLoad));
   on("tgTriage", () => post({action: "tg_triage", id}).then(tgLoad));
+  on("tgClarify", () => post({action: "tg_clarify", id, text: $("tgClarifyText").value}).then(tgLoad));
+  on("tgClarifySkip", () => post({action: "tg_clarify_skip", id}).then(tgLoad));
   on("tgDelete", async () => {
     if (!confirm(`Xoá yêu cầu #${id}?` + (r.display_id ? ` Task ${r.display_id} trên OpenProject vẫn giữ.` : "") + " Tin nhắn vẫn còn trong lịch sử chat.")) return;
     if (await post({action: "tg_delete", id})) { tgClose(); tgLoad(); }
@@ -1842,29 +1889,65 @@ async function tgOpen(id, keep) {
   on("tgIgnore", () => post({action: "tg_status", id, status: "ignored"}).then(tgLoad));
   on("tgRestore", () => post({action: "tg_status", id, status: "pending"}).then(tgLoad));
   on("tgRetry", () => post({action: "tg_retry", id}).then(tgLoad));
-  on("tgOpenChat", () => tgChat(r.chat_id));
+  on("tgOpenChat", () => tgChat(r.chat_id, {focus: r.id, around: (r.messages[0] || {}).id}));
+  // Mở yêu cầu: cuộn tới tin đầu tiên của yêu cầu (ngữ cảnh trước đó vẫn ở phía trên). Lần tự làm mới thì giữ vị trí.
+  if (!keep) { const box = $("tgReqMsgs"), f = $("tgReqFirst"); if (box && f) box.scrollTop = Math.max(0, f.offsetTop - box.offsetTop - 8); }
+  else if (prevTop != null && $("tgReqMsgs")) $("tgReqMsgs").scrollTop = prevTop;
   on("tgShowDraft", async () => {
     if (!r.draft) return toast("Không đọc được bản nháp", true);
     tgClose(); tmDraftId = r.draft_id; tmOpen(); await tmShowDraft(r.draft);
   });
 }
-async function tgChat(chatId) {
-  const chats = (TG.data && TG.data.chats) || [], testers = ((TG.data && TG.data.watcher) || {}).chats || ((TG.data && TG.data.watcher) || {}).testers || [];
-  const all = [...chats.map((c) => ({id: c.chat_id, name: c.name || c.chat_id}))];
-  testers.forEach((t) => { if (!all.some((c) => c.id === t.id)) all.push({id: t.id, name: t.name}); });
+// Bỏ dấu tiếng Việt để tìm nhanh ("anh" khớp "Ánh", "hieu" khớp "Hiếu").
+const tgFold = (t) => String(t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").toLowerCase();
+async function tgChat(chatId, opts) {
+  opts = opts || {};
+  const chats = (TG.data && TG.data.chats) || [], live = ((TG.data && TG.data.watcher) || {}).chats || ((TG.data && TG.data.watcher) || {}).testers || [];
+  const all = [...chats.map((c) => ({id: c.chat_id, name: c.name || String(c.chat_id), kind: c.kind, n: c.n, last: c.last}))];
+  live.forEach((t) => { const x = all.find((c) => c.id === t.id);
+    if (x) { x.name = t.name; x.kind = t.kind || x.kind; x.on = true; } else all.push({id: t.id, name: t.name, kind: t.kind, n: 0, on: true}); });
+  all.sort((x, y) => String(y.last || "").localeCompare(String(x.last || "")));
   if (!chatId && all.length) chatId = all[0].id;
   TG.chat = chatId; TG.cur = null;
   tgShow(); $("tgmTitle").textContent = "Cuộc trò chuyện";
+  $("tgModal").classList.add("wide");
   if (!chatId) { $("tgmBody").innerHTML = `<div class="empty">Chưa có nguồn chat nào (⚙ Cài đặt → Nguồn chat) hoặc op-telegram chưa chạy.</div>`; return; }
-  const d = await tgFetch(`/api/tg/chat?chat_id=${chatId}`);
-  $("tgmBody").innerHTML = `
-    <div class="tabs">${all.map((c) => `<button class="${c.id === chatId ? "on" : ""}" data-tgchat="${c.id}">${esc(c.name)}</button>`).join("")}</div>
-    <div class="tg-acts"><div class="tm-row"><span class="muted">Nhập tin cũ từ Telegram:</span><input type="text" id="tgImportN" value="200" style="max-width:80px;flex:0">
-      <button id="tgImport">Nhập</button><span class="muted">tin cũ chỉ được lưu; chọn tin rồi tạo yêu cầu</span></div></div>
-    <div class="tg-msgs" style="max-height:56vh">${d.messages.map((m) => `<label class="tg-pick"><input type="checkbox" value="${m.id}" ${m.request_id ? "disabled" : ""}>
-      <div style="flex:1">${m.request_id ? `<span class="muted" style="font-size:11px">thuộc yêu cầu #${m.request_id}</span>` : ""}${tgMsgHtml(m)}</div></label>`).join("") || `<div class="empty">Chưa có tin nhắn.</div>`}</div>
-    <div class="tg-acts"><div class="tm-row"><button class="primary" id="tgFromMsgs">Tạo yêu cầu từ tin đã chọn</button></div></div>`;
-  const box = document.querySelector("#tgmBody .tg-msgs"); box.scrollTop = box.scrollHeight;
+  const cur = all.find((c) => c.id === chatId) || {name: String(chatId)};
+  const d = await tgFetch(`/api/tg/chat?chat_id=${chatId}${opts.around ? "&around=" + opts.around : ""}`);
+  const q = TG.chatQ || "";
+  $("tgmBody").innerHTML = `<div class="tg-chatwrap">
+    <aside class="tg-chatlist">
+      <input type="search" id="tgChatQ" placeholder="Tìm theo tên…" value="${esc(q)}" aria-label="Tìm cuộc trò chuyện theo tên">
+      <div class="tg-chatitems" id="tgChatItems">${all.map((c) => `<button class="tg-chatitem ${c.id === chatId ? "on" : ""}" data-tgchat="${c.id}" data-q="${esc(tgFold(c.name))}" title="${esc(c.name)}">
+        <span class="ic">${c.kind && c.kind !== "user" ? "👥" : "👤"}</span>
+        <span class="nm">${esc(c.name)}</span>
+        <span class="mt">${c.n ? c.n + " tin" : "chưa có tin"}${c.last ? " · " + tgTime(c.last) : ""}${c.on ? "" : " · không còn nghe"}</span></button>`).join("")}
+        <div class="empty" id="tgChatNone" hidden>Không có cuộc trò chuyện nào khớp.</div></div>
+    </aside>
+    <section class="tg-chatpane">
+      <div class="tg-chathead"><b>${cur.kind && cur.kind !== "user" ? "👥 " : ""}${esc(cur.name)}</b>
+        <span class="tm-row" style="display:flex;gap:6px;align-items:center;margin-left:auto"><span class="muted">Nhập tin cũ</span><input type="text" id="tgImportN" value="200" style="width:64px" aria-label="Số tin cũ cần nhập">
+        <button id="tgImport" title="Đọc lịch sử từ Telegram (tin cũ chỉ được lưu; chọn tin rồi tạo yêu cầu)">Nhập</button></span></div>
+      ${opts.focus ? `<div class="tg-focusbar">Đang xem đoạn chat của yêu cầu <b>#${opts.focus}</b> <button class="link" id="tgBackReq">← quay lại yêu cầu</button> <button class="link" id="tgLatest">xem tin mới nhất</button></div>` : ""}
+      <div class="tg-msgs tg-chatmsgs">${d.messages.map((m) => `<label class="tg-pick ${opts.focus && m.request_id === opts.focus ? "hl" : ""}" data-req="${m.request_id || ""}"><input type="checkbox" value="${m.id}" ${m.request_id ? "disabled" : ""}>
+        <div style="flex:1">${m.request_id ? `<button class="link tg-reqlink" data-openreq="${m.request_id}" title="Mở yêu cầu này">thuộc yêu cầu #${m.request_id}</button>` : ""}${tgMsgHtml(m)}</div></label>`).join("") || `<div class="empty">Chưa có tin nhắn.</div>`}</div>
+      <div class="tg-chatfoot"><button class="primary" id="tgFromMsgs">Tạo yêu cầu từ tin đã chọn</button><span class="muted">tin cũ chỉ được lưu, không tự thành yêu cầu</span></div>
+    </section></div>`;
+  const box = document.querySelector("#tgmBody .tg-chatmsgs");
+  const hl = box.querySelector(".tg-pick.hl");
+  if (hl) box.scrollTop = Math.max(0, hl.offsetTop - box.offsetTop - 40); else box.scrollTop = box.scrollHeight;
+  box.querySelectorAll("[data-openreq]").forEach((b) => b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); tgOpen(+b.dataset.openreq); });
+  if ($("tgBackReq")) $("tgBackReq").onclick = () => tgOpen(opts.focus);
+  if ($("tgLatest")) $("tgLatest").onclick = () => tgChat(chatId);
+  const filter = () => {
+    const v = tgFold($("tgChatQ").value.trim()); TG.chatQ = $("tgChatQ").value;
+    let shown = 0;
+    document.querySelectorAll("#tgChatItems [data-tgchat]").forEach((b) => { const ok = !v || b.dataset.q.includes(v); b.hidden = !ok; shown += ok; });
+    $("tgChatNone").hidden = shown > 0;
+  };
+  $("tgChatQ").oninput = filter; filter();
+  $("tgChatQ").onkeydown = (e) => { if (e.key === "Enter") { const f = document.querySelector("#tgChatItems [data-tgchat]:not([hidden])"); if (f) f.click(); } };
+  const sel = document.querySelector("#tgChatItems .on"); if (sel) sel.scrollIntoView({block: "nearest"});
   document.querySelectorAll("[data-tgchat]").forEach((b) => b.onclick = () => tgChat(+b.dataset.tgchat));
   $("tgImport").onclick = () => post({action: "tg_import", chat_id: chatId, limit: +$("tgImportN").value || 200}).then(() => setTimeout(() => tgChat(chatId), 6000));
   $("tgFromMsgs").onclick = async () => {
@@ -1874,7 +1957,7 @@ async function tgChat(chatId) {
     if (r && r.id) { await tgLoad(); tgOpen(r.id); }
   };
 }
-function tgShow() { $("tgModal").hidden = false; document.documentElement.classList.add("modal-open"); }
+function tgShow() { $("tgModal").hidden = false; $("tgModal").classList.remove("wide"); document.documentElement.classList.add("modal-open"); }
 function tgClose() { $("tgModal").hidden = true; TG.cur = null; TG.chat = null; TG.asks = false; if ($("wpModal").hidden) document.documentElement.classList.remove("modal-open"); }
 $("tgmClose").onclick = tgClose;
 $("tgModal").onclick = (e) => { if (e.target.id === "tgModal") tgClose(); };
@@ -1900,6 +1983,7 @@ async function tgSettings() {
       <div style="grid-column:1/-1" id="tgsChats"></div>
       <h4>Gom tin thành yêu cầu</h4>
       <label for="tgs_ai_filter">Lọc việc bằng AI${S("ai_filter")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_ai_filter" ${st.ai_filter ? "checked" : ""}> Claude đọc tin nhắn: tách việc, bỏ qua trò chuyện, đánh dấu việc đã có trên OpenProject (mọi việc vẫn chờ bạn duyệt)</label></div>
+      <label for="tgs_clarify_auto">Hỏi lại khi thiếu thông tin${S("clarify_auto")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_clarify_auto" ${st.clarify_auto ? "checked" : ""}> AI thấy việc mới chưa đủ thông tin → tự reply hỏi lại người gửi (tối đa 2 lượt), trả lời xong AI lọc lại. Chỉ với chat bật quyền <b>Xin ý kiến</b>; tắt thì hiện nút để bạn tự bấm hỏi.</label></div>
       <label for="tgs_ai_model">Model lọc${S("ai_model")}</label><div><input type="text" id="tgs_ai_model" value="${esc(st.ai_model || "")}"><div class="hint">vd sonnet, haiku, opus.</div></div>
       <label for="tgs_request_tags">Hashtag${S("request_tags")}</label><div><input type="text" id="tgs_request_tags" value="${esc((st.request_tags || []).join(", "))}"><div class="hint">Dùng cho nguồn chat nhận “Chỉ tin có hashtag” (và cũng mở yêu cầu ở chế độ “Khi nhắc tới tôi”), cách nhau dấu phẩy.</div></div>
       <label for="tgs_group_window">Khoảng gom tin (giây)${S("group_window")}</label><div><input type="number" id="tgs_group_window" min="10" max="3600" value="${st.group_window}"><div class="hint">Tin liên tiếp cách nhau không quá khoảng này gộp thành một yêu cầu; hết khoảng → Chờ duyệt.</div></div>
@@ -1907,7 +1991,7 @@ async function tgSettings() {
       <h4>Trả lời tester</h4>
       <label for="tgs_notify_tester">Gửi tin trả lời${S("notify_tester")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_notify_tester" ${st.notify_tester ? "checked" : ""}> Trả lời tester (từ tài khoản của bạn) khi tạo task / gắn việc / từ chối / việc xong</label></div>
       <label for="tgs_ask_auto">Xin ý kiến tester${S("ask_auto")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_ask_auto" ${st.ask_auto ? "checked" : ""}> Tự gửi câu hỏi khi AI xác định tester quyết (ticket chuyển UNREVIEWED). Tắt: chờ bạn bấm “Gửi tester”.</label></div>
-      <label for="tgs_done_statuses">Trạng thái coi là xong${S("done_statuses")}</label><div><input type="text" id="tgs_done_statuses" value="${esc((st.done_statuses || []).join(", "))}"><div class="hint">Task sang trạng thái này thì báo tester một lần.</div></div>
+      <label for="tgs_done_statuses">Trạng thái coi là xong${S("done_statuses")}</label><div><input type="text" id="tgs_done_statuses" value="${esc((st.done_statuses || []).join(", "))}"><div class="hint">Báo tester “đã xử lý” một lần khi task ở trạng thái này <b>và</b> đã được chuyển cho tester (QA trên server đạt → giao người QA). Autofix chuyển Resolved ngay sau khi push nên không báo lúc đó.</div></div>
       <label for="tgs_sync_minutes">Đồng bộ trạng thái (phút)${S("sync_minutes")}</label><div><input type="number" id="tgs_sync_minutes" min="1" max="120" value="${st.sync_minutes}"></div>
       ${msg("msg_created", "Mẫu: đã tạo task", "{title} {display_id}")}
       ${msg("msg_linked", "Mẫu: gắn vào việc", "{title} {display_id}")}
@@ -1926,7 +2010,7 @@ async function tgSettings() {
     const v = (id) => $("tgs_" + id).value;
     const body = {api_id: v("api_id").trim(), chats: tgChatsValue(), request_tags: v("request_tags"),
       group_window: v("group_window"), max_media_mb: v("max_media_mb"), notify_tester: $("tgs_notify_tester").checked,
-      done_statuses: v("done_statuses"), sync_minutes: v("sync_minutes"), ai_filter: $("tgs_ai_filter").checked, ai_model: v("ai_model"), ask_auto: $("tgs_ask_auto").checked,
+      done_statuses: v("done_statuses"), sync_minutes: v("sync_minutes"), ai_filter: $("tgs_ai_filter").checked, clarify_auto: $("tgs_clarify_auto").checked, ai_model: v("ai_model"), ask_auto: $("tgs_ask_auto").checked,
       msg_created: v("msg_created"), msg_linked: v("msg_linked"), msg_rejected: v("msg_rejected"), msg_done: v("msg_done")};
     if (v("api_hash").trim()) body.api_hash = v("api_hash").trim();
     const r = await post({action: "tg_settings", settings: body});
