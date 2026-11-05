@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,7 +58,23 @@ def find_links(text):
     return out[:MAX_LINKS]
 
 
+CACHE_TTL = int(envconf.get("FIGMA_CACHE_HOURS") or 24) * 3600
+
+
+def _blocked():
+    """Figma đang chặn (429) tới thời điểm nào (epoch) — 0 nếu không chặn."""
+    try:
+        until = float(open(os.path.join(_cache_dir(), "blocked-until")).read().strip())
+    except (OSError, ValueError):
+        return 0
+    return until if until > time.time() else 0
+
+
 def _get(path, tok):
+    until = _blocked()
+    if until:
+        raise RuntimeError("Figma đang giới hạn API tới %s (ghế Figma loại View/Collab chỉ được gọi rất ít; dùng ghế "
+                           "Dev / Full hoặc đính kèm ảnh thiết kế)" % time.strftime("%H:%M %d/%m", time.localtime(until)))
     req = urllib.request.Request(API + path, headers={"X-Figma-Token": tok})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
@@ -69,7 +86,18 @@ def _get(path, tok):
         if ex.code == 404:
             raise RuntimeError("Figma: không thấy file / node (404)")
         if ex.code == 429:
-            raise RuntimeError("Figma: gọi API quá nhiều (429), thử lại sau")
+            # Retry-After có thể tới vài ngày (ghế View/Collab: x-figma-rate-limit-type=low) → nhớ để không gọi lại.
+            try:
+                wait = float(ex.headers.get("Retry-After") or 60)
+            except ValueError:
+                wait = 60
+            with open(os.path.join(_cache_dir(), "blocked-until"), "w") as f:
+                f.write(str(time.time() + wait))
+            kind = ex.headers.get("x-figma-rate-limit-type") or ""
+            raise RuntimeError("Figma giới hạn API (429%s) tới %s%s" % (
+                ", loại " + kind if kind else "", time.strftime("%H:%M %d/%m", time.localtime(time.time() + wait)),
+                " — ghế Figma View/Collab chỉ được gọi rất ít; nên dùng token của tài khoản có ghế Dev / Full"
+                if kind == "low" else ""))
         raise RuntimeError("Figma API lỗi %s: %s" % (ex.code, body))
 
 
@@ -247,66 +275,73 @@ def fetch_link(file_key, node_id, out_dir, tok=None):
     os.makedirs(out_dir, exist_ok=True)
     latest = os.path.join(_cache_dir(), "latest-" + hashlib.sha1(("%s|%s|%s" % (CACHE_VER, file_key, node_id)).encode())
                           .hexdigest()[:12])
+    prev = open(latest, encoding="utf-8").read().strip() if os.path.exists(latest) else ""
+    prev_ok = prev and os.path.exists(os.path.join(prev, "result.json"))
+    # Bản đã tải trong CACHE_TTL: dùng luôn, không gọi API (hạn mức Figma rất ít với ghế View/Collab).
+    if prev_ok and time.time() - os.path.getmtime(os.path.join(prev, "result.json")) < CACHE_TTL:
+        return _copy_out(json.load(open(os.path.join(prev, "result.json"), encoding="utf-8")), prev, out_dir)
     try:
-        meta = _get("/files/%s?depth=1" % file_key, tok)
+        return _fetch_fresh(file_key, node_id, out_dir, tok, latest)
     except RuntimeError as ex:
-        # Figma giới hạn số lần gọi (429) / mạng lỗi: dùng bản đã tải gần nhất của link này nếu có.
-        if os.path.exists(latest):
-            cache = open(latest, encoding="utf-8").read().strip()
-            if os.path.exists(os.path.join(cache, "result.json")):
-                return _copy_out(json.load(open(os.path.join(cache, "result.json"), encoding="utf-8")), cache, out_dir,
-                                 note="(Figma API tạm lỗi: %s — dùng bản tải gần nhất)" % str(ex)[:80])
+        if prev_ok:  # 429 / mạng lỗi: dùng bản tải gần nhất
+            return _copy_out(json.load(open(os.path.join(prev, "result.json"), encoding="utf-8")), prev, out_dir,
+                             note="(Figma API lỗi: %s — dùng bản tải lúc %s)" % (
+                                 str(ex)[:120], time.strftime("%H:%M %d/%m", time.localtime(
+                                     os.path.getmtime(os.path.join(prev, "result.json"))))))
         raise
-    version, title = meta.get("version") or "", meta.get("name") or file_key
-    tag = hashlib.sha1(("%s|%s|%s|%s" % (CACHE_VER, file_key, node_id, version)).encode()).hexdigest()[:12]
-    cache = os.path.join(_cache_dir(), tag)
-    if os.path.exists(os.path.join(cache, "result.json")):
-        res = json.load(open(os.path.join(cache, "result.json"), encoding="utf-8"))
+
+
+def _fetch_fresh(file_key, node_id, out_dir, tok, latest):
+    import secrets
+    cache = os.path.join(_cache_dir(), "%s-%s" % (hashlib.sha1(("%s|%s" % (file_key, node_id)).encode()).hexdigest()[:10],
+                                                  secrets.token_hex(3)))
+    title = file_key
+    os.makedirs(cache, exist_ok=True)
+    if node_id:
+        data = _get("/files/%s/nodes?ids=%s" % (file_key, urllib.parse.quote(node_id)), tok)
+        title = data.get("name") or title
+        nodes = [v["document"] for v in (data.get("nodes") or {}).values() if v and v.get("document")]
+        if not nodes:
+            raise RuntimeError("Figma: không thấy node %s trong file" % node_id)
+        picked = nodes[0]
+        if picked.get("type") in LEAF_TYPES or not picked.get("children"):
+            frame = _screen_of(file_key, node_id, tok)
+            if frame and frame != node_id:
+                data = _get("/files/%s/nodes?ids=%s" % (file_key, urllib.parse.quote(frame)), tok)
+                up = [v["document"] for v in (data.get("nodes") or {}).values() if v and v.get("document")]
+                if up:
+                    up[0]["_picked"] = "%s `%s`" % (picked.get("name"), picked.get("type"))
+                    nodes = up
     else:
-        os.makedirs(cache, exist_ok=True)
-        if node_id:
-            data = _get("/files/%s/nodes?ids=%s" % (file_key, urllib.parse.quote(node_id)), tok)
-            nodes = [v["document"] for v in (data.get("nodes") or {}).values() if v and v.get("document")]
-            if not nodes:
-                raise RuntimeError("Figma: không thấy node %s trong file" % node_id)
-            picked = nodes[0]
-            if picked.get("type") in LEAF_TYPES or not picked.get("children"):
-                frame = _screen_of(file_key, node_id, tok)
-                if frame and frame != node_id:
-                    data = _get("/files/%s/nodes?ids=%s" % (file_key, urllib.parse.quote(frame)), tok)
-                    up = [v["document"] for v in (data.get("nodes") or {}).values() if v and v.get("document")]
-                    if up:
-                        up[0]["_picked"] = "%s `%s`" % (picked.get("name"), picked.get("type"))
-                        nodes = up
-        else:
-            doc = _get("/files/%s?depth=2" % file_key, tok)["document"]
-            pages = doc.get("children") or []
-            frames = [c for c in (pages[0].get("children") or []) if c.get("type") in ("FRAME", "SECTION", "COMPONENT")] \
-                if pages else []
-            ids = ",".join(f["id"] for f in frames[:FRAMES_NO_NODE])
-            data = _get("/files/%s/nodes?ids=%s" % (file_key, urllib.parse.quote(ids)), tok) if ids else {"nodes": {}}
-            nodes = [v["document"] for v in (data.get("nodes") or {}).values() if v and v.get("document")]
-        big = max([max((n.get("absoluteBoundingBox") or {}).get("width") or 0,
-                       (n.get("absoluteBoundingBox") or {}).get("height") or 0) for n in nodes] + [1])
-        scale = 2 if big * 2 <= MAX_IMG_SIDE else max(0.5, round(MAX_IMG_SIDE / big, 2))
-        imgs = _get("/images/%s?ids=%s&format=png&scale=%s" % (
-            file_key, urllib.parse.quote(",".join(n["id"] for n in nodes)), scale), tok).get("images") or {}
-        res = {"title": title, "version": version, "nodes": []}
-        for n in nodes:
-            safe = re.sub(r"[^\w-]+", "_", n["id"])
-            png = None
-            if imgs.get(n["id"]):
-                png = "%s_%s.png" % (file_key[:8], safe)
-                try:
-                    _download(imgs[n["id"]], os.path.join(cache, png))
-                except (urllib.error.URLError, OSError):
-                    png = None
-            bb = n.get("absoluteBoundingBox") or {}
-            res["nodes"].append({"id": n["id"], "name": n.get("name"), "type": n.get("type"), "png": png,
-                                 "size": "%s×%s" % (_num(bb.get("width", 0)), _num(bb.get("height", 0))),
-                                 "picked": n.get("_picked"), "spec": spec(n)})
-        with open(os.path.join(cache, "result.json"), "w", encoding="utf-8") as f:
-            json.dump(res, f, ensure_ascii=False)
+        full = _get("/files/%s?depth=2" % file_key, tok)
+        title, doc = full.get("name") or title, full["document"]
+        pages = doc.get("children") or []
+        frames = [c for c in (pages[0].get("children") or []) if c.get("type") in ("FRAME", "SECTION", "COMPONENT")] \
+            if pages else []
+        ids = ",".join(f["id"] for f in frames[:FRAMES_NO_NODE])
+        data = _get("/files/%s/nodes?ids=%s" % (file_key, urllib.parse.quote(ids)), tok) if ids else {"nodes": {}}
+        nodes = [v["document"] for v in (data.get("nodes") or {}).values() if v and v.get("document")]
+    big = max([max((n.get("absoluteBoundingBox") or {}).get("width") or 0,
+                   (n.get("absoluteBoundingBox") or {}).get("height") or 0) for n in nodes] + [1])
+    scale = 2 if big * 2 <= MAX_IMG_SIDE else max(0.5, round(MAX_IMG_SIDE / big, 2))
+    imgs = _get("/images/%s?ids=%s&format=png&scale=%s" % (
+        file_key, urllib.parse.quote(",".join(n["id"] for n in nodes)), scale), tok).get("images") or {}
+    res = {"title": title, "nodes": []}
+    for n in nodes:
+        safe = re.sub(r"[^\w-]+", "_", n["id"])
+        png = None
+        if imgs.get(n["id"]):
+            png = "%s_%s.png" % (file_key[:8], safe)
+            try:
+                _download(imgs[n["id"]], os.path.join(cache, png))
+            except (urllib.error.URLError, OSError):
+                png = None
+        bb = n.get("absoluteBoundingBox") or {}
+        res["nodes"].append({"id": n["id"], "name": n.get("name"), "type": n.get("type"), "png": png,
+                             "size": "%s×%s" % (_num(bb.get("width", 0)), _num(bb.get("height", 0))),
+                             "picked": n.get("_picked"), "spec": spec(n)})
+    with open(os.path.join(cache, "result.json"), "w", encoding="utf-8") as f:
+        json.dump(res, f, ensure_ascii=False)
     with open(latest, "w", encoding="utf-8") as f:
         f.write(cache)
     return _copy_out(res, cache, out_dir)
