@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envconf  # noqa: E402
@@ -62,6 +63,11 @@ def client(wait=False):
         restart_self()
     os.makedirs(os.path.dirname(SESSION), exist_ok=True)
     return TelegramClient(SESSION, st["api_id"], st["api_hash"])
+
+
+CATCH_UP_MAX = 300
+CATCH_UP_LIVE_H = 24
+RECONNECT_MAX = 3
 
 
 def restart_self():
@@ -191,9 +197,56 @@ class Watcher:
     async def run_blocking(self, fn, *args):
         return await asyncio.get_event_loop().run_in_executor(None, fn, *args)
 
+    async def catch_up(self):
+        """Lấy bù tin đến trong lúc mất kết nối / tắt dịch vụ: mỗi chat đọc các tin mới hơn tin cuối đã lưu (tối đa
+        CATCH_UP_MAX). Tin trong CATCH_UP_LIVE_H giờ gần đây xử lý như tin mới (gom yêu cầu / trả lời xin ý kiến)."""
+        total = 0
+        for chat_id in list(self.chats):
+            try:
+                last = tr.db().execute("select max(tg_msg_id) from messages where chat_id=?", (chat_id,)).fetchone()[0]
+                if not last:
+                    continue
+                n = 0
+                async for m in self.c.iter_messages(chat_id, min_id=last, reverse=True, limit=CATCH_UP_MAX):
+                    age = (datetime.now(timezone.utc) - m.date).total_seconds() / 3600 if m.date else 999
+                    await self.store(m, age <= CATCH_UP_LIVE_H)
+                    n += 1
+                if n:
+                    log.info("lấy bù %d tin của %s", n, self.chats[chat_id]["name"])
+                total += n
+            except Exception:  # noqa: BLE001 — một chat lỗi không chặn chat khác
+                log.exception("lấy bù tin lỗi (%s)", chat_id)
+        return total
+
+    async def ensure_connected(self):
+        """Watchdog: Telethon có thể ngắt hẳn (vd đĩa đầy khi ghi session) mà tiến trình vẫn sống → không nhận tin.
+        Mất kết nối thì nối lại + lấy bù tin; nối lại không được RECONNECT_MAX lần liên tiếp → chạy lại tiến trình."""
+        if self.c.is_connected():
+            self._fails = 0
+            return True
+        self._fails = getattr(self, "_fails", 0) + 1
+        log.warning("mất kết nối Telegram — nối lại (lần %d)", self._fails)
+        try:
+            await self.c.connect()
+            if self.c.is_connected() and await self.c.is_user_authorized():
+                log.info("đã nối lại Telegram")
+                self._fails = 0
+                await self.catch_up()
+                return True
+        except Exception as ex:  # noqa: BLE001
+            log.warning("nối lại lỗi: %s", ex)
+        if self._fails >= RECONNECT_MAX:
+            self.heartbeat("mất kết nối Telegram, nối lại không được — chạy lại tiến trình")
+            restart_self()
+        return False
+
     async def background(self):
         tick = 10 ** 9  # đồng bộ ngay lượt đầu
         while True:
+            if not await self.ensure_connected():
+                self.heartbeat("mất kết nối Telegram — đang nối lại")
+                await asyncio.sleep(10)
+                continue
             try:
                 tr.finalize_due()
                 for a in tr.pending_asks():
@@ -343,6 +396,8 @@ class Watcher:
             log.info("đăng nhập %s, nghe: %s", self.me, ", ".join("%s (%s)" % (v["name"], v["kind"])
                                                                 for v in self.chats.values()))
         self.heartbeat()
+        if self.chats:
+            await self.catch_up()
         await self.background()
 
 
