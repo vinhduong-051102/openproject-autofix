@@ -18,10 +18,18 @@ Mỗi repo:
   build      [lệnh] tool tự chạy để kiểm tra (luôn chạy)        test  [lệnh] chạy khi bản sửa có file test ({tests})
   test_files regex đường dẫn file test trong diff → tên test = tên file bỏ đuôi
   test_compare "surefire": test lỗi thì so với commit trước bản sửa (lỗi sẵn trên nhánh chung không chặn push)
-  link       [thư mục] dùng chung từ repo gốc vào worktree (vd node_modules)
+  link       [thư mục] dùng chung từ repo gốc vào worktree (vd node_modules; glob được: packages/*/node_modules)
+  setup      [lệnh] chạy MỘT lần trong worktree mới trước khi build (vd "bun install --frozen-lockfile") — dùng khi
+             không dùng chung được thư mục phụ thuộc (monorepo: gói nội bộ phải trỏ vào chính worktree)
+  build_compare "errors": build / test lỗi thì chạy lại trên commit trước bản sửa, chỉ chặn nếu có dòng lỗi MỚI
+             (lỗi có sẵn trên nhánh chung không chặn push)
   allow      [quy tắc Bash] thêm cho Claude (mặc định lấy theo lệnh build / test)
   merge      true: merge_to_dev đưa nhánh cá nhân vào nhánh chung           merge_check  [lệnh] build thử sau merge
-  deploy     "fe-bundle" | "be-image" | "none" — cách deploy lên server test (deploy_qa)
+  deploy     "fe-bundle" | "be-image" | "command" | "none" — cách deploy lên server test (deploy_qa)
+  deploy_cmd    [lệnh] (deploy "command") chạy trong worktree mới của origin/<deploy_ref>, theo thứ tự; dùng {dir} {ref}
+                {sha} {host} {user} {base}; biến môi trường DEPLOY_HOST / DEPLOY_USER / DEPLOY_BASE / SSHPASS có sẵn
+  deploy_ref    nhánh đem deploy (mặc định = upstream)
+  deploy_health URL kiểm tra sau deploy (đợi trả 2xx), trống = không kiểm tra
 Trong lệnh dùng được {dir} (thư mục worktree / repo), {subdir}, {tests} (danh sách test, phân cách dấu phẩy), {key}.
 """
 import getpass
@@ -30,7 +38,7 @@ import re
 import shlex
 
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
-DEPLOY_KINDS = ("fe-bundle", "be-image", "none")
+DEPLOY_KINDS = ("fe-bundle", "be-image", "command", "none")
 
 FE_DEFAULT = {
     "key": "fe", "label": "FE", "name": "Frontend", "tech": "React/Vite/TS",
@@ -63,6 +71,7 @@ GENERIC_DEFAULT = {
     "label": "", "name": "", "tech": "", "describe": "", "rules": "", "check": "", "check_short": "",
     "subdir": "", "build": [], "test": [], "test_files": "", "test_compare": "", "link": [], "allow": [],
     "merge": True, "merge_check": None, "deploy": "none", "ref_hint": "",
+    "deploy_cmd": [], "deploy_ref": "", "deploy_health": "", "setup": [], "build_compare": "errors",
 }
 
 
@@ -74,7 +83,7 @@ def _norm(raw, base):
         raise ValueError("repo key không hợp lệ: %r (chữ thường, số, - _)" % r["key"])
     r["label"] = str(r.get("label") or r["key"].upper()).strip()
     r["path"] = os.path.expanduser(str(r.get("path") or "").strip())
-    for k in ("build", "test", "link", "allow"):
+    for k in ("build", "test", "link", "allow", "deploy_cmd", "setup"):
         v = r.get(k) or []
         r[k] = [v] if isinstance(v, str) else [str(x) for x in v if str(x).strip()]
     if r.get("merge_check") is None:
@@ -83,14 +92,15 @@ def _norm(raw, base):
         r["merge_check"] = [r["merge_check"]]
     if r.get("deploy") not in DEPLOY_KINDS:
         r["deploy"] = "none"
+    r["deploy_ref"] = str(r.get("deploy_ref") or r.get("upstream") or "").strip()
+    r["deploy_health"] = str(r.get("deploy_health") or "").strip()
     r["merge"] = bool(r.get("merge"))
     if not r.get("check"):
         r["check"] = " rồi ".join("`%s`" % c for c in r["build"] + r["test"]) or "(không có lệnh kiểm tra)"
     if not r.get("check_short"):
         r["check_short"] = r["check"]
     if not r["allow"]:
-        r["allow"] = sorted({"Bash(%s*)" % " ".join(shlex.split(c)[:2]) for c in r["build"] + r["test"] + r["merge_check"]
-                             if shlex.split(c)})
+        r["allow"] = _allow_rules(r["build"] + r["test"] + r["merge_check"])
     return r
 
 
@@ -137,9 +147,80 @@ def fill(tpl, repo, d, tests=""):
         "{tests}", tests).replace("{key}", repo["key"])
 
 
+SHELL_RX = re.compile(r"&&|\|\||[|;<>$`*?]|^\s*(cd|export|source|\.)\s|(^|\s)[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def argv(cmd):
+    """Một lệnh → argv: có cú pháp shell (cd … &&, |, ;, $VAR, glob, VAR=…) thì chạy qua bash -c, không thì tách từ."""
+    return ["bash", "-c", cmd] if SHELL_RX.search(cmd) else shlex.split(cmd)
+
+
 def commands(repo, which, d, tests=""):
     """Lệnh (argv) build / test / merge_check của repo, đã điền {dir} {subdir} {tests}."""
-    return [shlex.split(fill(c, repo, d, tests)) for c in repo.get(which) or [] if c.strip()]
+    return [argv(fill(c, repo, d, tests)) for c in repo.get(which) or [] if c.strip()]
+
+
+def _allow_rules(cmds):
+    """Quy tắc Bash(...) cho Claude theo các lệnh: mỗi đoạn (tách && ; |) lấy 2 từ đầu, bỏ đoạn cd / export."""
+    out = set()
+    for c in cmds:
+        for seg in re.split(r"&&|\|\||;|\|", c):
+            w = shlex.split(seg, posix=True) if seg.strip() else []
+            while w and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[0]):
+                w = w[1:]
+            if w and w[0] not in ("cd", "export", "source", "."):
+                out.add("Bash(%s*)" % " ".join(w[:2]))
+    return sorted(out)
+
+
+def link_shared(repo, d, src_root=None):
+    """Symlink các thư mục dùng chung (link) từ repo gốc vào worktree d. Hỗ trợ glob, vd "packages/*/node_modules"
+    (monorepo bun / pnpm: mỗi package có node_modules riêng, symlink tương đối về node_modules gốc)."""
+    import glob
+    root = src_root or repo["path"]
+    made = []
+    for pat in repo.get("link") or []:
+        for src in sorted(glob.glob(os.path.join(root, pat))) if any(c in pat for c in "*?[") else [os.path.join(root, pat)]:
+            dst = os.path.join(d, os.path.relpath(src, root))
+            if os.path.isdir(src) and not os.path.lexists(dst) and os.path.isdir(os.path.dirname(dst)):
+                os.symlink(src, dst)
+                made.append(dst)
+    return made
+
+
+def run_setup(repo, d, env=None, log_path=None):
+    """Lệnh setup của repo trong worktree d, mỗi worktree một lần (đánh dấu .op-setup-done trong .git riêng của
+    worktree). Trả "" nếu xong / không có, chuỗi lỗi nếu hỏng."""
+    import subprocess
+    cmds = commands(repo, "setup", d)
+    if not cmds:
+        return ""
+    try:
+        gd = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=d, stdout=subprocess.PIPE, universal_newlines=True,
+                            stderr=subprocess.DEVNULL).stdout.strip()
+        mark = os.path.join(d, gd, "op-setup-done") if gd else None
+    except OSError:
+        mark = None
+    if mark and os.path.exists(mark):
+        return ""
+    out = open(log_path, "a", encoding="utf-8") if log_path else None
+    try:
+        for c in cmds:
+            if out:
+                out.write("\n$ %s   # setup\n" % " ".join(c))
+                out.flush()
+            res = subprocess.run(c, cwd=d, stdout=out or subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, env=env, timeout=1800)
+            if res.returncode != 0:
+                return "%s: setup `%s` lỗi (mã %s)" % (repo["label"], " ".join(c)[-80:], res.returncode)
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        return "%s: setup lỗi: %s" % (repo["label"], ex)
+    finally:
+        if out:
+            out.close()
+    if mark:
+        open(mark, "w").close()
+    return ""
 
 
 def module_dir(repo, d):

@@ -178,7 +178,8 @@ def save_env(changes):
 
 REPO_FIELDS = ("key", "label", "name", "preset", "path", "branch", "upstream", "subdir", "tech", "describe", "rules",
                "check", "build", "test", "test_files", "test_compare", "link", "allow", "merge", "merge_check", "deploy",
-               "ref_hint")
+               "ref_hint", "deploy_cmd", "deploy_ref", "deploy_health", "deploy_desc", "setup",
+               "build_compare")
 
 
 def repos_get(acfg):
@@ -216,7 +217,7 @@ def repos_check(items):
             v = x.get(k)
             if v in (None, "", []):
                 continue
-            if k in ("build", "test", "link", "allow", "merge_check"):
+            if k in ("build", "test", "link", "allow", "merge_check", "deploy_cmd", "setup"):
                 v = [s.strip() for s in (v.splitlines() if isinstance(v, str) else v) if str(s).strip()]
             elif k == "merge":
                 v = bool(v)
@@ -231,6 +232,9 @@ def repos_check(items):
     norm = R.repos({"repos": clean})  # ném ValueError nếu key sai / trùng
     if sum(1 for r in norm if r["deploy"] == "fe-bundle") > 1 or sum(1 for r in norm if r["deploy"] == "be-image") > 1:
         raise ValueError("mỗi kiểu deploy (fe-bundle / be-image) chỉ dùng cho một repo")
+    for r in norm:
+        if r["deploy"] == "command" and not r["deploy_cmd"]:
+            raise ValueError("%s: deploy \"command\" cần ít nhất một lệnh deploy" % r["label"])
     warn = []
     for r in norm:
         if not r["path"] or not os.path.isdir(r["path"]):
@@ -307,6 +311,9 @@ def action(body, save_autofix):
     if kind == "config_repo_analyze":
         r = analyze_repo(body.get("path"), body.get("existing") or [])
         return dict(r, message="%s phân tích xong %s" % ("AI" if r["source"] == "ai" else "Đã đoán (không AI)", r["repo"]["path"]))
+    if kind == "config_deploy_suggest":
+        r = suggest_deploy(body.get("repo") or {}, body.get("desc"))
+        return dict(r, message="AI đã viết %d lệnh deploy" % len(r["deploy_cmd"]))
     if kind == "config_apply":
         return apply(body.get("changed") or [])
     raise ValueError("thao tác không hợp lệ")
@@ -467,7 +474,8 @@ CONTRIBUTING, cấu trúc thư mục. Xác định:
 - build: lệnh tool tự chạy để kiểm tra code compile / build được (nhanh, không cần mạng nếu được, KHÔNG deploy). test: lệnh
   chạy test, dùng {{tests}} = danh sách tên test (phân cách dấu phẩy) nếu chạy chọn lọc được; test_files: regex đường dẫn
   file test (khớp với "/" + đường dẫn tương đối). Dùng {{dir}} = thư mục repo, {{subdir}} = subdir trong lệnh nếu cần đường
-  dẫn tuyệt đối. link: thư mục phụ thuộc cài sẵn nên dùng chung (vd node_modules), không có thì [].
+  dẫn tuyệt đối. link: thư mục phụ thuộc cài sẵn nên dùng chung (vd node_modules; monorepo có node_modules từng package thì thêm glob
+  "packages/*/node_modules"…), không có thì [].
 - check: 1 câu hướng dẫn Claude tự kiểm tra (lệnh nguyên văn trong `…`). rules: quy ước code quan trọng (từ README /
   AGENTS.md / cấu hình lint), ngắn. describe: ghi chú cho Claude (bắt đầu bằng "; " hoặc ". "), vd đọc file hướng dẫn nào.
 - upstream: nhánh chung để merge vào (nhánh tích hợp: dev / develop / dev-ss…); branch: nhánh cá nhân autofix push lên
@@ -482,16 +490,89 @@ CONTRIBUTING, cấu trúc thư mục. Xác định:
 """
 
 
+def _claude_json(prompt, p):
+    """Gọi Claude chỉ đọc trong repo p (Read / Glob / Grep, không Bash / ghi / mạng) → khối JSON trong kết quả."""
+    import op_autofix as af
+    import task_create
+    _, acfg, _ = task_create.load()
+    acfg = dict(af.AUTOFIX_DEFAULTS, **acfg)
+    prof, why = af.choose_profile(os.path.expanduser(acfg["root"]), acfg)
+    if prof is None:
+        raise RuntimeError("không có gói Claude dùng được (%s)" % why)
+    af.use_profile(acfg, prof)
+    scope = "//" + p.lstrip("/") + "/**"
+    cmd = [acfg["claude"], "-p", prompt, "--permission-mode", "dontAsk", "--max-budget-usd", "0.8",
+           "--output-format", "json", "--add-dir", p, "--allowedTools", "Read(%s)" % scope, "Glob", "Grep",
+           "--disallowedTools", "Bash", "Write", "Edit", "WebFetch", "WebSearch",
+           "--model", envconf.get("TG_AI_MODEL") or "sonnet"]
+    res = subprocess.run(cmd, cwd=p, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                         universal_newlines=True, env=af.build_env(acfg), timeout=300)
+    text = (json.loads(res.stdout).get("result") or "") if res.stdout.strip().startswith("{") else ""
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise RuntimeError("Claude không trả JSON (mã %s)" % res.returncode)
+    return json.loads(m.group(0))
+
+
+DEPLOY_PROMPT = """Bạn viết LỆNH DEPLOY cho một repo, theo mô tả của người dùng. CHỈ ĐỌC repo (không sửa, không chạy lệnh).
+
+## Repo
+Thư mục: {path} · nhánh deploy mặc định: {ref} · công nghệ: {tech}
+Lệnh build đã khai báo: {build}
+
+## Server test (biến có sẵn khi lệnh chạy)
+- {{host}} / $DEPLOY_HOST = {host} · {{user}} / $DEPLOY_USER = {user} · {{base}} / $DEPLOY_BASE = {base}
+- $SSHPASS = mật khẩu SSH (dùng `sshpass -e ssh …`, `sshpass -e scp …`, `sshpass -e rsync -e ssh …`; KHÔNG ghi mật khẩu
+  vào lệnh). Thêm `-o StrictHostKeyChecking=accept-new` cho ssh / scp.
+- Cách repo FE / BE hiện có đang deploy (tham khảo quy ước server): image docker tải lên {base}/images, `docker load`,
+  sửa docker-compose.yml trong {base} rồi `docker compose up -d <service>`.
+
+## Mô tả của người dùng
+{desc}
+
+## Cách lệnh chạy
+Mỗi phần tử là một lệnh `bash -c`, chạy lần lượt trong worktree MỚI của origin/<nhánh deploy> (thư mục hiện tại = {{dir}},
+chưa cài phụ thuộc trừ thư mục dùng chung: {link}); lệnh lỗi (mã ≠ 0) thì dừng và báo deploy lỗi. Dùng được {{dir}} {{ref}}
+{{sha}} (commit đang deploy) {{host}} {{user}} {{base}}. Đọc package.json / Dockerfile / docker-compose / Makefile / script
+deploy / README trong repo để dùng đúng lệnh build, thư mục output, tên image / service. Lệnh phải chạy không tương tác,
+idempotent nếu được. Không đoán được chi tiết nào thì vẫn viết lệnh hợp lý nhất và nêu rõ trong notes.
+
+## Kết quả: chỉ một khối JSON
+{{"deploy_cmd": ["…"], "deploy_ref": "", "deploy_health": "URL kiểm tra sau deploy hoặc trống", "notes": "giả định / điều cần kiểm tra lại"}}
+"""
+
+
+def suggest_deploy(repo, desc):
+    """AI viết lệnh deploy (repo "command") từ mô tả. Trả {"deploy_cmd", "deploy_ref", "deploy_health", "notes"}."""
+    desc = (desc or "").strip()
+    if not desc:
+        raise ValueError("nhập mô tả cách deploy trước")
+    p = _inside_home((repo or {}).get("path") or "")
+    if not os.path.isdir(p):
+        raise ValueError("chưa có đường dẫn repo hợp lệ")
+    lst = lambda v: [v] if isinstance(v, str) else list(v or [])  # noqa: E731
+    d = envconf.deploy_config()
+    prompt = DEPLOY_PROMPT.format(path=p, ref=repo.get("deploy_ref") or repo.get("upstream") or "?",
+                                  tech=repo.get("tech") or "?", build="; ".join(lst(repo.get("build"))) or "(không có)",
+                                  host=d.get("host") or "?", user=d.get("user") or "?", base=d.get("base") or "?",
+                                  link=", ".join(lst(repo.get("link"))) or "(không có)", desc=desc[:3000])
+    out = _claude_json(prompt, p)
+    cmds = [str(c).strip() for c in lst(out.get("deploy_cmd")) if str(c).strip()]
+    if not cmds:
+        raise ValueError("AI không viết được lệnh: %s" % (out.get("notes") or "?"))
+    secret = d.get("password") or ""
+    if secret and any(secret in c for c in cmds):
+        raise ValueError("AI ghi mật khẩu vào lệnh — bỏ kết quả, thử lại")
+    return {"deploy_cmd": cmds, "deploy_ref": str(out.get("deploy_ref") or "").strip(),
+            "deploy_health": str(out.get("deploy_health") or "").strip(), "notes": str(out.get("notes") or "")[:800]}
+
+
 def analyze_repo(path, existing=()):
     """AI phân tích repo (chỉ đọc) → đề xuất khai báo. Trả {"repo": {...}, "source": "ai"|"đoán", "notes", "git"}."""
     p = _inside_home(path)
     if not os.path.isdir(os.path.join(p, ".git")) and not os.path.isfile(os.path.join(p, ".git")):
         raise ValueError("%s không phải repo git" % p)
     guess, g = guess_repo(p, existing)
-    import op_autofix as af
-    import task_create
-    _, acfg, _ = task_create.load()
-    acfg = dict(af.AUTOFIX_DEFAULTS, **acfg)
     prompt = ANALYZE_PROMPT.format(path=p, current=g["current"] or "?", default=g["default"] or "?",
                                    remote_url=g["remote_url"] or "?", branches=", ".join(g["remote_branches"][:80]) or "(không có)",
                                    recent=g["recent"] or "(không có)", guess=json.dumps(guess, ensure_ascii=False),
@@ -499,23 +580,7 @@ def analyze_repo(path, existing=()):
                                                                                   e.get("branch"), e.get("upstream"))
                                                       for e in existing) or "(chưa có)")
     try:
-        prof, why = af.choose_profile(os.path.expanduser(acfg["root"]), acfg)
-        if prof is None:
-            raise RuntimeError("không có gói Claude dùng được (%s)" % why)
-        af.use_profile(acfg, prof)
-        scope = "//" + p.lstrip("/") + "/**"
-        cmd = [acfg["claude"], "-p", prompt, "--permission-mode", "dontAsk", "--max-budget-usd", "0.8",
-               "--output-format", "json", "--add-dir", p, "--allowedTools", "Read(%s)" % scope, "Glob", "Grep",
-               "--disallowedTools", "Bash", "Write", "Edit", "WebFetch", "WebSearch"]
-        model = envconf.get("TG_AI_MODEL") or "sonnet"
-        cmd += ["--model", model]
-        res = subprocess.run(cmd, cwd=p, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                             universal_newlines=True, env=af.build_env(acfg), timeout=300)
-        text = (json.loads(res.stdout).get("result") or "") if res.stdout.strip().startswith("{") else ""
-        m = re.search(r"\{.*\}", text, re.S)
-        if not m:
-            raise RuntimeError("Claude không trả JSON (mã %s)" % res.returncode)
-        out = json.loads(m.group(0))
+        out = _claude_json(prompt, p)
     except Exception as ex:  # noqa: BLE001 — AI lỗi vẫn trả kết quả đoán
         return {"repo": guess, "source": "đoán", "notes": "AI phân tích lỗi (%s) — dùng kết quả đoán theo file" % str(ex)[:150],
                 "git": g}

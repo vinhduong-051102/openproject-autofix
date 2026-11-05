@@ -2400,9 +2400,13 @@ const CFG_BASIC = [["key", "Key", "thư mục worktree, vd fe / be / playbook"],
 const CFG_ADV = [["tech", "Công nghệ", "ghi trong prompt, vd Node.js"], ["describe", "Mô tả thêm", "sau “— nhánh …” trong prompt; dùng {dir} {subdir}"],
   ["rules", "Quy ước code", "Claude theo khi sửa"], ["check", "Cách tự kiểm tra", "Claude đọc; trống = theo lệnh build / test"],
   ["build", "Lệnh build", "mỗi dòng một lệnh; tool tự chạy để kiểm tra. {dir} {subdir}", true], ["test", "Lệnh test", "chạy khi bản sửa có file test; {tests} = tên test", true],
-  ["test_files", "Mẫu file test", "regex đường dẫn, vd \\.test\\.js$"], ["link", "Thư mục dùng chung", "mỗi dòng một thư mục, vd node_modules", true],
+  ["test_files", "Mẫu file test", "regex đường dẫn, vd \\.test\\.js$"], ["link", "Thư mục dùng chung", "mỗi dòng một thư mục (glob được), vd node_modules · packages/*/node_modules", true],
+  ["setup", "Lệnh setup worktree", "chạy 1 lần trong worktree mới trước khi build, vd bun install --frozen-lockfile (monorepo không dùng chung node_modules được)", true],
   ["merge_check", "Build thử sau merge", "mỗi dòng một lệnh; trống = lệnh build", true], ["allow", "Quyền Bash thêm", "mỗi dòng một quy tắc, vd Bash(make *); trống = theo lệnh", true],
   ["ref_hint", "Gợi ý khi soạn task", "AI đọc mã repo này để làm gì"]];
+const CFG_DEPLOY_DESC = ["deploy_desc", "Mô tả deploy", "viết bằng lời, vd: build bằng npm run build, copy thư mục dist lên server test vào {base}/web rồi reload nginx; kiểm tra http://host:8080", true];
+const CFG_DEPLOY = [["deploy_cmd", "Lệnh deploy", "mỗi dòng 1 lệnh bash, chạy trong worktree nhánh deploy; {dir} {ref} {sha} {host} {user} {base}, biến $DEPLOY_HOST $SSHPASS…\nvd: npm ci && npm run build\nsshpass -e rsync -az dist/ {user}@{host}:{base}/web/", true],
+  ["deploy_ref", "Nhánh deploy", "trống = nhánh chung"], ["deploy_health", "URL kiểm tra", "sau deploy đợi URL trả 2xx, trống = không kiểm tra"]];
 async function loadConfig() {
   try {
     const [e, r] = await Promise.all([tgFetch("/api/config"), tgFetch("/api/config/repos")]);
@@ -2419,27 +2423,41 @@ function renderCfgRepos(msg) {
     + list.map((x, i) => { const p = pre[x.preset] || {};
       const ph = (k, d) => esc(cfgVal(p, k) || d || "");
       const field = ([k, l, h, multi]) => `<label for="cr${i}_${k}">${esc(l)}</label>${multi
-        ? `<textarea id="cr${i}_${k}" data-ri="${i}" data-rk="${k}" rows="2" placeholder="${ph(k, h)}" title="${esc(h)}">${esc(cfgVal(x, k))}</textarea>`
+        ? `<textarea id="cr${i}_${k}" data-ri="${i}" data-rk="${k}" rows="${k === "deploy_cmd" ? 4 : 2}" placeholder="${ph(k, h)}" title="${esc(h)}">${esc(cfgVal(x, k))}</textarea>`
         : `<input type="text" id="cr${i}_${k}" data-ri="${i}" data-rk="${k}" value="${esc(cfgVal(x, k))}" placeholder="${ph(k, h)}" title="${esc(h)}">`}`;
       return `<div class="cfg-repo"><div class="hd"><b>${esc(x.label || (x.key || "?").toUpperCase())}</b><span class="muted">${i === 0 ? "· thư mục làm việc của Claude" : ""}</span>
           <span style="margin-left:auto;display:flex;gap:4px"><button class="link" data-rmove="${i}" data-d="-1" ${i ? "" : "disabled"} title="Lên">▲</button><button class="link" data-rmove="${i}" data-d="1" ${i < list.length - 1 ? "" : "disabled"} title="Xuống">▼</button><button class="link" data-rdel="${i}" title="Bỏ repo">✕</button></span></div>
         <div class="cfg-grid">
           <label for="cr${i}_preset">Mẫu</label><select id="cr${i}_preset" data-ri="${i}" data-rk="preset"><option value="">Tự khai báo</option><option value="fe" ${x.preset === "fe" ? "selected" : ""}>FE (React/Vite — npm run build)</option><option value="be" ${x.preset === "be" ? "selected" : ""}>BE (Spring Boot — Maven)</option></select>
           ${CFG_BASIC.map(field).join("")}
-          <label for="cr${i}_deploy">Deploy</label><select id="cr${i}_deploy" data-ri="${i}" data-rk="deploy">${(R.deploy_kinds || []).map((k) => `<option value="${k}" ${(x.deploy || p.deploy || "none") === k ? "selected" : ""}>${{"fe-bundle": "fe-bundle (build bundle FE lên server test)", "be-image": "be-image (build image BE lên server test)", none: "không deploy"}[k] || k}</option>`).join("")}</select>
+          <label for="cr${i}_deploy">Deploy</label><select id="cr${i}_deploy" data-ri="${i}" data-rk="deploy">${(R.deploy_kinds || []).map((k) => `<option value="${k}" ${(x.deploy || p.deploy || "none") === k ? "selected" : ""}>${{"fe-bundle": "fe-bundle (build bundle FE lên server test)", "be-image": "be-image (build image BE lên server test)", command: "lệnh tuỳ chỉnh (tự khai báo lệnh deploy)", none: "không deploy"}[k] || k}</option>`).join("")}</select>
+          ${(x.deploy || p.deploy) === "command" ? field(CFG_DEPLOY_DESC) + `<span></span><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button data-rdeploy="${i}">🤖 AI viết lệnh deploy</button><span class="muted" id="crDepSt${i}">AI đọc repo (chỉ đọc) + mô tả trên → điền 3 ô dưới, bạn xem lại rồi Lưu</span></div>` + CFG_DEPLOY.map(field).join("") : ""}
           <label for="cr${i}_merge">Merge</label><label style="color:var(--text)"><input type="checkbox" id="cr${i}_merge" data-ri="${i}" data-rk="merge" ${x.merge !== false ? "checked" : ""} style="width:auto"> đưa nhánh cá nhân vào nhánh chung (PR Gitea) theo lịch</label>
         </div>
-        <details><summary>Nâng cao — prompt, lệnh build / test${x.preset ? " (để trống = theo mẫu " + x.preset.toUpperCase() + ")" : ""}</summary><div class="cfg-grid" style="margin-top:8px">${CFG_ADV.map(field).join("")}</div></details></div>`; }).join("")
+        <details><summary>Nâng cao — prompt, lệnh build / test${x.preset ? " (để trống = theo mẫu " + x.preset.toUpperCase() + ")" : ""}</summary><div class="cfg-grid" style="margin-top:8px">${CFG_ADV.map(field).join("")}
+          <label for="cr${i}_build_compare">Lỗi có sẵn</label><select id="cr${i}_build_compare" data-ri="${i}" data-rk="build_compare">${[["off", "build / test lỗi là chặn"], ["errors", "so với commit trước bản sửa — chỉ chặn lỗi MỚI"]].map(([v, t]) => `<option value="${v}" ${(x.build_compare || (x.preset ? "off" : "errors")) === v ? "selected" : ""}>${t}</option>`).join("")}</select></div></details></div>`; }).join("")
     + `<div id="cfgPick"></div>
       <div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap"><button class="primary" id="cfgRepoPick">📁 Thêm repo — chọn thư mục, AI điền</button><button id="cfgRepoAdd">+ Thêm thủ công</button><button id="cfgRepoCheck">Kiểm tra</button><button class="primary" id="cfgRepoSave">Lưu danh sách repo</button></div>
       <div class="muted cfg-msg">Đổi danh sách repo áp dụng cho lượt autofix / merge / deploy kế tiếp (không cần khởi động lại).</div>`;
   const sync = () => document.querySelectorAll("#cfgRepos [data-ri]").forEach((el) => { const x = list[+el.dataset.ri], k = el.dataset.rk;
-    x[k] = el.type === "checkbox" ? el.checked : el.tagName === "TEXTAREA" ? el.value.split("\n").map((v) => v.trim()).filter(Boolean) : el.value.trim(); });
-  document.querySelectorAll("#cfgRepos [data-ri]").forEach((el) => el.onchange = () => { sync(); if (el.dataset.rk === "preset" || el.dataset.rk === "key") renderCfgRepos(); });
+    x[k] = el.type === "checkbox" ? el.checked : k === "deploy_desc" ? el.value.trim() : el.tagName === "TEXTAREA" ? el.value.split("\n").map((v) => v.trim()).filter(Boolean) : el.value.trim(); });
+  document.querySelectorAll("#cfgRepos [data-ri]").forEach((el) => el.onchange = () => { sync(); if (["preset", "key", "deploy"].includes(el.dataset.rk)) renderCfgRepos(); });
   document.querySelectorAll("[data-rdel]").forEach((b) => b.onclick = () => { sync(); if (confirm("Bỏ repo này khỏi danh sách?")) { list.splice(+b.dataset.rdel, 1); renderCfgRepos(); } });
   document.querySelectorAll("[data-rmove]").forEach((b) => b.onclick = () => { sync(); const i = +b.dataset.rmove, j = i + +b.dataset.d; [list[i], list[j]] = [list[j], list[i]]; renderCfgRepos(); });
   $("cfgRepoAdd").onclick = () => { sync(); list.push({key: "", path: "", branch: "", upstream: "", deploy: "none", merge: true}); renderCfgRepos(); };
   $("cfgRepoPick").onclick = () => { sync(); cfgPick("~", true); };
+  document.querySelectorAll("[data-rdeploy]").forEach((b) => b.onclick = async () => {
+    sync(); const i = +b.dataset.rdeploy, x = list[i];
+    const desc = x.deploy_desc || "";
+    if (!desc.trim()) return toast("Nhập mô tả cách deploy trước", true);
+    if (!x.path) return toast("Nhập đường dẫn repo trước", true);
+    $("crDepSt" + i).textContent = "⏳ AI đang đọc repo và viết lệnh (khoảng 20–60 giây)…";
+    const r = await post({action: "config_deploy_suggest", repo: x, desc}, b);
+    if (!r) { $("crDepSt" + i).textContent = "AI lỗi — sửa mô tả rồi thử lại"; return; }
+    x.deploy_cmd = r.deploy_cmd; if (r.deploy_ref) x.deploy_ref = r.deploy_ref; if (r.deploy_health) x.deploy_health = r.deploy_health;
+    renderCfgRepos(`<b>🤖 ${esc(x.label || x.key || "")}: AI đã viết ${r.deploy_cmd.length} lệnh deploy</b> — xem lại rồi bấm <b>Lưu danh sách repo</b>.${r.notes ? `<div class="muted">AI lưu ý: ${esc(r.notes)}</div>` : ""}`);
+    const el = $(`cr${i}_deploy_cmd`); if (el) el.scrollIntoView({block: "center"});
+  });
   const send = async (action) => { sync(); const r = await post({action, repos: list}); if (r) { if (action === "config_repos") { CFG.repos.declared = true; }
     renderCfgRepos(esc(r.message)); } };
   $("cfgRepoCheck").onclick = () => send("config_repos_check");

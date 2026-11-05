@@ -602,7 +602,97 @@ def deploy_repos(acfg):
         acfg[prefix + "_label"] = r["label"] if r else prefix.upper()
         if prefix == "be":
             acfg["be_subdir"] = (r or {}).get("subdir") or ""
+    acfg["custom_deploy"] = [x for x in R.repos(acfg) if x["deploy"] == "command"]
     return acfg
+
+
+# ---- repo deploy "command": lệnh deploy tự khai báo (Cấu hình → Danh sách repo) ---------------------------------------
+# Mốc "đã deploy" của từng repo = commit cuối deploy thành công, lưu ở <root>/deploy-state.json. Lần đầu chưa có mốc thì
+# lấy origin/<deploy_ref> hiện tại làm mốc (không deploy lại toàn bộ lịch sử).
+
+def _state_path(acfg):
+    return os.path.join(os.path.expanduser(acfg["root"]), "deploy-state.json")
+
+
+def deploy_state(acfg, key=None, sha=None):
+    try:
+        with open(_state_path(acfg), encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        st = {}
+    if key and sha:
+        st[key] = {"sha": sha, "at": datetime.now().isoformat(timespec="seconds")}
+        with open(_state_path(acfg) + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(st, f, indent=1)
+        os.replace(_state_path(acfg) + ".tmp", _state_path(acfg))
+    return st
+
+
+def custom_pending(acfg, repo):
+    """Commit mới trên origin/<deploy_ref> sau mốc đã deploy của repo."""
+    ref = "origin/" + repo["deploy_ref"]
+    af.run(["git", "fetch", "-q", "origin", repo["deploy_ref"]], cwd=repo["path"], check=False)
+    mark = (deploy_state(acfg).get(repo["key"]) or {}).get("sha")
+    if not mark:
+        head = git_lines(repo["path"], "rev-parse", ref)
+        if head:
+            deploy_state(acfg, repo["key"], head[0])
+            log("%s: chưa có mốc deploy — lấy %s (%s) làm mốc, lần sau chỉ deploy commit mới" % (repo["label"], ref, head[0][:9]))
+        return []
+    return [tuple(l.split(" ", 1)) for l in git_lines(repo["path"], "log", "--no-merges", "--format=%H %s",
+                                                       "%s..%s" % (mark, ref)) if " " in l]
+
+
+def custom_contains(acfg, repo, hashes):
+    """Bản đã deploy của repo (mốc deploy-state) chứa các commit chưa. None = chưa có mốc."""
+    mark = (deploy_state(acfg).get(repo["key"]) or {}).get("sha")
+    if not mark:
+        return None
+    return all(subprocess.run(["git", "merge-base", "--is-ancestor", h, mark], cwd=repo["path"],
+                              stderr=subprocess.DEVNULL).returncode == 0 for h in hashes)
+
+
+def custom_build_key(acfg):
+    """Phần thêm vào khoá bản build (lịch sử QA) theo mốc deploy của các repo "command"."""
+    st = deploy_state(acfg)
+    return "".join("|%s:%s" % (r["key"], ((st.get(r["key"]) or {}).get("sha") or "")[:9]) for r in acfg.get("custom_deploy") or [])
+
+
+def deploy_custom(acfg, dcfg, repo, root, logf):
+    """Chạy các lệnh deploy của repo trong worktree mới của origin/<deploy_ref>; xong (và health OK) thì ghi mốc."""
+    import repos as R
+    work = os.path.join(root, "deploy-" + repo["key"])
+    ref = repo["deploy_ref"]
+    fresh_worktree(repo["path"], work, "origin/" + ref)
+    try:
+        R.link_shared(repo, work)
+        err = R.run_setup(repo, work, af.build_env(acfg), logf.name if logf else None)
+        if err:
+            raise RuntimeError(err)
+        sha = af.run(["git", "rev-parse", "HEAD"], cwd=work).strip()
+        env = dict(af.build_env(acfg), DEPLOY_HOST=dcfg.get("host") or "", DEPLOY_USER=dcfg.get("user") or "",
+                   DEPLOY_BASE=dcfg.get("base") or "", SSHPASS=dcfg.get("password") or "", DEPLOY_REF=ref, DEPLOY_SHA=sha)
+        for c in repo["deploy_cmd"]:
+            cmd = R.fill(c, repo, work).replace("{ref}", ref).replace("{sha}", sha).replace(
+                "{host}", dcfg.get("host") or "").replace("{user}", dcfg.get("user") or "").replace("{base}", dcfg.get("base") or "")
+            sh(["bash", "-c", cmd], cwd=work, logf=logf, env=env, timeout=5400)
+        url = repo.get("deploy_health")
+        if url:
+            end = time.time() + 60 * float(dcfg.get("wait_minutes", 10))
+            while True:
+                try:
+                    with urllib.request.urlopen(url, timeout=15) as res:
+                        if 200 <= res.status < 300:
+                            break
+                except (urllib.error.URLError, OSError, ValueError):
+                    pass
+                if time.time() > end:
+                    raise RuntimeError("%s: %s không trả 2xx sau deploy" % (repo["label"], url))
+                time.sleep(10)
+        deploy_state(acfg, repo["key"], sha)
+        return sha[:9]
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo["path"], check=False)
 
 
 def sh(cmd, cwd=None, logf=None, env=None, timeout=3600):
@@ -674,7 +764,14 @@ def pending(acfg, dcfg):
     be_commits = [tuple(l.split(" ", 1)) for l in git_lines(
         be, "log", "--no-merges", "--format=%H %s",
         "origin/%s..origin/%s" % (dcfg["be_release_branch"], acfg["be_upstream"])) if " " in l]
-    return {"FE": fe_commits, "BE": be_commits}
+    out = {"FE": fe_commits, "BE": be_commits}
+    for r in acfg.get("custom_deploy") or []:
+        try:
+            out[r["label"]] = custom_pending(acfg, r)
+        except Exception as ex:  # noqa: BLE001 — một repo lỗi không chặn phần khác
+            log("%s: không đọc được commit chưa deploy: %s" % (r["label"], ex))
+            out[r["label"]] = []
+    return out
 
 
 def fresh_worktree(repo, path, ref):
@@ -1469,7 +1566,11 @@ def deploy_check(acfg, dcfg, commits, path):
     release = "origin/" + dcfg["be_release_branch"]
     for label, repo, hashes in commits:
         for h in hashes:
-            if label == "FE":
+            cr = next((r for r in acfg.get("custom_deploy") or [] if r["label"] == label), None)
+            if cr:
+                inside = custom_contains(acfg, cr, [h])
+                how = "so với commit đã deploy gần nhất của %s (%s)" % (label, cr["deploy_ref"])
+            elif label == "FE":
                 inside = fe_contains(acfg, fp.get("fe"), [h])
                 how = "so với commit `update version %s` trên %s" % (fp.get("fe"), acfg["fe_upstream"])
             else:
@@ -1667,7 +1768,7 @@ def review_queue(api=None):
     wps = api.my_work_packages(cfg["project"], review_ids) if review_ids else []
     queued = set(load_pending())
     fp = fingerprint(dcfg)
-    build = "%s|%s" % (fp.get("fe"), fp.get("be"))
+    build = "%s|%s" % (fp.get("fe"), fp.get("be")) + custom_build_key(acfg)
     out = []
     for w in wps:
         t = w.get("displayId") or "WP-%s" % w["id"]
@@ -1790,15 +1891,15 @@ def run_all(dry_run=False, only=None, auto_only=False, force=False, review=None)
         except Exception as ex:  # noqa: BLE001 — không đọc được OpenProject thì vẫn QA như cũ
             log("không lấy được danh sách Resolved: %s" % ex)
         tickets = sorted(set(new) | set(waiting) | auto)
-        log("chưa deploy: FE %d commit, BE %d commit · ticket mới: %s · hàng chờ QA: %s · Resolved/Review chưa QA: %s" % (
-            len(commits["FE"]), len(commits["BE"]), ", ".join(new) or "không có", ", ".join(waiting) or "trống",
+        log("chưa deploy: %s · ticket mới: %s · hàng chờ QA: %s · Resolved/Review chưa QA: %s" % (
+            ", ".join("%s %d commit" % (k, len(v)) for k, v in commits.items()), ", ".join(new) or "không có", ", ".join(waiting) or "trống",
             ", ".join(sorted(auto)) or "không có"))
         if dry_run or not tickets:
             return
     fe_version = None
-    if not only and (commits["FE"] or commits["BE"]):
+    if not only and any(commits.values()):
         logf = open(os.path.join(root, "deploy-%s.log" % datetime.now().strftime("%m%d-%H%M")), "w", encoding="utf-8")
-        af.notify("[DEPLOY 86]", "Bắt đầu deploy: FE %d commit, BE %d commit" % (len(commits["FE"]), len(commits["BE"])))
+        af.notify("[DEPLOY 86]", "Bắt đầu deploy: " + ", ".join("%s %d commit" % (k, len(v)) for k, v in commits.items() if v))
         try:
             changes = []
             if commits["FE"]:
@@ -1806,7 +1907,11 @@ def run_all(dry_run=False, only=None, auto_only=False, force=False, review=None)
                 deployed_parts.append("FE %s" % fe_version)
             if commits["BE"]:
                 deployed_parts.append("BE %s:%s" % (dcfg["be_image"], deploy_be(acfg, dcfg, root, logf, changes)))
-            rollout(dcfg, changes, logf)
+            if changes:
+                rollout(dcfg, changes, logf)
+            for r in acfg.get("custom_deploy") or []:
+                if commits.get(r["label"]):
+                    deployed_parts.append("%s %s" % (r["label"], deploy_custom(acfg, dcfg, r, root, logf)))
         except Exception as ex:  # noqa: BLE001
             msg = "deploy lỗi: %s (log %s)" % (str(ex).splitlines()[0][:300], logf.name)
             log(msg)
@@ -1869,12 +1974,15 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         hashes = [(label, repo, [h for h, s in commits[label] if "[%s]" % display_id in s] or
                    [l.split()[0] for l in git_lines(repo, "log", "--no-merges", "-F", "--grep=[%s]" % display_id,
                                                     "--format=%H", "origin/" + up)])
-                  for label, repo, up in (("FE", acfg["fe_repo"], acfg["fe_upstream"]),
-                                          ("BE", acfg["be_repo"], acfg["be_upstream"]))]
+                  for label, repo, up in [("FE", acfg["fe_repo"], acfg["fe_upstream"]),
+                                          ("BE", acfg["be_repo"], acfg["be_upstream"])] +
+                  [(r["label"], r["path"], r["deploy_ref"]) for r in acfg.get("custom_deploy") or []]]
         hashes = [x for x in hashes if x[2]]
         fe_hashes = [h for label, _, hs in hashes if label == "FE" for h in hs]
         be_hashes = [h for label, _, hs in hashes if label == "BE" for h in hs]
-        build = "%s|%s" % (baseline.get("fe"), baseline.get("be"))
+        build = "%s|%s" % (baseline.get("fe"), baseline.get("be")) + custom_build_key(acfg)
+        cust = {r["label"]: r for r in acfg.get("custom_deploy") or []}
+        cust_state = [custom_contains(acfg, cust[label], hs) for label, _, hs in hashes if label in cust]
         if display_id in force:
             # QA tay từ trang theo dõi: bỏ điều kiện commit / bản đang chạy có bản sửa (vd ticket không cần sửa code).
             log("%s: QA theo yêu cầu (bỏ qua điều kiện commit: FE %d, BE %d commit)"
@@ -1884,7 +1992,7 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             # build. Không có commit sửa → QA hành vi hiện tại (như bấm QA trên server); có commit mà bản đang chạy
             # chưa có → đợi deploy.
             if (fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is False) or \
-                    (be_hashes and be_contains(acfg, baseline["be"], be_hashes) is False):
+                    (be_hashes and be_contains(acfg, baseline["be"], be_hashes) is False) or False in cust_state:
                 log("%s: vào Review nhưng bản đang chạy chưa có bản sửa — đợi deploy" % display_id)
                 with mu:
                     remaining.remove(display_id)
@@ -1899,7 +2007,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             if not hashes:
                 return drop("không thấy commit [%s] trên %s / %s" % (display_id, acfg["fe_upstream"], acfg["be_upstream"]))
             if (fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is not True) or \
-                    (be_hashes and be_contains(acfg, baseline["be"], be_hashes) is not True):
+                    (be_hashes and be_contains(acfg, baseline["be"], be_hashes) is not True) or \
+                    any(x is not True for x in cust_state):
                 return drop("bản đang chạy (FE %s, BE %s) chưa chắc có bản sửa" % (baseline["fe"], baseline["be"]))
             last = qa_history(display_id)
             if last and last.get("build") == build:
@@ -1915,6 +2024,9 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             return
         elif be_hashes and be_contains(acfg, baseline["be"], be_hashes) is False:
             log("%s: bản BE %s trên server chưa có bản sửa — để lại hàng chờ" % (display_id, baseline["be"]))
+            return
+        elif False in cust_state:
+            log("%s: repo deploy tuỳ chỉnh chưa deploy bản sửa — để lại hàng chờ" % display_id)
             return
         slot = af.acquire_slot(os.path.expanduser(acfg["root"]), acfg) if dcfg["qa_engine"] != "gemini" else None
         try:

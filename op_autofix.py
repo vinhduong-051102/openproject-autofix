@@ -577,10 +577,11 @@ def make_trees(acfg, run_dir, branch):
     notes = []
     for r, d in R.trees(acfg, run_dir):
         notes.append(make_worktree(r["path"], r["branch"], r["upstream"], d, branch, acfg))
-        for name in r.get("link") or []:
-            src = os.path.join(r["path"], name)
-            if os.path.isdir(src) and not os.path.exists(os.path.join(d, name)):
-                os.symlink(src, os.path.join(d, name))
+        R.link_shared(r, d)
+        err = R.run_setup(r, d, build_env(acfg), os.path.join(run_dir, "setup.log"))
+        if err:
+            log(err)
+            notes.append(err)
     return notes
 
 
@@ -911,8 +912,11 @@ def make_worktree(repo, base_branch, upstream, path, branch, acfg=None):
 
 
 def fix_commits(repo_dir, base):
-    """Commit sửa của lượt chạy: nhánh chính sau origin/<base>, bỏ merge (không tính commit kéo từ nhánh chung)."""
-    out = run(["git", "rev-list", "--first-parent", "--no-merges", "origin/%s..HEAD" % base], cwd=repo_dir, check=False)
+    """Commit sửa của lượt chạy: nhánh chính sau origin/<base>, bỏ merge (không tính commit kéo từ nhánh chung).
+    Loại cả commit đã có trên bất kỳ nhánh nào của origin: merge origin/<upstream> vào nhánh cá nhân đang chậm hơn là
+    fast-forward (không có merge commit) nên --first-parent vẫn đi qua commit của nhánh chung."""
+    out = run(["git", "rev-list", "--first-parent", "--no-merges", "HEAD", "^origin/%s" % base, "--not", "--remotes=origin"],
+              cwd=repo_dir, check=False)
     return out.split()
 
 
@@ -982,6 +986,58 @@ def preexisting_test_failures(acfg, repo_dir, commits, tests, log_path, repo=Non
         shutil.rmtree(base_dir, ignore_errors=True)
 
 
+ANSI_RX = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+ERR_RX = re.compile(r"\berror\b|\bERR!|\bFAIL(ED)?\b|✗|×", re.I)
+NOISE_RX = re.compile(r"run failed|exited \(\d+\)|^\s*(Tasks|Failed|Cached|Time):", re.I)
+
+
+def error_lines(text):
+    """Dòng lỗi (đã bỏ màu / thời gian) để so giữa bản sửa và bản trước."""
+    out = set()
+    for line in ANSI_RX.sub("", text).splitlines():
+        line = re.sub(r"\b\d+(\.\d+)?\s*m?s\b", "", line).strip()
+        if line and ERR_RX.search(line) and not NOISE_RX.search(line):
+            out.add(line)
+    return out
+
+
+def preexisting_errors(acfg, repo, repo_dir, commits, cmd, log_path, start, out):
+    """build_compare "errors": lệnh lỗi ở bản sửa → chạy lại trên commit trước bản sửa (trong chính worktree, giữ
+    phụ thuộc đã cài). Mọi dòng lỗi đều có sẵn ở bản trước → trả ghi chú (không chặn); có lỗi mới → "" (chặn)."""
+    out.flush()
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        f.seek(start)
+        fix_err = error_lines(f.read())
+    if not fix_err or not commits:
+        return ""
+    oldest = next((c for c in commits if all(subprocess.run(["git", "merge-base", "--is-ancestor", c, o], cwd=repo_dir)
+                                               .returncode == 0 for o in commits)), None)
+    if not oldest or run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo_dir, check=False).strip():
+        return ""
+    head = run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=repo_dir, check=False).strip() or \
+        run(["git", "rev-parse", "HEAD"], cwd=repo_dir).strip()
+    base_log = log_path + ".base"
+    try:
+        run(["git", "checkout", "-q", "--detach", oldest + "^"], cwd=repo_dir)
+        with open(base_log, "w", encoding="utf-8") as bout:
+            run_build(cmd, repo_dir, bout, acfg)
+        with open(base_log, encoding="utf-8", errors="replace") as f:
+            base_err = error_lines(f.read())
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as ex:
+        log("so lỗi với bản trước lỗi: %s" % ex)
+        return ""
+    finally:
+        subprocess.run(["git", "checkout", "-q", head], cwd=repo_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    new = sorted(fix_err - base_err)
+    out.write("\n# Lệnh lỗi ở bản sửa — chạy lại trên %s^ (trước bản sửa): %d dòng lỗi ở bản sửa, %d có sẵn, mới: %s\n"
+              % (oldest[:9], len(fix_err), len(fix_err & base_err), "\n#   ".join([""] + new[:20]) if new else "không có"))
+    out.flush()
+    if new:
+        return ""
+    return "%s `%s`: %d lỗi có sẵn trên nhánh chung (không do bản sửa)" % (
+        repo["label"], " ".join(cmd)[-60:], len(fix_err))
+
+
 def verify(acfg, label, repo_dir, commits, log_path):
     """Tự kiểm tra lại (lệnh build / test của repo trong cấu hình), không dựa vào báo cáo của Claude. Trả lỗi (chuỗi)
     hoặc rỗng nếu qua."""
@@ -1004,7 +1060,14 @@ def verify(acfg, label, repo_dir, commits, log_path):
         for cmd in cmds:
             out.write("\n$ %s\n" % " ".join(cmd))
             out.flush()
+            start = out.tell()
             code = run_build(cmd, repo_dir, out, acfg)
+            if code != 0 and repo.get("build_compare") == "errors":
+                note = preexisting_errors(acfg, repo, repo_dir, commits, cmd, log_path, start, out)
+                if note:
+                    acfg.setdefault("_verify_notes", []).append(note)
+                    log(note)
+                    continue
             if code != 0:
                 if cmd in test_cmds and repo.get("test_compare") == "surefire":
                     note = preexisting_test_failures(acfg, repo_dir, commits, tests, log_path, repo)
@@ -2253,6 +2316,13 @@ def review_ticket(api, cfg, acfg, ref, profile=None, gemini_from=None):
 def ship_run(cfg, acfg, run_name, profile=None):
     """Giao lại một lượt ĐÃ SỬA bị dừng ở bước kiểm tra / push (vd test lỗi sẵn trên nhánh chung)."""
     root = os.path.expanduser(acfg["root"])
+    if re.match(r"^[A-Z][A-Z0-9]*-\d+$", run_name):  # chỉ mã ticket → lượt chạy mới nhất có report.md
+        runs = sorted((d for d in os.listdir(root) if d.startswith(run_name + "-")
+                       and os.path.isfile(os.path.join(root, d, "report.md"))),
+                      key=lambda d: os.path.getmtime(os.path.join(root, d)))
+        if runs:
+            log("%s: dùng lượt chạy mới nhất %s" % (run_name, runs[-1]))
+            run_name = runs[-1]
     run_dir = os.path.join(root, run_name)
     m = re.match(r"^((?:[A-Z][A-Z0-9]*)-\d+)-", run_name)
     if not m or not os.path.isdir(run_dir):
@@ -2264,6 +2334,12 @@ def ship_run(cfg, acfg, run_name, profile=None):
     if not kind:
         sys.exit("%s: báo cáo không phải ĐÃ SỬA / KHÔNG SỬA ĐƯỢC — không giao lại" % run_name)
     fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
+    for r, d in R.trees(acfg, run_dir):  # cấu hình thư mục dùng chung / setup có thể đổi sau khi tạo worktree
+        if os.path.isdir(d):
+            R.link_shared(r, d)
+            err = R.run_setup(r, d, build_env(acfg), os.path.join(run_dir, "setup.log"))
+            if err:
+                log(err)
     has_fix = any_fix(acfg, run_dir)
     ticket_lock = open(os.path.join(root, ".%s.lock" % display_id), "w")
     try:
@@ -2608,7 +2684,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="chuẩn bị ticket + worktree + prompt, không gọi Claude")
     parser.add_argument("--clean", metavar="RUN", help="xoá worktree + nhánh auto của một lượt chạy (tên thư mục)")
     parser.add_argument("--ship", metavar="RUN",
-                        help="giao lại lượt đã sửa mà chưa push (tên thư mục, vd SOAR-2797-1103-1515): kiểm tra lại, "
+                        help="giao lại lượt đã sửa mà chưa push (tên thư mục, vd SOAR-2797-1103-1515, hoặc mã ticket = lượt mới nhất): kiểm tra lại, "
                              "Gemini xem lại, push, comment, Resolved; ĐÃ SỬA không commit mới → Gemini kiểm code hiện "
                              "tại rồi Resolved / UNREVIEWED; KHÔNG SỬA ĐƯỢC → comment + UNREVIEWED")
     parser.add_argument("--status", action="store_true", help="xem các lượt đang chờ / đang chạy / vừa xong")

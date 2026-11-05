@@ -119,10 +119,11 @@ def process(acfg, gitea, label, repo, own, dev, dry_run, log_path):
     os.rmdir(work)
     af.run(["git", "worktree", "add", "-q", "--detach", work, "origin/" + own], cwd=repo)
     try:
-        for name in (R.find(acfg, label) or {}).get("link") or []:
-            src = os.path.join(repo, name)
-            if os.path.isdir(src):
-                os.symlink(src, os.path.join(work, name))
+        if R.find(acfg, label):
+            R.link_shared(R.find(acfg, label), work, repo)
+            err = R.run_setup(R.find(acfg, label), work, af.build_env(acfg), log_path)
+            if err:
+                raise RuntimeError(err)
         merged = merge_upstream(acfg, work, own, dev)
         check_build(acfg, label, work, log_path)
         if dry_run:
