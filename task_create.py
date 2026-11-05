@@ -24,6 +24,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envconf  # noqa: E402
+import repos as R  # noqa: E402
 import op_autofix as af  # noqa: E402
 import op_watch  # noqa: E402
 
@@ -42,8 +43,7 @@ PROMPT = """Bạn là tester dự án {project_name}. Viết một ticket OpenPr
 {files}
 
 ## Nguồn tham khảo (chỉ đọc)
-- Mã FE: {fe_repo} (route / menu / nhãn i18n trong src/) — dùng để ghi ĐÚNG đường dẫn màn hình, tên menu, tên tab, nhãn
-- Mã BE: {be_repo} — dùng để ghi đúng API (method + path) nếu ticket liên quan API
+{repo_refs}
 - Môi trường test: web {fe_url}, API `$BASE` = `{api_url}`
 Chỉ tra cứu đủ để ghi chính xác; không cần đọc lan man.
 
@@ -51,7 +51,7 @@ Chỉ tra cứu đủ để ghi chính xác; không cần đọc lan man.
 {examples}
 
 ## Quy tắc
-- Tiêu đề: `TCVN - <Phân hệ> - <Màn hình / chức năng> - Lỗi: <mô tả lỗi ngắn gọn, cụ thể>` (bug); việc không phải lỗi
+- Tiêu đề: `{title_template}` (bug); việc không phải lỗi
   (yêu cầu mới / cải tiến) thì `<Phân hệ> - <Màn hình> - <nội dung>` và type "Task".
 - Mô tả (markdown) theo thứ tự: Link (đường dẫn web cụ thể), Tài khoản (nếu biết; mật khẩu CHỈ ghi khi người dùng đưa,
   không thì `[Cần bổ sung]`), API (nếu liên quan), **ĐIỀU KIỆN BAN ĐẦU:**, **CÁC BƯỚC THỰC HIỆN:** (đánh số, cụ thể từng
@@ -162,6 +162,54 @@ def start_draft(prompt, files, opts=None):
     return draft_id
 
 
+REFINE_NOTE = """
+
+## Soạn lại (lần {round}) — người dùng đã trả lời các điểm AI gợi ý bổ sung
+Bản nháp hiện tại (người dùng có thể đã sửa tay — giữ phần họ sửa, chỉ cập nhật theo thông tin mới):
+### Tiêu đề
+{subject}
+### Mô tả
+{description}
+
+### Thông tin người dùng bổ sung (câu hỏi → trả lời; coi là ĐÚNG)
+{answers}
+
+Viết lại tiêu đề + mô tả cho đầy đủ, đưa thông tin trên vào đúng mục (bước thực hiện, kết quả mong đợi, dữ liệu / tài
+khoản…), bỏ các `[Cần bổ sung]` đã có câu trả lời. "questions" chỉ còn các điểm CHƯA được trả lời và thật sự cần — đủ
+rồi thì để [].
+"""
+
+
+def refine_draft(draft_id, answers, subject="", description=""):
+    """Người dùng trả lời các câu AI gợi ý bổ sung → AI soạn lại bản nháp (chạy nền, giữ file đính kèm).
+    answers: [{"q": câu hỏi, "a": trả lời}] — chỉ các câu có nhập; cộng dồn qua các lần soạn lại."""
+    st = get_draft(draft_id)
+    if st.get("state") == "drafting":
+        raise ValueError("AI đang soạn, chờ xong rồi soạn lại")
+    if st.get("state") == "created":
+        raise ValueError("bản nháp này đã tạo task")
+    answers = [{"q": str(x.get("q") or "").strip()[:500], "a": str(x.get("a") or "").strip()[:2000]}
+               for x in answers or [] if str(x.get("a") or "").strip()]
+    if not answers:
+        raise ValueError("chưa nhập thông tin cho câu nào")
+    _, acfg, _ = load()
+    d = os.path.join(drafts_root(acfg), draft_id)
+    path = os.path.join(d, "refine.json")
+    data = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {"round": 0, "answers": []}
+    data["round"] += 1
+    data["answers"] += answers
+    cur = st.get("draft") or {}
+    data["subject"] = (subject or cur.get("subject") or "").strip()
+    data["description"] = (description or cur.get("description") or "").strip()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    if os.path.exists(os.path.join(d, "draft.json")):
+        os.replace(os.path.join(d, "draft.json"), os.path.join(d, "draft-%d.json" % (data["round"] - 1)))
+    set_state(d, state="drafting", refine_round=data["round"], error=None)
+    threading.Thread(target=_run_draft, args=(d,), daemon=True).start()
+    return data["round"]
+
+
 def _run_draft(d):
     try:
         cfg, acfg, dcfg = load()
@@ -170,10 +218,16 @@ def _run_draft(d):
         files = "\n".join("- %s/files/%s (%s, %d byte)" % (d, x["name"], x["type"] or "?", x["size"])
                           for x in req["files"]) or "(không có)"
         out = os.path.join(d, "draft.json")
-        prompt = PROMPT.format(project_name="SOAR", prompt=req["prompt"] or "(xem file đính kèm)", files=files,
-                               fe_repo=acfg["fe_repo"], be_repo=acfg["be_repo"], fe_url=dcfg.get("fe_url", ""),
+        prompt = PROMPT.format(project_name=envconf.PROJECT_NAME, title_template=envconf.TASK_TITLE_TEMPLATE, prompt=req["prompt"] or "(xem file đính kèm)", files=files,
+                               repo_refs=R.prompt_refs(acfg), fe_url=dcfg.get("fe_url", ""),
                                api_url=dcfg.get("api_url", ""), out=out,
                                examples=examples(api, cfg, dcfg.get("qa_user_id") or 0))
+        rp = os.path.join(d, "refine.json")
+        if os.path.exists(rp):
+            ref = json.load(open(rp, encoding="utf-8"))
+            prompt += REFINE_NOTE.format(round=ref["round"], subject=ref.get("subject") or "", description=(
+                ref.get("description") or "")[:12000], answers="\n".join("- %s → %s" % (a["q"] or "(bổ sung)", a["a"])
+                                                                         for a in ref["answers"]))
         with open(os.path.join(d, "prompt.md"), "w", encoding="utf-8") as f:
             f.write(prompt)
         root = os.path.expanduser(acfg["root"])
@@ -182,10 +236,11 @@ def _run_draft(d):
             raise RuntimeError("không có gói Claude dùng được (%s)" % why)
         af.use_profile(acfg, prof)
         scope = lambda p: "//" + p.lstrip("/") + "/**"  # noqa: E731
-        allowed = ["Read(%s)" % scope(d), "Read(%s)" % scope(acfg["fe_repo"]), "Read(%s)" % scope(acfg["be_repo"]),
+        paths = [r["path"] for r in R.repos(acfg)]
+        allowed = ["Read(%s)" % scope(d)] + ["Read(%s)" % scope(x) for x in paths] + [
                    "Glob", "Grep", "Write(//%s)" % out.lstrip("/"), "Edit(//%s)" % out.lstrip("/")]
         cmd = [acfg["claude"], "-p", prompt, "--permission-mode", "dontAsk", "--max-budget-usd", "1.5",
-               "--output-format", "json", "--add-dir", acfg["fe_repo"], acfg["be_repo"],
+               "--output-format", "json", "--add-dir"] + paths + [
                "--allowedTools"] + allowed + ["--disallowedTools", "Bash", "WebFetch", "WebSearch"]
         if acfg.get("model"):
             cmd += ["--model", acfg["model"]]

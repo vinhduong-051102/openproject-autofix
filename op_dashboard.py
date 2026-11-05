@@ -57,7 +57,7 @@ def inbox_wp_ids(cfg):
     path = os.path.expanduser(cfg.get("inbox") or "")
     if path and os.path.exists(path):
         with open(path, encoding="utf-8", errors="replace") as f:
-            for m in re.finditer(r"(SOAR-\d+) https?://\S+/work_packages/(\d+)", f.read()):
+            for m in re.finditer(r"(%s) https?://\S+/work_packages/(\d+)" % envconf.TICKET_RX, f.read()):
                 out[m.group(1)] = m.group(2)
     return out
 
@@ -234,10 +234,10 @@ def qa_runs(root, cfg, merge_running, n=15):
     if path and os.path.exists(path):
         with open(path, encoding="utf-8", errors="replace") as f:
             for ln in f:
-                m = re.search(r"\*\*QA SERVER\*\* (SOAR-\d+) — (.*?) · (\S+/qa\.md)", ln)
+                m = re.search(r"\*\*QA SERVER\*\* (%s) — (.*?) · (\S+/qa\.md)" % envconf.TICKET_RX, ln)
                 if m:
                     final[os.path.dirname(m.group(3))] = m.group(2)
-    dirs = sorted(glob.glob(os.path.join(root, "SOAR-*-qa-*")), key=os.path.getmtime, reverse=True)[:n]
+    dirs = sorted(glob.glob(os.path.join(root, "%s-*-qa-*" % envconf.TICKET_PREFIX)), key=os.path.getmtime, reverse=True)[:n]
     out = []
     alive = merge_running or qa_procs_alive()
     for i, d in enumerate(dirs):
@@ -301,7 +301,7 @@ def merge_runs(cfg, merge_running, n=12):
 
 def qa_report(name):
     _, _, root = load()
-    if not re.match(r"^SOAR-\d+-qa-[\d-]+$", name or ""):
+    if not re.match(r"^%s-qa-[\d-]+$" % envconf.TICKET_RX, name or ""):
         return ""
     d = os.path.join(root, name)
     path = os.path.join(d, "qa.md")
@@ -497,12 +497,13 @@ def run_events(display_id, start):
             lines.append(text)
     diff = {}
     if s.get("state") in ACTIVE_STATES:
-        for sub in ("fe", "be"):
-            path = os.path.join(s["run_dir"], sub)
+        import repos as R
+        _, acfg_, _ = load()
+        for r, path in R.trees(acfg_, s["run_dir"]):
             if os.path.isdir(path):
                 res = subprocess.run(["git", "diff", "--shortstat", "HEAD"], cwd=path, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, universal_newlines=True)
-                diff[sub.upper()] = res.stdout.strip() or "chưa sửa file"
+                diff[r["label"]] = res.stdout.strip() or "chưa sửa file"
     tools = sum(1 for line in lines if not line.startswith(("💬", "■")))
     return {"lines": lines[start:], "next": len(lines), "tools": tools, "diff": diff}
 
@@ -686,6 +687,11 @@ def action(body):
         import task_create
         did = task_create.start_draft(body.get("prompt"), body.get("files") or [], body.get("opts") or {})
         return {"message": "AI đang soạn mô tả task (khoảng 1 phút)…", "id": did}
+    if kind == "task_refine":
+        import task_create
+        n = task_create.refine_draft(body.get("id"), body.get("answers") or [], body.get("subject") or "",
+                                     body.get("description") or "")
+        return {"message": "AI đang soạn lại mô tả (lần %d) với thông tin bạn nhập…" % n, "id": body.get("id")}
     if kind == "task_create":
         import task_create
         r = task_create.create(body.get("id"), body.get("subject"), body.get("description"), body.get("type") or "Bug",
@@ -875,7 +881,7 @@ def action(body):
         return "Đã bỏ %s khỏi hàng chờ (trạng thái ticket giữ nguyên, đổi tay nếu cần)" % body.get("display_id")
     if kind in ("rerun", "review"):
         display_id = body.get("display_id") or ""
-        if not re.match(r"^SOAR-\d+$", display_id):
+        if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):
             raise ValueError("mã ticket không hợp lệ")
         s = find_run(root, display_id) or {}
         if s.get("state") in ACTIVE_STATES and af.status_alive(s):
@@ -999,15 +1005,24 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("body phải là JSON object")
             if urlparse(self.path).path == "/api/op/status":
                 try:
-                    return self.send(200, op_set_status(body.get("id"), body.get("status_id"), body.get("lock_version")))
+                    res = op_set_status(body.get("id"), body.get("status_id"), body.get("lock_version"))
+                    op_changed()
+                    return self.send(200, res)
                 except OPError as ex:
                     return self.send(502, {"error": str(ex)})
             if urlparse(self.path).path == "/api/op/comment":
                 try:
-                    return self.send(200, op_comment(body.get("id"), body.get("text")))
+                    res = op_comment(body.get("id"), body.get("text"))
+                    op_changed()
+                    return self.send(200, res)
                 except OPError as ex:
                     return self.send(502, {"error": str(ex)})
+            if urlparse(self.path).path == "/api/op/changed":
+                op_changed()  # trang thấy tiến trình nền vừa cập nhật (autofix / QA / Telegram) → bỏ cache
+                return self.send(200, {"ok": True})
             res = action(body)
+            if body.get("action") in OP_WRITE_ACTIONS:
+                op_changed()
             return self.send(200, res if isinstance(res, dict) else {"message": res})
         except ValueError as ex:
             return self.send(400, {"error": str(ex)})
@@ -1019,6 +1034,18 @@ COMPOSE_TAIL = 256 * 1024  # lần đầu (from=0) hoặc file bị ghi đè: ch
 
 
 _OP_CACHE = {}
+
+# Thao tác từ trang có ghi lên OpenProject → xoá cache đọc OpenProject (danh sách ticket, trạng thái ticket trong mục
+# Telegram / Xin ý kiến) để lần tải ngay sau đó lấy dữ liệu mới.
+OP_WRITE_ACTIONS = {"task_create", "rerun", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
+                    "tg_approve", "tg_link", "tg_retry", "tg_ask_reopen", "tg_ask_resolve", "tg_triage"}
+
+
+def op_changed():
+    _OP_CACHE.clear()
+    mod = sys.modules.get("tg_requests")
+    if mod is not None:
+        mod._LIVE.clear()
 _OP_LOCK = threading.Lock()
 
 
