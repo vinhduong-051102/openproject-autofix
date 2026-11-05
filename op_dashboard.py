@@ -695,6 +695,17 @@ def action(body):
         n = task_create.refine_draft(body.get("id"), body.get("answers") or [], body.get("subject") or "",
                                      body.get("description") or "")
         return {"message": "AI đang soạn lại mô tả (lần %d) với thông tin bạn nhập…" % n, "id": body.get("id")}
+    if kind == "task_split":
+        import task_split
+        sid = task_split.start_split(body.get("ticket"), body.get("hint") or "")
+        return {"message": "AI đang đọc ticket + file đính kèm để tách việc (vài phút)…", "id": sid}
+    if kind == "task_split_create":
+        import task_split
+        r = task_split.create_children(body.get("id"), body.get("tasks") or [], body.get("assignee") or "me")
+        msg = "Đã tạo %d việc con: %s" % (len(r["created"]), ", ".join(x["display_id"] for x in r["created"]) or "không có")
+        if r["errors"]:
+            msg += " — lỗi: " + "; ".join(r["errors"])[:300]
+        return dict(r, message=msg)
     if kind == "task_create":
         import task_create
         r = task_create.create(body.get("id"), body.get("subject"), body.get("description"), body.get("type") or "Bug",
@@ -980,6 +991,13 @@ class Handler(BaseHTTPRequestHandler):
                 dcfg_ = envconf.deploy_config()
                 return self.send(200, {"drafts": task_create.list_drafts(),
                                        "qa_user": {"id": dcfg_.get("qa_user_id"), "name": dcfg_.get("qa_user_name")}})
+            if url.path == "/api/tasksplit":
+                import task_split
+                try:
+                    st = task_split.get_split(q["id"]) if q.get("id") else task_split.latest_for(q.get("ticket", ""))
+                except ValueError as ex:
+                    return self.send(400, {"error": str(ex)})
+                return self.send(200, {"split": st})
             if url.path == "/api/conflict":
                 return self.send(200, {"text": conflict_report(q.get("name", ""))})
             if url.path == "/api/file":
@@ -1048,7 +1066,7 @@ _OP_CACHE = {}
 
 # Thao tác từ trang có ghi lên OpenProject → xoá cache đọc OpenProject (danh sách ticket, trạng thái ticket trong mục
 # Telegram / Xin ý kiến) để lần tải ngay sau đó lấy dữ liệu mới.
-OP_WRITE_ACTIONS = {"task_create", "rerun", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
+OP_WRITE_ACTIONS = {"task_create", "task_split_create", "rerun", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
                     "tg_approve", "tg_link", "tg_retry", "tg_ask_reopen", "tg_ask_resolve", "tg_triage"}
 
 

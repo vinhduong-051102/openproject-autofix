@@ -1065,6 +1065,11 @@ def verify(acfg, label, repo_dir, commits, log_path):
                         if rx.search("/" + f) and os.path.exists(os.path.join(repo_dir, f))})
     test_cmds = R.commands(repo, "test", repo_dir, ",".join(tests)) if tests else []
     cmds = R.commands(repo, "build", repo_dir) + test_cmds
+    if cmds:  # worktree đã bị cleanup dọn nhẹ (xoá node_modules…) → cài lại trước khi build
+        R.link_shared(repo, repo_dir)
+        err = R.run_setup(repo, repo_dir, build_env(acfg), log_path)
+        if err:
+            return err
     with open(log_path, "a", encoding="utf-8") as out:
         for cmd in cmds:
             out.write("\n$ %s\n" % " ".join(cmd))
@@ -1911,7 +1916,9 @@ def describe(event):
 def read_events(path):
     events = []
     if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
+        # errors="replace": file ghi dở (vd đĩa đầy) có byte hỏng → bỏ dòng đó, không làm hỏng cả tool (chọn gói Claude
+        # đọc file này của lượt gần nhất; lỗi ở đây từng làm mọi lượt autofix chết ngay khi khởi động).
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 try:
                     events.append(json.loads(line))

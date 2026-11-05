@@ -10,6 +10,10 @@ Một ticket được dọn khi trên OpenProject nó đang giao cho người QA
   - các dòng inbox chỉ nói về ticket đó (giữ dòng MERGE DEV / DEPLOY 86 / BÁO CÁO NGÀY)
 Không đụng tới commit đã push, PR, OpenProject.
 
+Dọn nhẹ (mọi lượt đã xong quá PRUNE_AFTER giây, kể cả chưa chuyển QA): xoá thư mục tạo lại được trong worktree —
+node_modules cài riêng (lệnh setup), target / dist / .turbo… — CHỈ khi git bỏ qua (ignored) và không phải symlink.
+Giữ mã nguồn + commit (ship / follow-up / xem lại vẫn chạy được; lệnh setup tự chạy lại khi cần build).
+
     cleanup.py              # dọn
     cleanup.py --dry-run    # chỉ liệt kê
     cleanup.py --every 3600 # dọn nếu lần dọn trước đã quá 3600 giây (op-watch gọi định kỳ)
@@ -30,6 +34,9 @@ import envconf  # noqa: E402
 import op_autofix as af  # noqa: E402
 import op_watch  # noqa: E402
 
+PRUNE_AFTER = int(envconf.get("CLEANUP_PRUNE_AFTER") or 3600)
+PRUNE_NAMES = {"node_modules", "target", "dist", "build", ".turbo", ".next", ".nuxt", ".parcel-cache", ".vite",
+               "coverage", ".gradle", "__pycache__", ".pytest_cache", ".mypy_cache"}
 RUN_RX = re.compile(r"^((?:[A-Z][A-Z0-9]*)-\d+)-(?:qa-|review-|followup-|conflict-)?\d{4}-\d{4}[a-z]?$")
 KEEP_INBOX = ("**MERGE DEV**", "**DEPLOY 86", "**BÁO CÁO NGÀY**")
 
@@ -75,6 +82,133 @@ def busy(root, display_id):
             if time.time() - os.path.getmtime(d) < 3600:
                 return True
     return False
+
+
+def _ignored(repo_dir, rel):
+    return subprocess.run(["git", "-C", repo_dir, "check-ignore", "-q", rel + "/"], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def _heavy_dirs(repo_dir):
+    """Thư mục tạo lại được trong worktree (theo PRUNE_NAMES), git bỏ qua, không phải symlink; không đi vào bên trong."""
+    out = []
+    for dp, dns, _ in os.walk(repo_dir):
+        if os.path.basename(dp) == ".git":
+            dns[:] = []
+            continue
+        keep = []
+        for d in dns:
+            p = os.path.join(dp, d)
+            if os.path.islink(p) or d == ".git":
+                continue
+            if d in PRUNE_NAMES and _ignored(repo_dir, os.path.relpath(p, repo_dir)):
+                out.append(p)
+            else:
+                keep.append(d)
+        dns[:] = keep
+    return out
+
+
+DELIVERED_RX = re.compile(r"đã push|chuyển Resolved|UNREVIEWED|đã comment", re.I)
+
+
+def _status(root, display_id):
+    try:
+        with open(os.path.join(root, ".status", display_id + ".json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _untouched(repo_dir):
+    """Worktree không có commit nào ngoài remote và không có thay đổi chưa commit (repo này không bị sửa)."""
+    out = subprocess.run(["git", "-C", repo_dir, "rev-list", "--no-merges", "--max-count=1", "HEAD", "--not", "--remotes"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+    st = subprocess.run(["git", "-C", repo_dir, "status", "--porcelain", "--untracked-files=no"],
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+    return out.returncode == 0 and not out.stdout.strip() and st.returncode == 0 and not st.stdout.strip()
+
+
+def drop_trees(acfg, root, dry=False):
+    """Bỏ worktree không còn cần (lượt đã xong quá PRUNE_AFTER giây, ticket không chạy):
+    - lượt cũ đã có lượt mới hơn của cùng ticket thay thế, không còn commit chưa push → xoá hẳn (af.clean);
+    - lượt hiện tại đã giao xong (push / Resolved / UNREVIEWED…) → xoá worktree của repo không bị sửa gì.
+    Trả số byte thu hồi."""
+    import repos as R
+    freed, notes = 0, []
+    by_ticket = {}
+    for name in os.listdir(root):
+        m = RUN_RX.match(name)
+        if m and os.path.isdir(os.path.join(root, name)):
+            by_ticket.setdefault(m.group(1), []).append(name)
+    for display_id, runs in sorted(by_ticket.items()):
+        if busy(root, display_id):
+            continue
+        st = _status(root, display_id)
+        current = st.get("run_name") or ""
+        for name in runs:
+            rd = os.path.join(root, name)
+            if time.time() - os.path.getmtime(rd) < PRUNE_AFTER:
+                continue
+            older = current and name != current and os.path.isdir(os.path.join(root, current)) and \
+                os.path.getmtime(rd) <= os.path.getmtime(os.path.join(root, current))
+            if older and not unpushed(acfg, root, name):
+                size = du([rd])
+                notes.append("%s (lượt cũ) %.0f MB" % (name, size / 1e6))
+                freed += size
+                if not dry:
+                    af.clean(acfg, name)
+                continue
+            if name == current and st.get("state") == "done" and DELIVERED_RX.search(st.get("verdict") or ""):
+                for r, d in R.trees(acfg, rd):
+                    if os.path.isdir(d) and _untouched(d):
+                        size = du([d])
+                        notes.append("%s/%s (không sửa) %.0f MB" % (name, r["key"], size / 1e6))
+                        freed += size
+                        if not dry:
+                            subprocess.run(["git", "worktree", "remove", "--force", d], cwd=r["path"],
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            shutil.rmtree(d, ignore_errors=True)
+    if notes:
+        print("bỏ worktree không cần (%.1f GB)%s: %s" % (freed / 1e9, " — thử" if dry else "", ", ".join(notes[:40])))
+    return freed
+
+
+def prune(acfg, root, dry=False):
+    """Dọn nhẹ các lượt đã xong quá PRUNE_AFTER giây. Trả số byte thu hồi."""
+    import repos as R
+    freed, runs = 0, []
+    for name in sorted(os.listdir(root)):
+        m = RUN_RX.match(name)
+        rd = os.path.join(root, name)
+        if not m or not os.path.isdir(rd) or os.path.exists(os.path.join(rd, ".pruned")):
+            continue
+        if time.time() - os.path.getmtime(rd) < PRUNE_AFTER or busy(root, m.group(1)):
+            continue
+        newest = max([os.path.getmtime(os.path.join(rd, f)) for f in os.listdir(rd)] + [os.path.getmtime(rd)])
+        if time.time() - newest < PRUNE_AFTER:
+            continue
+        heavy = []
+        for r, d in R.trees(acfg, rd):
+            if os.path.isdir(d):
+                heavy += _heavy_dirs(d)
+        size = du(heavy) if heavy else 0
+        if heavy:
+            runs.append("%s %.0f MB" % (name, size / 1e6))
+        if not dry:
+            for p in heavy:
+                shutil.rmtree(p, ignore_errors=True)
+            for r, d in R.trees(acfg, rd):  # setup phải chạy lại khi lượt này cần build (ship / follow-up)
+                gd = subprocess.run(["git", "-C", d, "rev-parse", "--git-dir"], stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, universal_newlines=True).stdout.strip() if os.path.isdir(d) else ""
+                mark = os.path.join(d, gd, "op-setup-done") if gd else ""
+                if mark and os.path.exists(mark):
+                    os.remove(mark)
+            open(os.path.join(rd, ".pruned"), "w").close()
+        freed += size
+    if runs:
+        print("dọn nhẹ %d lượt (%.1f GB)%s: %s" % (len(runs), freed / 1e9, " — thử" if dry else "", ", ".join(runs[:30])))
+    return freed
 
 
 def unpushed(acfg, root, run_name):
@@ -170,6 +304,9 @@ def run(dry=False, only=None):
         sys.exit("Chưa cấu hình qa_user_id (deploy.json / QA_USER_ID) — không biết ai là người QA")
     root = os.path.expanduser(acfg["root"])
     report_dir = os.path.expanduser(acfg.get("report_dir") or "")
+    pruned = drop_trees(acfg, root, dry) + prune(acfg, root, dry)
+    if pruned > 200e6 and not dry:
+        af.inbox(cfg, "**DỌN DẸP** dọn nhẹ worktree đã xong: thu hồi %.1f GB (node_modules / target / dist…)" % (pruned / 1e9))
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
 
     done, freed = [], 0

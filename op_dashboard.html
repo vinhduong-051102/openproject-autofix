@@ -282,6 +282,18 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 #tgModal .modal-head { flex: 0 0 auto; }
 #tgmBody { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 6px; margin-right: -6px; }
 @media (max-width: 960px) { #wpModal .modal-box { width: 100%; } }
+#splitModal { overflow: hidden; align-items: center; padding: 3vh 16px; overscroll-behavior: contain; z-index: 25; }
+#splitModal .modal-box { max-height: 94vh; display: flex; flex-direction: column; overflow: hidden; width: min(1000px, 100%); }
+#splitModal .modal-head, #spFoot { flex: 0 0 auto; }
+#spBody { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 6px; margin-right: -6px; }
+.sp-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 8px 0; background: var(--panel-2); }
+.sp-item.off { opacity: .5; }
+.sp-item .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sp-item .row input[type=text] { flex: 1 1 360px; }
+.sp-item select { width: auto; }
+.sp-item details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+.sp-item textarea { margin-top: 6px; }
+#spFoot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 8px; }
 .wp-head { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; }
 .wp-head h3 { margin: 0; font-size: 17px; line-height: 1.35; overflow-wrap: anywhere; }
 .wp-head .id a.ext { font: 400 12px system-ui, sans-serif; color: var(--accent); text-decoration: none; }
@@ -735,6 +747,13 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
       <div class="tm-actions"><button class="primary" id="tmCreate">Tạo task trên OpenProject (New)</button>
         <button id="tmBack">Soạn lại</button><span class="muted" id="tmStatus2"></span></div>
     </div>
+  </div>
+</div>
+<div class="modal" id="splitModal" hidden role="dialog" aria-modal="true" aria-labelledby="spTitle">
+  <div class="modal-box">
+    <div class="modal-head"><h3 id="spTitle">Tách việc</h3><button class="link" id="spClose" aria-label="Đóng">✕</button></div>
+    <div id="spBody"></div>
+    <div id="spFoot"></div>
   </div>
 </div>
 <div class="modal" id="tgModal" hidden role="dialog" aria-modal="true" aria-labelledby="tgmTitle">
@@ -1703,8 +1722,10 @@ async function openWP(id, opts) {
   const chatScroll = opts && opts.keepScroll != null ? $("wpChatScroll").scrollTop : null;
   $("wpHead").innerHTML = `
     <div class="wp-head"><div><div class="id">${esc(w.display_id)} <a class="ext" href="${esc(w.url)}" target="_blank" rel="noopener" title="Cần vào được op.cytech.ai">mở trên OpenProject ↗</a>
-      <button class="link" data-wpjump>💬 ${nComments} bình luận · tới mới nhất ↓</button></div>
-      <h3>${esc(w.subject)}</h3></div>${close}</div>`;
+      <button class="link" data-wpjump>💬 ${nComments} bình luận · tới mới nhất ↓</button>
+</div>
+      <h3>${esc(w.subject)}</h3></div><div style="display:flex;gap:8px;align-items:flex-start;flex:0 0 auto">
+      <button class="primary" id="wpSplit" title="AI đọc ticket + file đính kèm, đề xuất các việc con để tạo trên OpenProject">✂ Tách việc con</button>${close}</div></div>`;
   $("wpBody").innerHTML = `
     <div class="wp-meta">${meta.map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join("")}</div>
     <div class="wp-sec">Mô tả</div>
@@ -1726,6 +1747,7 @@ async function openWP(id, opts) {
   $("wpSend").onclick = () => sendComment(w.id, draftKey);
   document.querySelector("[data-wpjump]").onclick = () => wpScrollEnd();
   $("wpStatusBtn").onclick = () => wpStatusPicker(w);
+  $("wpSplit").onclick = () => openSplit(w.display_id, w.subject);
   if (opts && "focusAct" in opts) {
     const el = (opts.focusAct != null && $("wpa-" + opts.focusAct)) || [...document.querySelectorAll("#wpChat .wp-msg.mine")].pop();
     if (el) { el.scrollIntoView({block: "center"}); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1800); }
@@ -1797,11 +1819,101 @@ function bindWP() {
     e.preventDefault(); const z = $("imgZoom"); z.querySelector("img").src = el.dataset.zoom || el.src; z.hidden = false;
   });
 }
+
+// ---- Tách việc lớn → việc con (task_split.py) ----
+const SP = {ticket: null, id: null, st: null, timer: null, edits: null};
+function closeSplit() { clearTimeout(SP.timer); $("splitModal").hidden = true; if ($("wpModal").hidden) document.documentElement.classList.remove("modal-open"); }
+$("spClose").onclick = closeSplit;
+$("splitModal").onclick = (e) => { if (e.target === $("splitModal")) closeSplit(); };
+async function openSplit(ticket, subject) {
+  SP.ticket = ticket; SP.subject = subject; SP.edits = null;
+  $("spTitle").textContent = `Tách việc ${ticket}`;
+  $("splitModal").hidden = false; document.documentElement.classList.add("modal-open");
+  $("spBody").innerHTML = '<div class="empty">Đang tải…</div>'; $("spFoot").innerHTML = "";
+  try { const r = await tgFetch(`/api/tasksplit?ticket=${encodeURIComponent(ticket)}`); SP.st = r.split; SP.id = r.split && r.split.id; }
+  catch (e) { SP.st = null; }
+  renderSplit();
+}
+function spStart(hint) {
+  return post({action: "task_split", ticket: SP.ticket, hint}).then((r) => { if (r) { SP.id = r.id; SP.st = {state: "running"}; SP.edits = null; renderSplit(); } });
+}
+async function spPoll() {
+  clearTimeout(SP.timer);
+  if ($("splitModal").hidden || !SP.id) return;
+  try { SP.st = (await tgFetch(`/api/tasksplit?id=${encodeURIComponent(SP.id)}`)).split; } catch (e) {}
+  if (SP.st && SP.st.state === "running") { SP.timer = setTimeout(spPoll, 4000); return; }
+  renderSplit();
+}
+function spSync() {
+  if (!SP.edits) return;
+  document.querySelectorAll("#spBody [data-si]").forEach((el) => { const t = SP.edits[+el.dataset.si], k = el.dataset.sk;
+    t[k] = el.type === "checkbox" ? el.checked : el.value; });
+}
+function renderSplit() {
+  const st = SP.st;
+  const hintBox = (val) => `<label class="tm-label" for="spHint">Ghi chú khi tách <span class="muted">— tuỳ chọn: chia theo FE/BE, gộp lỗi nào, bỏ phần nào…</span></label>
+    <textarea id="spHint" rows="3">${esc(val || "")}</textarea>`;
+  if (!st) {
+    $("spBody").innerHTML = `<p>AI đọc <b>${esc(SP.ticket)}</b> — mô tả, lịch sử, ảnh, nội dung file đính kèm (cả zip / xlsx / docx) và mã nguồn (chỉ đọc) — rồi đề xuất các việc con. Bạn xem, sửa, bỏ chọn rồi mới tạo trên OpenProject.</p>${hintBox("")}`;
+    $("spFoot").innerHTML = `<button class="primary" id="spGo">🤖 AI đề xuất việc con</button>`;
+    $("spGo").onclick = () => spStart($("spHint").value); return;
+  }
+  if (st.state === "running") {
+    $("spBody").innerHTML = `<div class="empty">⏳ AI đang đọc ticket và file đính kèm để tách việc… (thường 2–6 phút, đóng popup vẫn chạy tiếp)</div>`;
+    $("spFoot").innerHTML = ""; SP.timer = setTimeout(spPoll, 4000); return;
+  }
+  if (st.state === "error") {
+    $("spBody").innerHTML = `<div class="cfg-msg">❌ Lỗi: ${esc(st.error || "?")}</div>${hintBox(st.hint)}`;
+    $("spFoot").innerHTML = `<button class="primary" id="spGo">Thử lại</button>`;
+    $("spGo").onclick = () => spStart($("spHint").value); return;
+  }
+  const created = st.created || {};
+  if (!SP.edits) SP.edits = (st.tasks || []).map((t, i) => ({...t, idx: i, on: !created[i]}));
+  const nOn = SP.edits.filter((t, i) => t.on && !created[i]).length;
+  const opt = (list, v) => list.map((x) => `<option ${x === v ? "selected" : ""}>${x}</option>`).join("");
+  $("spBody").innerHTML = `
+    ${st.summary ? `<div class="cfg-msg"><b>🤖 ${esc(st.summary)}</b></div>` : ""}
+    ${st.notes ? `<div class="cfg-msg muted">AI lưu ý: ${esc(st.notes)}</div>` : ""}
+    ${Object.keys(created).length ? `<div class="cfg-msg">Đã tạo: ${Object.values(created).map((c) => `<a href="#wp-${c.wp_id}">${esc(c.display_id)}</a>`).join(", ")}</div>` : ""}
+    ${(st.errors || []).length ? `<div class="cfg-msg">❌ ${esc(st.errors.join("; "))}</div>` : ""}
+    <div class="row" style="display:flex;gap:10px;align-items:center;margin:6px 0"><b>${SP.edits.length} việc con đề xuất</b>
+      <button class="link" id="spAll">chọn hết</button><button class="link" id="spNone">bỏ hết</button></div>
+    ${SP.edits.map((t, i) => created[i]
+      ? `<div class="sp-item off"><div class="row">✅ <a href="#wp-${created[i].wp_id}">${esc(created[i].display_id)}</a> ${esc(t.subject)}</div></div>`
+      : `<div class="sp-item${t.on ? "" : " off"}"><div class="row">
+        <input type="checkbox" data-si="${i}" data-sk="on" ${t.on ? "checked" : ""} aria-label="Chọn việc ${i + 1}" style="width:auto">
+        <span class="muted">${i + 1}.</span>
+        <input type="text" data-si="${i}" data-sk="subject" value="${esc(t.subject)}" aria-label="Tiêu đề việc ${i + 1}">
+        <select data-si="${i}" data-sk="type" aria-label="Loại">${opt(["Bug", "Task"], t.type || "Bug")}</select>
+        <select data-si="${i}" data-sk="priority" aria-label="Ưu tiên">${opt(["Immediate", "High", "Normal", "Low"], t.priority || "Normal")}</select>
+        ${t.ref ? `<span class="badge">${esc(t.ref)}</span>` : ""}</div>
+        <details><summary>Mô tả (${(t.description || "").length} ký tự) — bấm để xem / sửa</summary>
+          <textarea class="mono" rows="14" data-si="${i}" data-sk="description">${esc(t.description || "")}</textarea></details></div>`).join("")}
+    <details style="margin-top:10px"><summary class="muted">Tách lại với ghi chú khác…</summary>${hintBox(st.hint)}
+      <div class="tm-row"><button id="spRedo">🤖 Tách lại</button></div></details>`;
+  $("spFoot").innerHTML = `<label>Giao cho <select id="spAssignee"><option value="me">mình (autofix sẽ tự nhận việc New)</option><option value="none">chưa giao</option></select></label>
+    <button class="primary" id="spCreate" ${nOn ? "" : "disabled"}>Tạo ${nOn} việc con trên OpenProject</button>
+    <span class="muted">task cha = ${esc(SP.ticket)} · trạng thái New</span>`;
+  document.querySelectorAll("#spBody [data-si]").forEach((el) => { el.onchange = () => { spSync(); if (el.dataset.sk === "on") renderSplit(); }; });
+  $("spAll").onclick = () => { spSync(); SP.edits.forEach((t) => { t.on = true; }); renderSplit(); };
+  $("spNone").onclick = () => { spSync(); SP.edits.forEach((t) => { t.on = false; }); renderSplit(); };
+  $("spRedo").onclick = () => confirm("Tách lại? Các sửa đổi chưa tạo sẽ mất.") && spStart($("spHint").value);
+  $("spCreate").onclick = async () => {
+    spSync();
+    const pick = SP.edits.filter((t, i) => t.on && !created[i]);
+    const who = $("spAssignee").value;
+    if (!confirm(`Tạo ${pick.length} việc con trên OpenProject (task cha ${SP.ticket})?${who === "me" ? "\nGiao cho mình: autofix sẽ tự nhận và làm các việc này." : ""}`)) return;
+    const r = await post({action: "task_split_create", id: SP.id, tasks: pick, assignee: who});
+    if (r) { toast(r.message); SP.st = (await tgFetch(`/api/tasksplit?id=${encodeURIComponent(SP.id)}`)).split;
+      const keep = SP.edits; SP.edits = null; renderSplit(); SP.edits.forEach((t, i) => { if (keep[i]) Object.assign(t, keep[i], {on: false}); }); renderSplit(); }
+  };
+}
 function closeWP() { wpReq++; WP_CUR = null; $("wpModal").hidden = true; document.documentElement.classList.remove("modal-open"); if (/^#wp-/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search); }
 $("wpModal").onclick = (e) => { if (e.target === $("wpModal")) closeWP(); };
 $("imgZoom").onclick = () => { $("imgZoom").hidden = true; };
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
+  if (!$("splitModal").hidden) { closeSplit(); return; }
   if (!$("imgZoom").hidden) $("imgZoom").hidden = true; else if (!$("wpModal").hidden) closeWP();
 });
 document.addEventListener("click", (e) => {
