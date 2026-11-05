@@ -1371,6 +1371,34 @@ def load_pending():
         return []
 
 
+QA_TOOL_RETRY_MAX = 3  # lỗi công cụ QA (Gemini treo / không trả kết quả) trên cùng một bản build: thử lại tối đa
+
+
+def tool_errors(display_id, build, add=False):
+    """Số lần QA lỗi công cụ của ticket trên bản build (add=True: cộng thêm 1). Bản build khác thì đếm lại từ 0."""
+    path = os.path.join(envconf.autofix_root(), "qa-tool-errors.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    cur = data.get(display_id) or {}
+    n = cur.get("n", 0) if cur.get("build") == build else 0
+    if add:
+        n += 1
+        data[display_id] = {"build": build, "n": n, "at": datetime.now().isoformat(timespec="seconds")}
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(path + ".tmp", path)
+    return n
+
+
+def _merged_pending(waiting, done, remaining, retry):
+    """Hàng chờ mới = (file hiện tại ∪ hàng chờ lúc bắt đầu) − đã QA xong + còn lại + cần thử lại. Đọc lại file thay vì
+    ghi đè bằng bản đọc lúc bắt đầu: lượt QA khác (nút bấm / lượt kiểm tra) có thể đã thêm ticket trong lúc chạy."""
+    return (set(load_pending()) | set(waiting)) - set(done) | set(remaining) | set(retry)
+
+
 def save_pending(tickets, reason=""):
     os.makedirs(os.path.dirname(PENDING), exist_ok=True)
     with open(PENDING, "w", encoding="utf-8") as f:
@@ -1470,6 +1498,16 @@ def handle_fail(api, acfg, dcfg, wp, display_id, qa_path, qa_text, commits=()):
 
 
 def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None):
+    """Bọc _qa_ticket: ghi thời gian QA trên server lên ticket (Testing)."""
+    t0 = time.time()
+    verdict, path = _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard)
+    if verdict:  # "" = không phải ticket của mình / không ở trạng thái QA → không ghi
+        af.log_time(api, dict(af.AUTOFIX_DEFAULTS, **acfg), display_id, time.time() - t0, "test",
+                    "[QA tự động] Gemini QA trên server test (%s) — %s" % (deployed, verdict[:120]))
+    return verdict, path
+
+
+def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None):
     """QA một ticket trên server. Trả (kết luận, đường dẫn qa.md)."""
     wp = api.get("/api/v3/work_packages/%s" % display_id)
     assignee = (wp["_links"].get("assignee") or {}).get("href", "")
@@ -1657,21 +1695,61 @@ def review_watch():
                                                    ).returncode == 0:
         return
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
-    ids = [w.get("displayId") for w in api.my_work_packages(cfg["project"],
-                                                             [str(x) for x in dcfg["qa_review_status_ids"]])]
+    review_wps = api.my_work_packages(cfg["project"], [str(x) for x in dcfg["qa_review_status_ids"]])
+    ids = [w.get("displayId") for w in review_wps]
+    queued = load_pending()  # hàng chờ QA (vd lỗi công cụ QA lượt trước) — QA lại, không đợi đợt deploy sau
+    ids = sorted(set(ids) | set(queued))
     if not ids or not wait_up(dcfg, None, minutes=0.3, revive=False):
         return
     fp = fingerprint(dcfg)
     if not fp.get("fe"):
         return
     build = "%s|%s" % (fp.get("fe"), fp.get("be"))
-    cands = sorted(t for t in ids if t and (qa_history(t) or {}).get("build") != build)
+    root_status = os.path.join(root, ".status")
+    review = set()
+    for w in review_wps:
+        did = w.get("displayId")
+        if not did or _autofix_busy(root_status, did):
+            continue  # autofix đang sửa ticket này (vd sau QA không đạt) — QA khi xong
+        last = qa_history(did) or {}
+        if last.get("build") != build:
+            review.add(did)  # chưa QA trên bản này
+        elif entered_status_after(api, w, last.get("at")):
+            review.add(did)  # chuyển sang Review SAU lần QA trước (vd mình thêm hướng dẫn rồi mở lại)
+    cands = sorted(review | {t for t in queued if (qa_history(t) or {}).get("build") != build
+                             and tool_errors(t, build) < QA_TOOL_RETRY_MAX})
     if cands:
-        log("ticket Review chưa QA trên bản đang chạy: %s" % ", ".join(cands))
-        run_all(only=cands, auto_only=True)
+        log("ticket Review / hàng chờ cần QA trên bản đang chạy: %s" % ", ".join(cands))
+        run_all(only=cands, auto_only=True, review=review)
 
 
-def run_all(dry_run=False, only=None, auto_only=False, force=False):
+def _autofix_busy(status_dir, display_id):
+    try:
+        with open(os.path.join(status_dir, display_id + ".json"), encoding="utf-8") as f:
+            st = json.load(f)
+        return st.get("state") in af.ACTIVE_STATES and af.status_alive(st)  # trạng thái cũ của tiến trình đã chết thì bỏ qua
+    except (OSError, ValueError):
+        return False
+
+
+def entered_status_after(api, wp, at_local):
+    """Ticket chuyển sang trạng thái hiện tại SAU thời điểm at_local (ISO giờ máy, lúc QA lần trước)?"""
+    if not at_local:
+        return True
+    try:
+        since = datetime.fromisoformat(at_local).astimezone()
+    except ValueError:
+        return False
+    title = ((wp.get("_links") or {}).get("status") or {}).get("title") or ""
+    for act in reversed(api.activities(wp["id"])):
+        for d in act.get("details") or []:
+            if re.search(r"Status changed from .+ to %s\s*$" % re.escape(title), d.get("raw") or ""):
+                when = datetime.fromisoformat(act["createdAt"].replace("Z", "+00:00"))
+                return when > since
+    return False
+
+
+def run_all(dry_run=False, only=None, auto_only=False, force=False, review=None):
     cfg, acfg, dcfg = load()
     root = os.path.expanduser(acfg["root"])
     os.makedirs(root, exist_ok=True)
@@ -1751,17 +1829,18 @@ def run_all(dry_run=False, only=None, auto_only=False, force=False):
     open(QA_ACTIVE, "w").close()
     try:
         _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
-                 waiting, remaining, done, auto=auto, force=set(only or []) if force else set())
+                 waiting, remaining, done, auto=auto, force=set(only or []) if force else set(), review=set(review or []))
     finally:
         if os.path.exists(QA_ACTIVE):
             os.remove(QA_ACTIVE)
 
 
 def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
-             waiting, remaining, done, auto=(), force=()):
+             waiting, remaining, done, auto=(), force=(), review=()):
     """QA các ticket, tối đa qa_parallel ticket cùng lúc (Gemini); server đổi giữa chừng thì dừng tất cả."""
     mu = threading.Lock()
     stop = {"msg": None}
+    retry = set()  # lỗi công cụ QA → giữ hàng chờ cho lượt kiểm tra sau
 
     def one(display_id):
         if stop["msg"]:
@@ -1779,6 +1858,17 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             # QA tay từ trang theo dõi: bỏ điều kiện commit / bản đang chạy có bản sửa (vd ticket không cần sửa code).
             log("%s: QA theo yêu cầu (bỏ qua điều kiện commit: FE %d, BE %d commit)"
                 % (display_id, len(fe_hashes), len(be_hashes)))
+        elif display_id in review:
+            # Ticket vừa được chuyển sang Review (sau lần QA trước, có thể kèm hướng dẫn mới): QA lại kể cả cùng bản
+            # build. Không có commit sửa → QA hành vi hiện tại (như bấm QA trên server); có commit mà bản đang chạy
+            # chưa có → đợi deploy.
+            if (fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is False) or \
+                    (be_hashes and be_contains(acfg, baseline["be"], be_hashes) is False):
+                log("%s: vào Review nhưng bản đang chạy chưa có bản sửa — đợi deploy" % display_id)
+                with mu:
+                    remaining.remove(display_id)
+                return
+            log("%s: vừa chuyển Review — QA lại (FE %d, BE %d commit)" % (display_id, len(fe_hashes), len(be_hashes)))
         elif display_id in auto:
             # Ticket Resolved lấy từ OpenProject: chỉ QA khi chắc bản đang chạy có bản sửa, và chưa QA trên bản này.
             def drop(why):
@@ -1811,6 +1901,18 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             log("%s: %s" % (display_id, verdict or "bỏ qua (không phải của mình / không ở Resolved)"))
             if verdict and QA_TOOL_ERROR not in verdict:
                 qa_history(display_id, build, verdict)
+            elif verdict:
+                # Lỗi công cụ QA: giữ trong hàng chờ để lượt kiểm tra 10 phút (review_watch) QA lại, tối đa
+                # QA_TOOL_RETRY_MAX lần trên bản build này (trước đây ticket rời hàng chờ, phải đợi đợt deploy sau).
+                n = tool_errors(display_id, build, add=True)
+                if n < QA_TOOL_RETRY_MAX:
+                    with mu:
+                        retry.add(display_id)
+                    log("%s: lỗi công cụ QA lần %d/%d — giữ hàng chờ, QA lại lượt kiểm tra sau"
+                        % (display_id, n, QA_TOOL_RETRY_MAX))
+                else:
+                    af.inbox(cfg, "**QA SERVER LỖI CÔNG CỤ** %s — %d lần trên bản %s, ngừng thử (QA lại ở đợt deploy sau"
+                                  " hoặc bấm QA trên server)" % (display_id, n, build))
         except ServerChanged as ex:
             with mu:
                 if not stop["msg"]:
@@ -1825,7 +1927,7 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         with mu:
             remaining.remove(display_id)
             done.add(display_id)
-            save_pending(set(waiting) - done | set(remaining), "đang QA")
+            save_pending(_merged_pending(waiting, done, remaining, retry), "đang QA")
 
     # Số ticket QA cùng lúc đọc lại từ cấu hình mỗi vài giây: đổi trên trang theo dõi thì áp dụng ngay cho các ticket
     # còn đang xếp hàng trong lượt này (ticket đang test vẫn chạy tiếp).
@@ -1856,11 +1958,11 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         msg = "server 86 thay đổi trong lúc QA %s — tạm dừng, %d ticket vào hàng chờ: %s" % (
             stop["msg"], len(remaining), ", ".join(remaining))
         log(msg)
-        save_pending(set(waiting) - done | set(remaining), stop["msg"])
+        save_pending(_merged_pending(waiting, done, remaining, retry), stop["msg"])
         af.inbox(cfg, "**QA SERVER TẠM DỪNG** " + msg)
         af.notify("[QA SERVER] tạm dừng", "Server 86 vừa bị cập nhật / restart — QA tiếp ở lần chạy sau")
         return
-    save_pending(set(waiting) - done | set(remaining), "")
+    save_pending(_merged_pending(waiting, done, remaining, retry), "lỗi công cụ QA — thử lại" if retry else "")
 
 def print_rollout_plan(parts, strategy=None, destructive=False):
     """--rollout-plan: in lệnh sẽ chạy (dry-run, không ssh). Mật khẩu không in."""

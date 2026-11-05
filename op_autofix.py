@@ -73,6 +73,16 @@ AUTOFIX_DEFAULTS = {
     # (95 = Resolved). Claude trong lượt chạy vẫn không được push; chỉ tool làm sau khi tự kiểm tra lại.
     "auto_ship": True,
     "resolved_status_id": 95,
+    # Trường tuỳ chỉnh (kiểu User) trên ticket ghi người làm: autofix nhận ticket thì điền mình vào (trống mới điền,
+    # đã có dev khác thì giữ nguyên trừ khi dev_field_overwrite). Để trống tên trường = tắt.
+    "dev_field": "Dev",
+    "dev_field_overwrite": False,
+    # Ghi giờ làm (Spent time) lên ticket: thời gian Claude sửa → Development, kiểm tra + Gemini test lại + QA server →
+    # Testing (tên activity trên OpenProject). set_dates: điền Start date / Finish date nếu đang trống.
+    "log_time": True,
+    "time_activity_dev": "Development",
+    "time_activity_test": "Testing",
+    "set_dates": True,
     # Gemini (Antigravity CLI `agy`, chế độ plan = chỉ đọc) kiểm tra lại bản sửa sau khi build/test qua, trước khi push.
     # KHÔNG ĐẠT → không push (gemini_block_on_fail). Gemini lỗi / hết hạn mức → vẫn push, ghi chú trong báo cáo.
     "gemini_enabled": True,
@@ -445,6 +455,105 @@ def review_decider(report_text):
     why = re.sub(r"^.*NGƯỜI QUYẾT:\s*(TESTER|DEV)\W*", "", sec, count=1, flags=re.S).strip() if sec else ""
     question = report_section(report_text, "Câu hỏi cho tester") if m.group(1) == "TESTER" else ""
     return m.group(1).lower(), why[:500], question[:2000]
+
+
+_SCHEMA_KEYS = {}
+_ME = {}
+
+
+def dev_field_key(api, w, name):
+    """Khoá customFieldN của trường kiểu User tên `name` trong schema của ticket (cache theo schema)."""
+    href = (w.get("_links") or {}).get("schema", {}).get("href")
+    if not href:
+        return None
+    if href not in _SCHEMA_KEYS:
+        sch = api.get(href)
+        _SCHEMA_KEYS[href] = next((k for k, v in sch.items() if k.startswith("customField") and isinstance(v, dict)
+                                   and (v.get("name") or "").strip().lower() == name.strip().lower()
+                                   and v.get("type") == "User" and v.get("writable")), None)
+    return _SCHEMA_KEYS[href]
+
+
+def set_dev(api, acfg, wp_id):
+    """Điền mình vào trường Dev của ticket. Trả mô tả ngắn (không ném lỗi — chỉ là cập nhật phụ)."""
+    name = (acfg.get("dev_field") or "").strip()
+    if not name:
+        return "tắt"
+    try:
+        w = api.get("/api/v3/work_packages/%s" % wp_id)
+        key = dev_field_key(api, w, name)
+        if not key:
+            return "ticket không có trường %s" % name
+        if "id" not in _ME:
+            _ME["id"] = api.me()["id"]
+        me = "/api/v3/users/%s" % _ME["id"]
+        cur = ((w.get("_links") or {}).get(key) or {}).get("href")
+        body, notes = {"lockVersion": w["lockVersion"]}, []
+        today = datetime.now().strftime("%Y-%m-%d")
+        if acfg.get("set_dates", True) and not w.get("startDate") and not (w.get("dueDate") and w["dueDate"] < today):
+            body["startDate"] = today  # ngày bắt đầu làm (chỉ khi đang trống)
+            notes.append("Start date = hôm nay")
+        if cur == me:
+            notes.insert(0, "đã là mình")
+        elif cur and not acfg.get("dev_field_overwrite"):
+            notes.insert(0, "giữ dev hiện có (%s)" % (((w.get("_links") or {}).get(key) or {}).get("title") or cur))
+        else:
+            body["_links"] = {key: {"href": me}}
+            notes.insert(0, "đã điền %s = mình" % name)
+        if len(body) > 1:
+            op_write(api, "PATCH", "/api/v3/work_packages/%s" % w["id"], body)
+        return ", ".join(notes)
+    except Exception as ex:  # noqa: BLE001
+        return "lỗi: %s" % str(ex).splitlines()[0][:200]
+
+
+_TIME_ACTS = {}
+
+
+def time_activity(api, wp_id, name):
+    """href activity ghi giờ theo tên (lấy từ form time_entries — chỉ kiểm tra, không tạo bản ghi)."""
+    if not _TIME_ACTS:
+        form = op_write(api, "POST", "/api/v3/time_entries/form",
+                        {"_links": {"entity": {"href": "/api/v3/work_packages/%s" % wp_id}}})
+        vals = ((((form.get("_embedded") or {}).get("schema") or {}).get("activity") or {}).get("_embedded") or {}) \
+            .get("allowedValues") or []
+        _TIME_ACTS.update({(a.get("name") or "").lower(): a["_links"]["self"]["href"] for a in vals})
+    return _TIME_ACTS.get((name or "").lower())
+
+
+def log_time(api, acfg, wp_id, seconds, kind, comment):
+    """Ghi giờ làm lên ticket (Spent time). kind: dev | test. Không ném lỗi — chỉ là cập nhật phụ."""
+    if not acfg.get("log_time", True) or not wp_id or seconds is None or seconds < 30:
+        return ""
+    try:
+        w = api.get("/api/v3/work_packages/%s" % wp_id)
+        act = time_activity(api, w["id"], acfg.get("time_activity_dev" if kind == "dev" else "time_activity_test"))
+        minutes = max(1, int(round(seconds / 60.0)))
+        body = {"hours": "PT%dM" % minutes, "spentOn": datetime.now().strftime("%Y-%m-%d"),
+                "comment": {"raw": comment[:250]},
+                "_links": {"entity": {"href": "/api/v3/work_packages/%s" % w["id"]}}}
+        if act:
+            body["_links"]["activity"] = {"href": act}
+        op_write(api, "POST", "/api/v3/time_entries", body)
+        log("%s: ghi %d phút (%s) — %s" % (w.get("displayId") or wp_id, minutes, kind, comment[:80]))
+        return "%d phút" % minutes
+    except Exception as ex:  # noqa: BLE001
+        log("ghi giờ làm lỗi (%s): %s" % (wp_id, str(ex).splitlines()[0][:200]))
+        return ""
+
+
+def set_finish_date(api, acfg, wp_id):
+    """Bản sửa đã push + Resolved: điền Finish date = hôm nay nếu đang trống."""
+    if not acfg.get("set_dates", True):
+        return
+    try:
+        w = api.get("/api/v3/work_packages/%s" % wp_id)
+        today = datetime.now().strftime("%Y-%m-%d")
+        if w.get("dueDate") or (w.get("startDate") and w["startDate"] > today):
+            return
+        op_write(api, "PATCH", "/api/v3/work_packages/%s" % w["id"], {"lockVersion": w["lockVersion"], "dueDate": today})
+    except Exception as ex:  # noqa: BLE001
+        log("điền Finish date lỗi (%s): %s" % (wp_id, str(ex).splitlines()[0][:200]))
 
 
 def fetch_ticket(api, wp_id, out_dir):
@@ -1283,6 +1392,23 @@ def claude_followup(acfg, display_id, wp, run_dir, fe_dir, be_dir, gemini_verdic
 
 def deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, report_text, review_of=None,
             gemini_from=None):
+    """Bọc _deliver: ghi thời gian kiểm tra + Gemini test lại + push (Testing); push xong → Finish date."""
+    t0 = time.time()
+    shipped, msg = False, ""
+    try:
+        shipped, msg = _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, report_text,
+                                review_of, gemini_from)
+        return shipped, msg
+    finally:
+        log_time(api, acfg, wp_id, time.time() - t0, "test",
+                 "[Autofix] Kiểm tra build/test + Gemini test lại%s (%s) — %s" % (
+                     " (test lại)" if review_of else "", os.path.basename(run_dir), (msg or "")[:120]))
+        if shipped and "Resolved" in (msg or ""):
+            set_finish_date(api, acfg, wp_id)
+
+
+def _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, report_text, review_of=None,
+             gemini_from=None):
     """
     Sau khi có bản sửa: build/test → Gemini test → (chưa đạt) Claude xem lại từng ý, tự quyết → push + OpenProject.
     review_of=None: lượt sửa mới — commit sửa là commit trong worktree, push xong chuyển Resolved.
@@ -2449,6 +2575,8 @@ def main():
     parser.add_argument("--qa-report", metavar="QA_MD",
                         help="báo cáo QA trên server KHÔNG ĐẠT (deploy_qa): Claude kiểm chứng rồi sửa tiếp / giải thích")
     parser.add_argument("--profile", metavar="GÓI", help="chạy bằng gói Claude này (mặc định: gói đang chọn)")
+    parser.add_argument("--set-dev", nargs="*", metavar="TICKET",
+                        help="điền mình vào trường Dev (dev_field) cho các ticket (mặc định: mọi ticket autofix đã chạy)")
     parser.add_argument("--probe", nargs="?", const="", metavar="GÓI",
                         help="hỏi Claude một câu ngắn để cập nhật hạn mức của gói (mặc định: mọi gói đã đăng nhập)")
     parser.add_argument("--followup-pending", nargs="?", const="", metavar="TICKET",
@@ -2480,6 +2608,12 @@ def main():
         return
     if args.ship:
         ship_run(cfg, acfg, args.ship, args.profile)
+        return
+    if args.set_dev is not None:
+        api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+        ids = args.set_dev or sorted({s["display_id"] for s in load_statuses(root) if s.get("display_id")})
+        for t in ids:
+            print("%s: %s" % (t, set_dev(api, acfg, t)))
         return
     if args.probe is not None:
         os.makedirs(root, exist_ok=True)
@@ -2606,6 +2740,7 @@ def main():
                 prompt = f.read()
         else:
             log("%s: tải ticket, tạo worktree %s" % (display_id, run_dir))
+            log("%s: trường %s: %s" % (display_id, acfg.get("dev_field") or "Dev", set_dev(api, acfg, wp_id)))
             wp = fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))
             notes = [make_worktree(acfg["fe_repo"], acfg["fe_branch"], acfg["fe_upstream"], fe_dir, branch, acfg)]
             nm = os.path.join(acfg["fe_repo"], "node_modules")
@@ -2652,6 +2787,7 @@ def main():
             # Claude đã viết xong báo cáo trước khi bị ngắt: chỉ còn bước kiểm tra / push phía sau.
             log("%s: lượt bị ngắt đã có report.md — bỏ qua Claude, làm tiếp bước giao" % display_id)
             code = 0
+            dev_t0 = None
         else:
             log("%s: chạy Claude (giới hạn %s USD)%s" % (display_id, acfg["max_budget_usd"],
                                                        " — làm tiếp lượt bị ngắt" if resume_dir else ""))
@@ -2659,6 +2795,7 @@ def main():
                 "LÀM TIẾP" if resume_dir else "ĐANG CHẠY", display_id, wp.get("subject", ""), display_id))
             notify("[AUTOFIX %s] %s" % ("LÀM TIẾP" if resume_dir else "ĐANG CHẠY", display_id), wp.get("subject", ""))
             set_status(root, display_id, state="running")
+            dev_t0 = time.time()
             if resume_dir:
                 # Nhật ký phiên bị ngắt để riêng: hit_limit chỉ xét phiên mới (sự kiện hết hạn mức cũ không tính).
                 for name in ("claude.jsonl", "claude.err"):
@@ -2685,6 +2822,9 @@ def main():
             set_status(root, display_id, profile=nxt["name"])
             code = run_claude(acfg, prompt + RESUME_NOTE, run_dir, fe_dir, be_dir, append=True)
 
+        if dev_t0:
+            log_time(api, acfg, wp_id, time.time() - dev_t0, "dev",
+                     "[Autofix] Claude sửa (%s%s)" % (run_name, ", làm tiếp lượt bị ngắt" if resume_dir else ""))
         verdict = "KHÔNG CÓ BÁO CÁO (Claude thoát mã %s, xem claude.jsonl / claude.err)" % code
         report_text = ""
         if os.path.exists(report):
