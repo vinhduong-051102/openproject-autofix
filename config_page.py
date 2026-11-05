@@ -217,7 +217,11 @@ def repos_check(items):
             v = x.get(k)
             if v in (None, "", []):
                 continue
-            if k in ("build", "test", "link", "allow", "merge_check", "deploy_cmd", "setup"):
+            if k == "deploy_cmd":  # script: giữ nguyên dòng (thụt lề, dòng trống trong heredoc)
+                v = [str(s_).rstrip() for s_ in (v.splitlines() if isinstance(v, str) else v)]
+                while v and not v[-1]:
+                    v.pop()
+            elif k in ("build", "test", "link", "allow", "merge_check", "setup"):
                 v = [s.strip() for s in (v.splitlines() if isinstance(v, str) else v) if str(s).strip()]
             elif k == "merge":
                 v = bool(v)
@@ -531,7 +535,7 @@ Lệnh build đã khai báo: {build}
 {desc}
 
 ## Cách lệnh chạy
-Mỗi phần tử là một lệnh `bash -c`, chạy lần lượt trong worktree MỚI của origin/<nhánh deploy> (thư mục hiện tại = {{dir}},
+Các phần tử (mỗi phần tử một dòng) ghép thành MỘT script bash có `set -e`, chạy trong worktree MỚI của origin/<nhánh deploy> (thư mục hiện tại = {{dir}},
 chưa cài phụ thuộc trừ thư mục dùng chung: {link}); lệnh lỗi (mã ≠ 0) thì dừng và báo deploy lỗi. Dùng được {{dir}} {{ref}}
 {{sha}} (commit đang deploy) {{host}} {{user}} {{base}}. Đọc package.json / Dockerfile / docker-compose / Makefile / script
 deploy / README trong repo để dùng đúng lệnh build, thư mục output, tên image / service. Lệnh phải chạy không tương tác,

@@ -672,10 +672,11 @@ def deploy_custom(acfg, dcfg, repo, root, logf):
         sha = af.run(["git", "rev-parse", "HEAD"], cwd=work).strip()
         env = dict(af.build_env(acfg), DEPLOY_HOST=dcfg.get("host") or "", DEPLOY_USER=dcfg.get("user") or "",
                    DEPLOY_BASE=dcfg.get("base") or "", SSHPASS=dcfg.get("password") or "", DEPLOY_REF=ref, DEPLOY_SHA=sha)
-        for c in repo["deploy_cmd"]:
-            cmd = R.fill(c, repo, work).replace("{ref}", ref).replace("{sha}", sha).replace(
-                "{host}", dcfg.get("host") or "").replace("{user}", dcfg.get("user") or "").replace("{base}", dcfg.get("base") or "")
-            sh(["bash", "-c", cmd], cwd=work, logf=logf, env=env, timeout=5400)
+        # Cả ô "Lệnh deploy" là MỘT script bash (set -e: dòng lỗi thì dừng) — heredoc / lệnh nhiều dòng chạy đúng.
+        script = "set -e\n" + "\n".join(repo["deploy_cmd"])
+        script = R.fill(script, repo, work).replace("{ref}", ref).replace("{sha}", sha).replace(
+            "{host}", dcfg.get("host") or "").replace("{user}", dcfg.get("user") or "").replace("{base}", dcfg.get("base") or "")
+        sh(["bash", "-c", script], cwd=work, logf=logf, env=env, timeout=5400)
         url = repo.get("deploy_health")
         if url:
             end = time.time() + 60 * float(dcfg.get("wait_minutes", 10))

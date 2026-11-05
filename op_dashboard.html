@@ -2405,7 +2405,7 @@ const CFG_ADV = [["tech", "Công nghệ", "ghi trong prompt, vd Node.js"], ["des
   ["merge_check", "Build thử sau merge", "mỗi dòng một lệnh; trống = lệnh build", true], ["allow", "Quyền Bash thêm", "mỗi dòng một quy tắc, vd Bash(make *); trống = theo lệnh", true],
   ["ref_hint", "Gợi ý khi soạn task", "AI đọc mã repo này để làm gì"]];
 const CFG_DEPLOY_DESC = ["deploy_desc", "Mô tả deploy", "viết bằng lời, vd: build bằng npm run build, copy thư mục dist lên server test vào {base}/web rồi reload nginx; kiểm tra http://host:8080", true];
-const CFG_DEPLOY = [["deploy_cmd", "Lệnh deploy", "mỗi dòng 1 lệnh bash, chạy trong worktree nhánh deploy; {dir} {ref} {sha} {host} {user} {base}, biến $DEPLOY_HOST $SSHPASS…\nvd: npm ci && npm run build\nsshpass -e rsync -az dist/ {user}@{host}:{base}/web/", true],
+const CFG_DEPLOY = [["deploy_cmd", "Lệnh deploy", "cả ô là một script bash (set -e: dòng lỗi thì dừng, heredoc nhiều dòng được), chạy trong worktree nhánh deploy; {dir} {ref} {sha} {host} {user} {base}, biến $DEPLOY_HOST $SSHPASS…\nvd: npm ci && npm run build\nsshpass -e rsync -az dist/ {user}@{host}:{base}/web/", true],
   ["deploy_ref", "Nhánh deploy", "trống = nhánh chung"], ["deploy_health", "URL kiểm tra", "sau deploy đợi URL trả 2xx, trống = không kiểm tra"]];
 async function loadConfig() {
   try {
@@ -2440,7 +2440,7 @@ function renderCfgRepos(msg) {
       <div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap"><button class="primary" id="cfgRepoPick">📁 Thêm repo — chọn thư mục, AI điền</button><button id="cfgRepoAdd">+ Thêm thủ công</button><button id="cfgRepoCheck">Kiểm tra</button><button class="primary" id="cfgRepoSave">Lưu danh sách repo</button></div>
       <div class="muted cfg-msg">Đổi danh sách repo áp dụng cho lượt autofix / merge / deploy kế tiếp (không cần khởi động lại).</div>`;
   const sync = () => document.querySelectorAll("#cfgRepos [data-ri]").forEach((el) => { const x = list[+el.dataset.ri], k = el.dataset.rk;
-    x[k] = el.type === "checkbox" ? el.checked : k === "deploy_desc" ? el.value.trim() : el.tagName === "TEXTAREA" ? el.value.split("\n").map((v) => v.trim()).filter(Boolean) : el.value.trim(); });
+    x[k] = el.type === "checkbox" ? el.checked : k === "deploy_desc" ? el.value.trim() : k === "deploy_cmd" ? el.value.replace(/\s+$/, "").split("\n") : el.tagName === "TEXTAREA" ? el.value.split("\n").map((v) => v.trim()).filter(Boolean) : el.value.trim(); });
   document.querySelectorAll("#cfgRepos [data-ri]").forEach((el) => el.onchange = () => { sync(); if (["preset", "key", "deploy"].includes(el.dataset.rk)) renderCfgRepos(); });
   document.querySelectorAll("[data-rdel]").forEach((b) => b.onclick = () => { sync(); if (confirm("Bỏ repo này khỏi danh sách?")) { list.splice(+b.dataset.rdel, 1); renderCfgRepos(); } });
   document.querySelectorAll("[data-rmove]").forEach((b) => b.onclick = () => { sync(); const i = +b.dataset.rmove, j = i + +b.dataset.d; [list[i], list[j]] = [list[j], list[i]]; renderCfgRepos(); });
