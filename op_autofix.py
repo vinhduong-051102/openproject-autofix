@@ -137,6 +137,8 @@ PROMPT = """Bạn đang tự động sửa một bug OpenProject của dự án 
 ## Ticket
 {display_id} (#{wp_id}, trạng thái {status}, sự kiện {event}) — {subject}
 Toàn bộ mô tả + comment: {run_dir}/ticket/ticket.md ; ảnh đính kèm: {run_dir}/ticket/images/ (đọc bằng Read).
+Có mục "Thiết kế Figma" trong ticket.md thì xem ảnh frame ({run_dir}/ticket/figma/) và làm ĐÚNG thông số ghi kèm (kích thước,
+khoảng cách, màu, font) — dùng token / biến có sẵn của dự án gần nhất với giá trị đó, không hard-code nếu đã có token tương ứng.
 Đọc hết comment: ticket Reopened thì comment gần nhất của tester là yêu cầu cần làm.
 Nếu đã có comment **[Cần duyệt]** (autofix lần trước nêu các phương án) và SAU đó có comment của {assignee}
 (người được giao) chọn phương án / đưa hướng xử lý, thì đó là QUYẾT ĐỊNH ĐÃ DUYỆT: làm đúng theo quyết định đó, không
@@ -622,6 +624,17 @@ def fetch_ticket(api, wp_id, out_dir):
         lines += ["- " + d for d in details]
         if comment:
             lines += ["", localize(comment)]
+    # Link Figma trong mô tả / comment → tải ảnh + thông số frame (figma.py, cần FIGMA_TOKEN) để Claude sửa theo.
+    raw = "\n".join([(wp.get("description") or {}).get("raw") or ""] +
+                    [(a.get("comment") or {}).get("raw") or "" for a in acts])
+    try:
+        import figma
+        sec = figma.ticket_section(raw, os.path.join(out_dir, "figma"))
+        if sec:
+            lines.append(sec)
+            log("%s: đã đọc thiết kế Figma (%d link)" % (wp.get("displayId"), len(figma.find_links(raw))))
+    except Exception as ex:  # noqa: BLE001 — Figma lỗi không chặn lượt sửa
+        log("đọc Figma lỗi: %s" % ex)
     with open(os.path.join(out_dir, "ticket.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
