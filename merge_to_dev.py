@@ -3,11 +3,12 @@
 merge_to_dev: đưa nhánh cá nhân vào nhánh dev chung qua Pull Request trên Gitea (chạy hằng ngày lúc 12h bằng
 systemd timer op-merge.timer).
 
-Với mỗi repo (FE FE_BRANCH → FE_UPSTREAM, BE BE_BRANCH → BE_UPSTREAM; cấu hình trong .env):
+Với mỗi repo có "merge": true trong danh sách repo (repos.py; mặc định FE FE_BRANCH → FE_UPSTREAM, BE BE_BRANCH →
+BE_UPSTREAM):
   1. Nhánh của mình không có commit nào chưa vào nhánh chung → bỏ qua.
   2. Trong worktree tạm: merge nhánh chung vào nhánh của mình trước (để PR không xung đột). Xung đột ở
      db/master*.xml → giữ cả hai bên; xung đột khác → Claude gỡ (af.resolve_conflicts), không gỡ được → dừng, báo.
-  3. Build FE / compile BE trên kết quả merge. Lỗi → dừng, báo.
+  3. Build thử (lệnh merge_check của repo) trên kết quả merge. Lỗi → dừng, báo.
   4. Có merge mới ở bước 2 → push nhánh của mình. Tạo PR (hoặc dùng PR đang mở) rồi merge qua Gitea API.
 
 Gitea: GITEA_URL + GITEA_TOKEN trong .env, hoặc ~/.config/op-watch/gitea.json (chmod 600) {"url": "...", "token": "..."}.
@@ -39,11 +40,7 @@ def load_gitea():
     """gitea.json + GITEA_URL / GITEA_TOKEN (biến môi trường / .env thắng)."""
     return envconf.gitea_config()
 
-REPOS = [
-    # (nhãn, repo local, nhánh của mình, nhánh chung)
-    ("FE", "fe_repo", "fe_branch", "fe_upstream"),
-    ("BE", "be_repo", "be_branch", "be_upstream"),
-]
+import repos as R  # noqa: E402  danh sách repo (cấu hình động) — repo có "merge": true thì được merge
 
 
 def log(msg):
@@ -99,16 +96,15 @@ def merge_upstream(acfg, work, own, dev):
     return True
 
 def check_build(acfg, label, work, log_path):
-    if label == "FE":
-        cmd = ["npm", "run", "build"]
-    else:
-        cmd = ["mvn", "-q", "-o", "-f", os.path.join(work, acfg["be_subdir"], "pom.xml"), "compile", "-DskipTests"]
-    with open(log_path, "a", encoding="utf-8") as out:
-        out.write("\n$ %s\n" % " ".join(cmd))
-        out.flush()
-        code = af.run_build(cmd, work, out, acfg)
-    if code != 0:
-        raise RuntimeError("%s `%s` lỗi sau khi merge (xem %s)" % (label, " ".join(cmd[:3]), log_path))
+    """Build thử trên kết quả merge: lệnh merge_check của repo (mặc định = lệnh build)."""
+    repo = R.find(acfg, label)
+    for cmd in R.commands(repo, "merge_check", work) if repo else []:
+        with open(log_path, "a", encoding="utf-8") as out:
+            out.write("\n$ %s\n" % " ".join(cmd))
+            out.flush()
+            code = af.run_build(cmd, work, out, acfg)
+        if code != 0:
+            raise RuntimeError("%s `%s` lỗi sau khi merge (xem %s)" % (label, " ".join(cmd[:3]), log_path))
 
 
 def process(acfg, gitea, label, repo, own, dev, dry_run, log_path):
@@ -118,15 +114,15 @@ def process(acfg, gitea, label, repo, own, dev, dry_run, log_path):
                      cwd=repo).strip().splitlines()
     if not pending:
         return "%s: không có commit mới" % label
-    tickets = sorted(set(re.findall(r"\[(SOAR-\d+)\]", "\n".join(pending))))
+    tickets = sorted(set(re.findall(r"\[(%s)\]" % envconf.TICKET_RX, "\n".join(pending))))
     work = tempfile.mkdtemp(prefix="merge-%s-" % label.lower(), dir=os.path.expanduser(acfg["root"]))
     os.rmdir(work)
     af.run(["git", "worktree", "add", "-q", "--detach", work, "origin/" + own], cwd=repo)
     try:
-        if label == "FE":
-            nm = os.path.join(repo, "node_modules")
-            if os.path.isdir(nm):
-                os.symlink(nm, os.path.join(work, "node_modules"))
+        for name in (R.find(acfg, label) or {}).get("link") or []:
+            src = os.path.join(repo, name)
+            if os.path.isdir(src):
+                os.symlink(src, os.path.join(work, name))
         merged = merge_upstream(acfg, work, own, dev)
         check_build(acfg, label, work, log_path)
         if dry_run:
@@ -192,7 +188,7 @@ def skipped_today(root):
 def main():
     parser = argparse.ArgumentParser(description="Merge nhánh cá nhân vào nhánh dev chung qua PR Gitea.")
     parser.add_argument("--dry-run", action="store_true", help="merge + build thử, không push / không tạo PR")
-    parser.add_argument("--only", choices=["FE", "BE"], help="chỉ một repo")
+    parser.add_argument("--only", metavar="REPO", help="chỉ một repo (nhãn hoặc key, vd FE / be)")
     parser.add_argument("--no-deploy", action="store_true", help="không deploy + QA lên server 86 sau khi merge")
     args = parser.parse_args()
 
@@ -221,11 +217,12 @@ def main():
     log_path = os.path.join(os.path.expanduser(acfg["root"]),
                             "merge-dev-%s.log" % datetime.now().strftime("%m%d-%H%M"))
     results, failed = [], False
-    for label, repo_key, own_key, dev_key in REPOS:
-        if args.only and args.only != label:
+    for r in R.repos(acfg):
+        label = r["label"]
+        if not r["merge"] or (args.only and args.only not in (label, r["key"])):
             continue
         try:
-            line = process(acfg, gitea, label, acfg[repo_key], acfg[own_key], acfg[dev_key], args.dry_run, log_path)
+            line = process(acfg, gitea, label, r["path"], r["branch"], r["upstream"], args.dry_run, log_path)
         except Exception as ex:  # noqa: BLE001 — repo này lỗi vẫn chạy repo kia, báo đủ
             failed = True
             line = "%s: LỖI %s" % (label, str(ex).splitlines()[0][:300])

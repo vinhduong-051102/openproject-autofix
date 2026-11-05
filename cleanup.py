@@ -79,8 +79,9 @@ def busy(root, display_id):
 
 def unpushed(acfg, root, run_name):
     """Worktree / nhánh auto/<lượt> còn commit chưa nằm trên bất kỳ nhánh remote nào → không được xoá."""
-    for repo, sub in ((acfg["fe_repo"], "fe"), (acfg["be_repo"], "be")):
-        wt = os.path.join(root, run_name, sub)
+    import repos as R
+    for r in R.repos(acfg):
+        repo, wt = r["path"], os.path.join(root, run_name, r["key"])
         refs = []
         if os.path.isdir(wt):
             refs.append(("-C", wt, "HEAD"))

@@ -205,6 +205,18 @@ TOKEN_DIR = path("CLAUDE_TOKEN_DIR", os.path.join(CONFIG_DIR, "tokens"))
 STATE_PATH = path("OP_WATCH_STATE", "~/.local/state/op-watch/state.json")
 CACHE_DIR = path("OP_WATCH_CACHE_DIR", "~/.cache/op-watch")
 DASHBOARD_PORT = int(get("DASHBOARD_PORT", "8765"))
+# ---- Dự án (đổi để dùng tool cho dự án khác) ----------------------------------------------------------------------
+# Tiền tố mã ticket trên OpenProject (SOAR → SOAR-123), cũng là tag commit [SOAR-123] và tên thư mục lượt chạy.
+TICKET_PREFIX = (get("OP_TICKET_PREFIX", "SOAR") or "SOAR").strip()
+TICKET_RX = r"%s-\d+" % re.escape(TICKET_PREFIX)  # regex một mã ticket (không có nhóm)
+# Tên dự án dùng trong prompt; tên người được giao (trống = tên tài khoản API trên OpenProject).
+PROJECT_NAME = get("OP_PROJECT_NAME", TICKET_PREFIX)
+ASSIGNEE_NAME = get("OP_ASSIGNEE_NAME", "")
+# Mẫu tiêu đề ticket lỗi khi AI soạn task (theo quy ước của tester).
+TASK_TITLE_TEMPLATE = get("TASK_TITLE_TEMPLATE", "TCVN - <Phân hệ> - <Màn hình / chức năng> - Lỗi: <mô tả lỗi ngắn gọn, cụ thể>")
+# Gỡ xung đột tự động: file gộp dòng cả hai phía (danh sách include, file thông báo i18n…) — regex đường dẫn.
+UNION_INCLUDE_RX = get("AUTOFIX_UNION_INCLUDE", r"(^|/)db/master[\w-]*\.xml$")
+UNION_MERGE_RX = get("AUTOFIX_UNION_MERGE", r"(^|/)i18n/messages[\w-]*\.properties$")
 # IP nghe thêm ngoài 127.0.0.1 (vd IP Tailscale 100.x), cách nhau dấu phẩy. Trống = chỉ localhost.
 DASHBOARD_EXTRA_BIND = [h.strip() for h in get("DASHBOARD_EXTRA_BIND", "").split(",") if h.strip()]
 

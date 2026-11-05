@@ -35,7 +35,8 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import envconf  # noqa: E402  (nạp .env)
+import envconf  # noqa: E402
+import repos as R  # noqa: E402  danh sách repo (cấu hình động; mặc định FE + BE như trước)  (nạp .env)
 import op_watch  # noqa: E402  (dùng chung cấu hình + client OpenProject)
 
 # systemd có thể khởi động service trước khi PATH người dùng có ~/.local/bin (claude, agy): thêm vào đầu PATH.
@@ -55,6 +56,8 @@ AUTOFIX_DEFAULTS = {
     "be_branch": "develop-ss-%s" % getpass.getuser(),
     "be_upstream": "develop-ss",
     "be_subdir": "SOAR",
+    # Danh sách repo (xem repos.py). None = dựng FE + BE từ các khoá fe_* / be_* ở trên.
+    "repos": None,
     "max_budget_usd": 5,
     # Hạn mức 5 giờ của gói đã dùng quá mức này thì hoãn (không chạy Claude), để dành cho làm việc trực tiếp.
     "pause_above_utilization": 0.8,
@@ -129,30 +132,26 @@ DISALLOWED_TOOLS = [
     "WebFetch", "WebSearch",
 ]
 
-PROMPT = """Bạn đang tự động sửa một bug OpenProject của dự án SOAR, chạy nền không có người theo dõi.
+PROMPT = """Bạn đang tự động sửa một bug OpenProject của dự án {project_name}, chạy nền không có người theo dõi.
 
 ## Ticket
 {display_id} (#{wp_id}, trạng thái {status}, sự kiện {event}) — {subject}
 Toàn bộ mô tả + comment: {run_dir}/ticket/ticket.md ; ảnh đính kèm: {run_dir}/ticket/images/ (đọc bằng Read).
 Đọc hết comment: ticket Reopened thì comment gần nhất của tester là yêu cầu cần làm.
-Nếu đã có comment **[Cần duyệt]** (autofix lần trước nêu các phương án) và SAU đó có comment của Vinh Duong
+Nếu đã có comment **[Cần duyệt]** (autofix lần trước nêu các phương án) và SAU đó có comment của {assignee}
 (người được giao) chọn phương án / đưa hướng xử lý, thì đó là QUYẾT ĐỊNH ĐÃ DUYỆT: làm đúng theo quyết định đó, không
 hỏi lại, không kết luận "CẦN QUYẾT ĐỊNH" cho cùng vấn đề nữa (chỉ khi quyết định đó tự nó gây vấn đề mới).
 
 ## Code (đã sẵn sàng, đã merge code mới nhất của nhánh dev chung){merge_note}
-- FE (React/Vite/TS): {fe_dir} — nhánh {fe_auto}. Đọc {fe_dir}/AGENTS.md và docs/ui-v2/README.md nếu sửa giao diện.
-- BE (Spring Boot/Java): {be_dir} — nhánh {be_auto}; module chính ở {be_dir}/{be_subdir}.
-Chỉ sửa trong 2 thư mục này. Không tạo nhánh / worktree khác, không checkout, không fetch/pull/push.
+{code_repos}
+Chỉ sửa trong {n_repos} thư mục này. Không tạo nhánh / worktree khác, không checkout, không fetch/pull/push.
 
 ## Làm
 1. Tìm nguyên nhân gốc trong code (không đoán). Ticket nhắc tới API/màn hình nào thì tìm đúng chỗ đó.
-2. Sửa tối thiểu, đúng phạm vi ticket, theo phong cách code xung quanh (FE: chỉ dùng token --t-*, sửa primitive
-   dùng chung trước; BE: thêm/sửa unit test khi sửa logic).
-3. Kiểm tra: FE `npm run build` (+ `npx tsc --noEmit -p tsconfig.app.json` lọc theo file đã sửa, chỉ lỗi mới mới tính);
-   BE `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml test -Dtest='<Test liên quan>' -Dsurefire.failIfNoSpecifiedTests=false`
-   rồi `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml compile -DskipTests`.
-   KHÔNG dùng `cd … && …` (bị chặn): git luôn dùng `git -C {fe_dir} …` / `git -C {be_dir} …`, Maven dùng `-f`.
-   Thư mục làm việc hiện tại ĐÃ LÀ {fe_dir}: chạy FE đúng nguyên văn `npm run build` (không `--prefix`, không `cd`).
+2. Sửa tối thiểu, đúng phạm vi ticket, theo phong cách code xung quanh{repo_rules}.
+3. Kiểm tra: {repo_checks}.
+   KHÔNG dùng `cd … && …` (bị chặn): git luôn dùng {git_dirs}, Maven dùng `-f`.
+   {cwd_note}
    Một lệnh bị từ chối quyền KHÔNG có nghĩa là Bash bị cấm — đổi sang đúng dạng lệnh được phép ở trên rồi làm tiếp.
 {bash_rules}
    Vẫn không chạy được bước kiểm tra nào thì VẪN commit phần đã sửa (công cụ tự build + test lại trước khi push) và
@@ -185,7 +184,9 @@ Ghi {run_dir}/report.md bằng tiếng Việt:
   Cần quyết định / rủi ro;
 {decider_rules}
   `## Comment cho tester` — đoạn này được đăng nguyên văn lên ticket cho TESTER (không phải dev) đọc: tiếng Việt, ngắn,
-  nói theo màn hình / thao tác / kết quả nhìn thấy (đã sửa gì, test lại thế nào, lưu ý). KHÔNG tên file, class, hàm,
+  nói theo màn hình / thao tác / kết quả nhìn thấy. Dòng đầu bắt buộc `**Nguyên nhân lỗi:** …` (1–2 câu: vì sao bị lỗi,
+  nói theo hiện tượng — vd "hệ thống chưa kiểm tra quyền xem trước khi trả số liệu nên tài khoản thiếu quyền thấy số 0"),
+  sau đó đã sửa gì, test lại thế nào, lưu ý. KHÔNG tên file, class, hàm,
   biến, commit, stack trace hay giải thích code. API thì chỉ nêu endpoint + mã HTTP + thông báo trả về.
 """
 
@@ -240,15 +241,16 @@ Bản sửa trước của ticket đã deploy lên server test và QA tự độ
 """
 
 
-def write_rules(run_dir):
+def write_rules(run_dir, acfg=None):
     scope = "/" + os.path.abspath(run_dir) + "/**"
     base = os.path.abspath(run_dir)
-    # git của 2 worktree chạy bằng `git -C <worktree>` (lệnh dạng `cd … && …` không qua được kiểm tra quyền).
-    # Chỉ đúng 2 worktree của lượt chạy; push/fetch/checkout/branch/reset… vẫn bị chặn ở DISALLOWED_TOOLS.
+    keys = [r["key"] for r in R.repos(acfg or {})]
+    # git của các worktree chạy bằng `git -C <worktree>` (lệnh dạng `cd … && …` không qua được kiểm tra quyền).
+    # Chỉ đúng các worktree của lượt chạy; push/fetch/checkout/branch/reset… vẫn bị chặn ở DISALLOWED_TOOLS.
     read_git = ["Bash(git -C %s/%s %s*)" % (base, sub, cmd)
-                for sub in ("fe", "be") for cmd in ("log", "show", "diff", "status", "blame", "add", "commit", "grep")]
-    npm = ["Bash(npm --prefix %s/fe run %s*)" % (base, c) for c in ("build", "lint")]
-    return ["Edit(%s)" % scope, "Write(%s)" % scope] + read_git + npm
+                for sub in keys for cmd in ("log", "show", "diff", "status", "blame", "add", "commit", "grep")]
+    npm = ["Bash(npm --prefix %s/%s run %s*)" % (base, k, c) for k in keys for c in ("build", "lint")]
+    return ["Edit(%s)" % scope, "Write(%s)" % scope] + read_git + npm + R.allowed_bash(acfg or {})
 
 
 def log(msg):
@@ -282,6 +284,7 @@ def for_tester(text):
     text = re.sub(r"`?\b(?:com|org|net)\.[a-z]\w*(?:\.[a-z]\w*)+\.([A-Z]\w+)`?", r"`\1`", text)
     text = re.sub(r"`?\b[0-9a-f]{7,40}\b`?(?=[\s,.)]|$)", "", text)
     text = re.sub(r"\((?:dev-ss|develop-ss)[\w-]*\)", "", text)
+    text = re.sub(r"\(\s*[,;]?\s*\)", "", text)  # ngoặc rỗng còn lại sau khi bỏ tên file / hash
     text = re.sub(r"[ \t]+([,.)])", r"\1", text)
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
@@ -556,6 +559,40 @@ def set_finish_date(api, acfg, wp_id):
         log("điền Finish date lỗi (%s): %s" % (wp_id, str(ex).splitlines()[0][:200]))
 
 
+
+def assignee_name(api):
+    """Tên người được giao (người duyệt quyết định) trong prompt: OP_ASSIGNEE_NAME, không đặt thì tên tài khoản API."""
+    if envconf.ASSIGNEE_NAME:
+        return envconf.ASSIGNEE_NAME
+    if "name" not in _ME:
+        try:
+            me = api.me()
+            _ME.update(id=me["id"], name=me.get("name") or "người được giao")
+        except Exception:  # noqa: BLE001
+            return "người được giao"
+    return _ME["name"]
+
+def make_trees(acfg, run_dir, branch):
+    """Worktree cho mọi repo của lượt chạy (<run>/<key>) + thư mục dùng chung (vd node_modules). Trả ghi chú."""
+    notes = []
+    for r, d in R.trees(acfg, run_dir):
+        notes.append(make_worktree(r["path"], r["branch"], r["upstream"], d, branch, acfg))
+        for name in r.get("link") or []:
+            src = os.path.join(r["path"], name)
+            if os.path.isdir(src) and not os.path.exists(os.path.join(d, name)):
+                os.symlink(src, os.path.join(d, name))
+    return notes
+
+
+def tree_commits(acfg, run_dir, display_id):
+    """{nhãn repo: [commit ticket]} trên các worktree của lượt chạy."""
+    return {r["label"]: ticket_commits(d, display_id) for r, d in R.trees(acfg, run_dir)}
+
+
+def any_fix(acfg, run_dir):
+    return any(fix_commits(d, r["branch"]) for r, d in R.trees(acfg, run_dir) if os.path.isdir(d))
+
+
 def fetch_ticket(api, wp_id, out_dir):
     """Mô tả + toàn bộ comment/thay đổi + ảnh đính kèm, để Claude đọc offline."""
     os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
@@ -599,10 +636,10 @@ def fetch_ticket(api, wp_id, out_dir):
 
 
 # Danh sách include Liquibase chỉ thêm dòng ở cuối: hai nhánh cùng thêm changelog thì giữ cả hai là đúng.
-UNION_MERGE_FILES = re.compile(r"(^|/)db/master[\w-]*\.xml$")  # master.xml, master-prod.xml… (danh sách include)
+UNION_MERGE_FILES = re.compile(envconf.UNION_INCLUDE_RX)  # master.xml, master-prod.xml… (danh sách include)
 # File thông báo i18n: mỗi ticket thường thêm khoá mới ở cuối → giữ dòng của cả hai bên (trùng khoá khác nội dung
 # thì không tự gộp, để Claude gỡ).
-UNION_PROPERTIES = re.compile(r"(^|/)i18n/messages[\w-]*\.properties$")
+UNION_PROPERTIES = re.compile(envconf.UNION_MERGE_RX)
 CONFLICT_BLOCK = re.compile(r"<<<<<<< [^\n]*\n(.*?)(?:\|\|\|\|\|\|\| [^\n]*\n.*?)?=======\n(.*?)>>>>>>> [^\n]*\n",
                             re.S)
 
@@ -897,13 +934,14 @@ def surefire_failures(module_dir):
     return out
 
 
-def preexisting_test_failures(acfg, repo_dir, commits, tests, log_path):
+def preexisting_test_failures(acfg, repo_dir, commits, tests, log_path, repo=None):
     """
     Test BE lỗi khi kiểm tra bản sửa: chạy lại đúng các lớp test đó trên commit ngay trước bản sửa. Mọi test lỗi ở bản
     sửa cũng lỗi ở bản trước → lỗi có sẵn trên nhánh chung (vd thiếu bean trong WebMvcTest), không chặn push. Trả ghi
     chú (chuỗi) nếu là lỗi có sẵn, rỗng nếu có test lỗi do bản sửa (hoặc không so sánh được).
     """
-    module = os.path.join(repo_dir, acfg["be_subdir"])
+    repo = repo or R.find(acfg, "BE") or {"key": "be", "subdir": acfg.get("be_subdir") or "", "test": []}
+    module = R.module_dir(repo, repo_dir)
     fix_fail = surefire_failures(module)
     if not fix_fail:
         return ""
@@ -911,19 +949,20 @@ def preexisting_test_failures(acfg, repo_dir, commits, tests, log_path):
                                                .returncode == 0 for o in commits)), None)
     if not oldest:
         return ""
-    base_dir = os.path.join(os.path.dirname(log_path), ".verify-base-be")
+    base_dir = os.path.join(os.path.dirname(log_path), ".verify-base-%s" % repo["key"])
     shutil.rmtree(base_dir, ignore_errors=True)
     try:
         run(["git", "worktree", "add", "-q", "--detach", base_dir, oldest + "^"], cwd=repo_dir)
         classes = sorted({c.rsplit(".", 1)[-1] for c, _ in fix_fail} & set(tests)) or sorted(tests)
-        cmd = ["mvn", "-q", "-o", "-f", os.path.join(base_dir, acfg["be_subdir"], "pom.xml"), "test",
-               "-Dtest=" + ",".join(classes), "-Dsurefire.failIfNoSpecifiedTests=false"]
+        cmd = (R.commands(repo, "test", base_dir, ",".join(classes)) or [[]])[0]
+        if not cmd:
+            return ""
         with open(log_path, "a", encoding="utf-8") as out:
             out.write("\n# Test lỗi ở bản sửa — chạy lại trên commit trước bản sửa (%s^) để xem có phải lỗi sẵn không\n"
                       "$ %s\n" % (oldest[:9], " ".join(cmd)))
             out.flush()
             run_build(cmd, base_dir, out, acfg)
-        base_fail = surefire_failures(os.path.join(base_dir, acfg["be_subdir"])) or set()
+        base_fail = surefire_failures(R.module_dir(repo, base_dir)) or set()
         new = fix_fail - base_fail
         with open(log_path, "a", encoding="utf-8") as out:
             out.write("# lỗi ở bản sửa: %d, lỗi sẵn ở bản trước: %d, lỗi mới do bản sửa: %s\n"
@@ -932,7 +971,8 @@ def preexisting_test_failures(acfg, repo_dir, commits, tests, log_path):
         if new:
             return ""
         names = sorted({c.rsplit(".", 1)[-1] for c, _ in fix_fail})
-        return "test BE lỗi sẵn trên nhánh chung, không do bản sửa (%d test: %s)" % (len(fix_fail), ", ".join(names))
+        return "test %s lỗi sẵn trên nhánh chung, không do bản sửa (%d test: %s)" % (
+            repo.get("label") or "BE", len(fix_fail), ", ".join(names))
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as ex:
         log("so sánh test với bản trước lỗi: %s" % ex)
         return ""
@@ -943,35 +983,36 @@ def preexisting_test_failures(acfg, repo_dir, commits, tests, log_path):
 
 
 def verify(acfg, label, repo_dir, commits, log_path):
-    """Tự kiểm tra lại, không dựa vào báo cáo của Claude. Trả lỗi (chuỗi) hoặc rỗng nếu qua."""
-    if label == "FE":
-        cmds = [["npm", "run", "build"]]
-    else:
-        pom = os.path.join(repo_dir, acfg["be_subdir"], "pom.xml")
+    """Tự kiểm tra lại (lệnh build / test của repo trong cấu hình), không dựa vào báo cáo của Claude. Trả lỗi (chuỗi)
+    hoặc rỗng nếu qua."""
+    repo = R.find(acfg, label)
+    if repo is None:
+        return ""
+    tests = []
+    if repo.get("test") and repo.get("test_files"):
         # Chỉ file của commit sửa (không tính commit kéo từ nhánh chung / nhánh mình qua merge).
         changed = set()
         for commit in commits:
             changed.update(run(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit],
                                cwd=repo_dir, check=False).split())
-        tests = sorted({os.path.basename(f)[:-5] for f in changed if f.endswith("Test.java") and "/src/test/" in f
-                        and os.path.exists(os.path.join(repo_dir, f))})
-        cmds = [["mvn", "-q", "-o", "-f", pom, "compile", "-DskipTests"]]
-        if tests:
-            cmds.append(["mvn", "-q", "-o", "-f", pom, "test", "-Dtest=" + ",".join(tests),
-                         "-Dsurefire.failIfNoSpecifiedTests=false"])
+        rx = re.compile(repo["test_files"])
+        tests = sorted({os.path.splitext(os.path.basename(f))[0] for f in changed
+                        if rx.search("/" + f) and os.path.exists(os.path.join(repo_dir, f))})
+    test_cmds = R.commands(repo, "test", repo_dir, ",".join(tests)) if tests else []
+    cmds = R.commands(repo, "build", repo_dir) + test_cmds
     with open(log_path, "a", encoding="utf-8") as out:
         for cmd in cmds:
             out.write("\n$ %s\n" % " ".join(cmd))
             out.flush()
             code = run_build(cmd, repo_dir, out, acfg)
             if code != 0:
-                if label == "BE" and "test" in cmd:
-                    note = preexisting_test_failures(acfg, repo_dir, commits, tests, log_path)
+                if cmd in test_cmds and repo.get("test_compare") == "surefire":
+                    note = preexisting_test_failures(acfg, repo_dir, commits, tests, log_path, repo)
                     if note:
                         acfg.setdefault("_verify_notes", []).append(note)
                         log(note)
                         continue
-                return "%s `%s` lỗi (mã %s, xem %s)" % (label, " ".join(cmd[:3] if label == "FE" else cmd[-2:]),
+                return "%s `%s` lỗi (mã %s, xem %s)" % (label, " ".join(cmd[:3] if len(cmd) <= 4 else cmd[-2:]),
                                                        code, log_path)
     return ""
 
@@ -1015,7 +1056,7 @@ ALREADY_FIXED_NOTE = """
 
 ## LƯU Ý: lượt này KHÔNG có commit mới
 Claude kết luận lỗi ĐÃ ĐƯỢC SỬA SẴN trong code hiện tại (bởi commit có từ trước, xem báo cáo của Claude và mục DIFF nếu
-có). Hãy kiểm tra trên CODE HIỆN TẠI của worktree ({run_dir}/fe, {run_dir}/be): đi lại từng bước tái hiện của ticket và
+có). Hãy kiểm tra trên CODE HIỆN TẠI của worktree ({worktrees}): đi lại từng bước tái hiện của ticket và
 đối chiếu từng kết quả mong đợi — ĐẠT chỉ khi code hiện tại thực sự đã đáp ứng, không dựa vào lời của Claude.
 """
 
@@ -1052,14 +1093,15 @@ def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir
     ticket. ĐẠT → comment cho tester + Resolved; còn lại (hoặc Gemini tắt / không chạy được) → comment + UNREVIEWED.
     Trả mô tả.
     """
-    dirs = (("FE", fe_dir, acfg["fe_branch"]), ("BE", be_dir, acfg["be_branch"]))
+    dirs = tuple((r["label"], d, r["branch"]) for r, d in R.trees(acfg, run_dir))
     review_id = acfg.get("review_status_id")
     verdict = ""
     if acfg.get("gemini_enabled"):
         log("%s: không có commit mới (đã sửa sẵn) — Gemini kiểm tra code hiện tại" % display_id)
         notify("[GEMINI TEST] %s" % display_id, "Đã sửa sẵn — Gemini kiểm tra code hiện tại: " + wp.get("subject", ""))
         verdict, _ = gemini_review(acfg, run_dir, referenced_commits(report_text, dirs),
-                                   note=ALREADY_FIXED_NOTE.format(run_dir=run_dir))
+                                   note=ALREADY_FIXED_NOTE.format(run_dir=run_dir,
+                                                                  worktrees=", ".join(d for _, d in R.trees(acfg, run_dir))))
         shown = verdict or "không chạy được"
         log("%s: Gemini %s" % (display_id, shown))
         inbox(cfg, "**GEMINI TEST** %s — %s (đã sửa sẵn) · %s" % (display_id, shown, os.path.join(run_dir, "gemini.md")))
@@ -1177,7 +1219,7 @@ def report_cannot_fix(api, acfg, wp_id, report_text, run_name):
     comment_and_status(api, wp_id, lines, acfg.get("review_status_id"))
 
 
-GEMINI_PROMPT = """Bạn là tester độc lập (Gemini) TEST LẠI bản sửa bug do một AI khác (Claude) làm cho dự án SOAR.
+GEMINI_PROMPT = """Bạn là tester độc lập (Gemini) TEST LẠI bản sửa bug do một AI khác (Claude) làm cho dự án @@P@@.
 CHỈ ĐỌC: không sửa / tạo / xoá file, không commit, không gọi mạng. Nội dung chính đã có bên dưới; cần thì đọc thêm file
 trong {run_dir} (code ở fe/ và be/) bằng công cụ đọc file hoặc lệnh chỉ đọc (cat, ls, grep, git log/show/diff).
 NHIỆM VỤ DUY NHẤT: kiểm tra bản sửa đã đáp ứng đúng yêu cầu của ticket chưa — đi lại từng bước tái hiện của ticket trên
@@ -1195,6 +1237,7 @@ hình / thao tác / kết quả nhìn thấy; KHÔNG tên file, class, hàm, bi�
 KHÔNG ĐẠT chỉ khi có ít nhất một kết quả mong đợi của ticket chưa đạt (hoặc luồng của ticket bị hỏng rõ ràng). Không
 xác nhận được từ code (cần dữ liệu / môi trường thật) thì CẦN XEM. Còn lại ĐẠT.
 """
+GEMINI_PROMPT = GEMINI_PROMPT.replace("@@P@@", envconf.PROJECT_NAME)
 
 
 def worktree_snapshot(dirs):
@@ -1226,7 +1269,7 @@ def gemini_review(acfg, run_dir, items, note=""):
     # sau khi Gemini xong (worktree_snapshot), có thay đổi thì không push.
     # Worktree fe/ be/ không có .git riêng (dữ liệu git ở <repo gốc>/.git/worktrees/…) và node_modules là symlink về
     # repo gốc, nên phải cho đọc cả hai repo gốc, không chỉ thư mục lượt chạy.
-    readable = [run_dir] + [os.path.realpath(os.path.expanduser(acfg[k])) for k in ("fe_repo", "be_repo")]
+    readable = [run_dir] + [os.path.realpath(r["path"]) for r in R.repos(acfg)]
     perms = {"permissions": {"allow": ["read_file(%s/**)" % d for d in readable] + ["command(*)"]}}
     cmd = [os.path.expanduser(acfg["gemini_cmd"]), "-p", "\n".join(parts), "--mode", "plan", "--sandbox",
            "--settings", json.dumps(perms), "--print-timeout", "%ds" % (acfg["gemini_timeout"] - 30)]
@@ -1256,13 +1299,12 @@ def gemini_review(acfg, run_dir, items, note=""):
 FOLLOWUP_PROMPT = """Bạn là Claude, đã (hoặc AI trước đã) sửa bug {display_id} — {subject}. Chạy nền, không có người theo dõi.
 Gemini (reviewer độc lập) vừa test lại bản sửa và kết luận **{gemini_verdict}**. Toàn bộ nhận xét: {run_dir}/gemini.md
 Ticket: {run_dir}/ticket/ticket.md. Bản sửa hiện tại: {commits} (xem bằng `git -C <worktree> show <hash>`).
-Worktree: FE {fe_dir}, BE {be_dir} (module {be_dir}/{be_subdir}); nhánh hiện tại của worktree đã chứa bản sửa.
+Worktree: {worktrees}; nhánh hiện tại của worktree đã chứa bản sửa.
 
 ## Làm
 1. Xét TỪNG ý Gemini nêu (lỗi, rủi ro, test thiếu). Kiểm chứng trong code — Gemini có thể sai, đừng tin mù quáng.
 2. Ý đúng, trong phạm vi ticket, sửa được an toàn → sửa tối thiểu, thêm/sửa test, kiểm tra
-   (FE `npm run build`; BE `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml test -Dtest='<Test>' -Dsurefire.failIfNoSpecifiedTests=false`
-   và `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml compile -DskipTests`), rồi commit bằng `git -C <worktree> add …` +
+   ({repo_checks_short}), rồi commit bằng `git -C <worktree> add …` +
    `git -C <worktree> commit …`, message `[{display_id}] - {subject}` + dòng trống + mô tả ngắn tiếng Việt không dấu
    (bắt đầu bằng "Bo sung sau review Gemini: ") + dòng trống + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 3. Ý sai / ngoài phạm vi / chỉ là gợi ý không cần thiết → KHÔNG sửa, nêu lý do.
@@ -1277,8 +1319,9 @@ Ghi {run_dir}/followup.md bằng tiếng Việt. Dòng đầu đúng một trong
 Các mục: ## Đánh giá từng ý của Gemini (ý → đúng/sai → xử lý); ## Đã sửa thêm (file, commit); ## Kiểm tra;
 ## Cần quyết định (chỉ khi có: các phương án + đề xuất);
 {decider_rules}
-## Comment cho tester (chỉ khi SỬA THÊM: đăng nguyên văn lên ticket cho TESTER đọc — đã sửa thêm gì nhìn từ màn hình /
-thao tác / kết quả, test lại thế nào; KHÔNG tên file, class, hàm, biến, commit).
+## Comment cho tester (chỉ khi SỬA THÊM: đăng nguyên văn lên ticket cho TESTER đọc — dòng đầu `**Nguyên nhân lỗi:** …`
+(1–2 câu theo hiện tượng: vì sao còn lỗi / vì sao phải sửa thêm), rồi đã sửa thêm gì nhìn từ màn hình / thao tác / kết
+quả, test lại thế nào; KHÔNG tên file, class, hàm, biến, commit).
 """
 
 
@@ -1309,14 +1352,13 @@ VERIFY_FIX_PROMPT = """Bạn là Claude, đã sửa bug {display_id} — {subjec
 Bước KIỂM TRA TỰ ĐỘNG (build / test do script chạy lại, không dựa vào báo cáo) sau khi sửa bị LỖI:
 {err}
 Log đầy đủ: {run_dir}/verify.log (xem phần cuối). Ticket: {run_dir}/ticket/ticket.md. Báo cáo sửa: {run_dir}/report.md.
-Worktree: FE {fe_dir}, BE {be_dir} (module {be_dir}/{be_subdir}); nhánh hiện tại đã chứa bản sửa.
+Worktree: {worktrees}; nhánh hiện tại đã chứa bản sửa.
 
 ## Làm
 1. Đọc log, tìm nguyên nhân. Lỗi do bản sửa / test mới của lượt này → sửa tối thiểu: test viết sai (mock thiếu,
    strict stubbing, kỳ vọng sai) thì sửa test cho đúng hành vi ticket yêu cầu; code sai thì sửa code.
    KHÔNG xoá test, KHÔNG @Disabled / bỏ qua test, KHÔNG nới kỳ vọng chỉ để cho qua.
-2. Chạy lại đúng lệnh bị lỗi (BE `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml test -Dtest='<Test>' -Dsurefire.failIfNoSpecifiedTests=false`
-   và `mvn -q -o -f {be_dir}/{be_subdir}/pom.xml compile -DskipTests`; FE `npm run build`). Qua rồi commit bằng
+2. Chạy lại đúng lệnh bị lỗi ({repo_checks_short}). Qua rồi commit bằng
    `git -C <worktree> add …` + `git -C <worktree> commit …`, message `[{display_id}] - {subject}` + dòng trống +
    mô tả ngắn tiếng Việt không dấu (bắt đầu bằng "Sua loi kiem tra tu dong: ") + dòng trống +
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -1339,7 +1381,7 @@ def claude_fix_verify(acfg, display_id, wp, run_dir, fe_dir, be_dir, err):
     use_profile(acfg, prof)
     prompt = VERIFY_FIX_PROMPT.format(bash_rules=BASH_RULES.format(run_dir=run_dir),
                                       display_id=display_id, subject=wp.get("subject", ""), err=err[:2000],
-                                      run_dir=run_dir, fe_dir=fe_dir, be_dir=be_dir, be_subdir=acfg["be_subdir"])
+                                      run_dir=run_dir, **R.prompt_kwargs(acfg, run_dir))
     with open(os.path.join(run_dir, "verify-fix-prompt.md"), "w", encoding="utf-8") as f:
         f.write(prompt)
     log("%s: kiểm tra tự động lỗi → Claude sửa (%s)" % (display_id, prof["name"]))
@@ -1350,27 +1392,28 @@ def claude_fix_verify(acfg, display_id, wp, run_dir, fe_dir, be_dir, err):
     return "Claude sửa lỗi kiểm tra: " + (first.replace("SỬA KIỂM TRA:", "").strip() or "không có báo cáo")
 
 
-def claude_cmd(acfg, prompt, run_dir, be_dir):
+def claude_cmd(acfg, prompt, run_dir, be_dir=None):
+    others = [d for _, d in R.trees(acfg, run_dir)[1:]]  # repo đầu là thư mục làm việc, các repo còn lại --add-dir
     cmd = [acfg["claude"], "-p", prompt,
            "--permission-mode", "dontAsk",
            "--max-budget-usd", str(acfg["max_budget_usd"]),
            # stream-json: ghi từng thao tác ngay khi xảy ra để --status / --follow xem được tiến trình.
            "--output-format", "stream-json", "--verbose",
-           "--add-dir", be_dir, run_dir]
+           "--add-dir"] + others + [run_dir]
     # Mỗi quy tắc là một tham số riêng (quy tắc có khoảng trắng, không nối chuỗi được). Edit/Write để trống thì ghi
     # được mọi nơi trên máy — chỉ cho trong thư mục của lượt chạy (worktree + report).
-    cmd += ["--allowedTools"] + ALLOWED_TOOLS + write_rules(run_dir) + ["--disallowedTools"] + DISALLOWED_TOOLS
+    cmd += ["--allowedTools"] + ALLOWED_TOOLS + write_rules(run_dir, acfg) + ["--disallowedTools"] + DISALLOWED_TOOLS
     if acfg.get("model"):
         cmd += ["--model", acfg["model"]]
     return cmd
 
 
-def run_claude(acfg, prompt, run_dir, fe_dir, be_dir, append=False):
+def run_claude(acfg, prompt, run_dir, fe_dir=None, be_dir=None, append=False):
     """Chạy Claude headless; thao tác ghi vào claude.jsonl (append cho lượt xem lại, --follow vẫn đọc được)."""
     mode = "a" if append else "w"
     with open(os.path.join(run_dir, "claude.jsonl"), mode, encoding="utf-8") as out, \
             open(os.path.join(run_dir, "claude.err"), mode, encoding="utf-8") as err:
-        return subprocess.run(claude_cmd(acfg, prompt, run_dir, be_dir), cwd=fe_dir, stdout=out, stderr=err,
+        return subprocess.run(claude_cmd(acfg, prompt, run_dir), cwd=R.trees(acfg, run_dir)[0][1], stdout=out, stderr=err,
                               stdin=subprocess.DEVNULL, env=build_env(acfg)).returncode
 
 
@@ -1380,7 +1423,7 @@ def claude_followup(acfg, display_id, wp, run_dir, fe_dir, be_dir, gemini_verdic
     prompt = FOLLOWUP_PROMPT.format(
         bash_rules=BASH_RULES.format(run_dir=run_dir), decider_rules=DECIDER_RULES,
         display_id=display_id, subject=wp.get("subject", ""), gemini_verdict=gemini_verdict, run_dir=run_dir,
-        commits=commits, fe_dir=fe_dir, be_dir=be_dir, be_subdir=acfg["be_subdir"])
+        commits=commits, **R.prompt_kwargs(acfg, run_dir))
     with open(os.path.join(run_dir, "followup-prompt.md"), "w", encoding="utf-8") as f:
         f.write(prompt)
     run_claude(acfg, prompt, run_dir, fe_dir, be_dir, append=True)
@@ -1416,7 +1459,7 @@ def _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, rep
     trạng thái ticket (chỉ comment). Trả (đã push?, mô tả).
     gemini_from: thư mục có gemini.md của lượt trước — dùng lại kết luận đó, không chạy Gemini nữa (hàng chờ xem lại).
     """
-    dirs = (("FE", fe_dir, acfg["fe_branch"]), ("BE", be_dir, acfg["be_branch"]))
+    dirs = tuple((r["label"], d, r["branch"]) for r, d in R.trees(acfg, run_dir))
     subject = wp.get("subject", "")
 
     def current():
@@ -1628,7 +1671,13 @@ def _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, rep
     for text, headings, title in sections:
         body = next((report_section(text, h) for h in headings if report_section(text, h)), "")
         if body and not re.fullmatch(r"[-*\s]*(Không có|Không)\.?[^\n]*", body, re.I):
-            lines += [""] + (["**%s:**" % title] if title else []) + [for_tester(body)[:3000]]
+            body = for_tester(body)[:3000]
+            if not re.search(r"nguyên nhân", body[:400], re.I):
+                # Báo cáo cũ / Claude quên dòng "Nguyên nhân lỗi": lấy câu đầu mục Nguyên nhân (đã bỏ chi tiết dev).
+                cause = report_section(text, "Nguyên nhân")
+                if cause and not re.fullmatch(r"[-*\s]*(Không có|Không)\.?[^\n]*", cause, re.I):
+                    body = "**Nguyên nhân lỗi:** %s\n\n%s" % (first_sentence(for_tester(cause), 300), body)
+            lines += [""] + (["**%s:**" % title] if title else []) + [body]
     if queued:
         lines += [""] + waiting_comment(run_dir, pushed=True)
     op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join(lines)}})
@@ -1676,8 +1725,8 @@ def write_summary_report(acfg, display_id, run_name, wp, verdict, commits, run_d
 def clean(acfg, run_name):
     root = os.path.expanduser(acfg["root"])
     run_dir = os.path.join(root, run_name)
-    for repo, sub in ((acfg["fe_repo"], "fe"), (acfg["be_repo"], "be")):
-        path = os.path.join(run_dir, sub)
+    for r in R.repos(acfg):
+        repo, path = r["path"], os.path.join(run_dir, r["key"])
         if os.path.isdir(path):
             subprocess.run(["git", "worktree", "remove", "--force", path], cwd=repo, check=False)
         subprocess.run(["git", "branch", "-D", "auto/" + run_name], cwd=repo, check=False,
@@ -2093,8 +2142,8 @@ def show_status(root, acfg, last=8):
         print("           %d thao tác — gần nhất:" % tools)
         for line in actions[-last:]:
             print("             · " + line)
-        for sub in ("fe", "be"):
-            path = os.path.join(s["run_dir"], sub)
+        for r, path in R.trees(acfg, s["run_dir"]):
+            sub = r["key"]
             if os.path.isdir(path):
                 res = subprocess.run(["git", "diff", "--shortstat", "HEAD"], cwd=path, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, universal_newlines=True)
@@ -2171,12 +2220,8 @@ def review_ticket(api, cfg, acfg, ref, profile=None, gemini_from=None):
         log("%s: test lại (%s)" % (display_id, run_dir))
         notify("[GEMINI TEST] %s" % display_id, "Bắt đầu test lại bản đã sửa: " + wp.get("subject", ""))
         wp = fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))
-        make_worktree(acfg["fe_repo"], acfg["fe_branch"], acfg["fe_upstream"], fe_dir, "auto/" + run_name, acfg)
-        nm = os.path.join(acfg["fe_repo"], "node_modules")
-        if os.path.isdir(nm):
-            os.symlink(nm, os.path.join(fe_dir, "node_modules"))
-        make_worktree(acfg["be_repo"], acfg["be_branch"], acfg["be_upstream"], be_dir, "auto/" + run_name, acfg)
-        review_of = {label: ticket_commits(d, display_id) for label, d in (("FE", fe_dir), ("BE", be_dir))}
+        make_trees(acfg, run_dir, "auto/" + run_name)
+        review_of = tree_commits(acfg, run_dir, display_id)
         review_of = {k: v for k, v in review_of.items() if v}
         # Báo cáo sửa cũ (nếu thư mục lượt sửa còn) giúp Gemini hiểu ý định.
         old = sorted(p for p in glob.glob(os.path.join(root, display_id + "-1*", "report.md")))
@@ -2219,7 +2264,7 @@ def ship_run(cfg, acfg, run_name, profile=None):
     if not kind:
         sys.exit("%s: báo cáo không phải ĐÃ SỬA / KHÔNG SỬA ĐƯỢC — không giao lại" % run_name)
     fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
-    has_fix = bool(fix_commits(fe_dir, acfg["fe_branch"]) or fix_commits(be_dir, acfg["be_branch"]))
+    has_fix = any_fix(acfg, run_dir)
     ticket_lock = open(os.path.join(root, ".%s.lock" % display_id), "w")
     try:
         fcntl.flock(ticket_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2378,8 +2423,7 @@ def process_pending(api, cfg, acfg, force=None):
         log("%s: %s" % (display_id, msg))
         inbox(cfg, "**XEM LẠI TỪ HÀNG CHỜ** %s — %s" % (display_id, msg))
         notify("[XEM LẠI TỪ HÀNG CHỜ] %s" % display_id, msg)
-        old_fe, old_be = os.path.join(item["run_dir"], "fe"), os.path.join(item["run_dir"], "be")
-        if not item.get("pushed", True) and os.path.isdir(old_fe) and os.path.isdir(old_be):
+        if not item.get("pushed", True) and all(os.path.isdir(d) for _, d in R.trees(acfg, item["run_dir"])):
             resume_unpushed(api, cfg, acfg, item, prof)
         else:
             review_ticket(api, cfg, acfg, item["wp_id"], prof["name"], gemini_from=item["run_dir"])
@@ -2462,7 +2506,7 @@ def recover_plan(api, root, acfg, s):
     run_dir = s.get("run_dir") or ""
     run_name = s.get("run_name") or os.path.basename(run_dir)
     fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
-    has_tree = bool(run_dir) and os.path.isdir(fe_dir) and os.path.isdir(be_dir)
+    has_tree = bool(run_dir) and all(os.path.isdir(d) for _, d in R.trees(acfg, run_dir))
 
     if event == "FOLLOWUP":
         # Hàng chờ xem lại còn mục của ticket (đã đếm số lần thử) → process_pending tự chạy lại ở on_tick sau.
@@ -2474,7 +2518,7 @@ def recover_plan(api, root, acfg, s):
     if state == "shipping" or event == "SHIP":
         if not has_tree or not report_done(os.path.join(run_dir, "report.md")):
             return None, "bị ngắt khi push, không còn worktree / báo cáo — xem tay %s" % run_dir
-        if fix_commits(fe_dir, acfg["fe_branch"]) or fix_commits(be_dir, acfg["be_branch"]):
+        if any_fix(acfg, run_dir):
             return ["--ship", run_name], "giao lại %s (kiểm tra + push)" % run_name
         return None, ("bị ngắt khi push: không còn commit chưa push (có thể đã push xong) — kiểm tra comment / "
                       "trạng thái ticket tay · %s" % run_dir)
@@ -2719,8 +2763,7 @@ def main():
     resume_dir = os.path.join(root, os.path.basename(args.resume)) if args.resume else None
     if resume_dir and not (os.path.basename(resume_dir).startswith(display_id + "-")
                            and os.path.isfile(os.path.join(resume_dir, "prompt.md"))
-                           and os.path.isdir(os.path.join(resume_dir, "fe"))
-                           and os.path.isdir(os.path.join(resume_dir, "be"))):
+                           and all(os.path.isdir(d) for _, d in R.trees(acfg, resume_dir))):
         log("%s: không làm tiếp được %s (thiếu prompt / worktree) — sửa lại từ đầu" % (display_id, args.resume))
         resume_dir = None
     run_name = (os.path.basename(resume_dir) if resume_dir
@@ -2742,11 +2785,7 @@ def main():
             log("%s: tải ticket, tạo worktree %s" % (display_id, run_dir))
             log("%s: trường %s: %s" % (display_id, acfg.get("dev_field") or "Dev", set_dev(api, acfg, wp_id)))
             wp = fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))
-            notes = [make_worktree(acfg["fe_repo"], acfg["fe_branch"], acfg["fe_upstream"], fe_dir, branch, acfg)]
-            nm = os.path.join(acfg["fe_repo"], "node_modules")
-            if os.path.isdir(nm):
-                os.symlink(nm, os.path.join(fe_dir, "node_modules"))
-            notes.append(make_worktree(acfg["be_repo"], acfg["be_branch"], acfg["be_upstream"], be_dir, branch, acfg))
+            notes = make_trees(acfg, run_dir, branch)
             notes = [n for n in notes if n]
             if notes:
                 inbox(cfg, "**AUTOFIX CẢNH BÁO** %s — %s" % (display_id, "; ".join(notes)))
@@ -2755,10 +2794,10 @@ def main():
                 for n in notes)
 
             prompt = PROMPT.format(
+                project_name=envconf.PROJECT_NAME, assignee=assignee_name(api),
                 bash_rules=BASH_RULES.format(run_dir=run_dir), decider_rules=DECIDER_RULES,
                 display_id=display_id, wp_id=wp_id, status=wp["_links"]["status"].get("title"), event=event,
-                subject=wp.get("subject", ""), run_dir=run_dir, fe_dir=fe_dir, be_dir=be_dir,
-                fe_auto=branch, be_auto=branch, be_subdir=acfg["be_subdir"], merge_note=merge_note)
+                subject=wp.get("subject", ""), run_dir=run_dir, merge_note=merge_note, **R.prompt_kwargs(acfg, run_dir, branch))
             if args.qa_report and os.path.exists(args.qa_report):
                 qa_copy = os.path.join(run_dir, "qa-server.md")
                 shutil.copy(args.qa_report, qa_copy)
@@ -2839,13 +2878,13 @@ def main():
             except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
                 verdict += " (chuyển UNREVIEWED lỗi: %s)" % ex
         commits = []
-        for repo_dir, label in ((fe_dir, "FE"), (be_dir, "BE")):
-            base = acfg["fe_branch"] if label == "FE" else acfg["be_branch"]
+        for r, repo_dir in R.trees(acfg, run_dir):
+            base, label = r["branch"], r["label"]
             out = run(["git", "log", "--oneline", "origin/%s..HEAD" % base, "--no-merges",
                        "--grep=" + display_id], cwd=repo_dir, check=False).strip()
             if out:
                 commits.append("%s %s" % (label, out.splitlines()[0].split()[0]))
-        has_fix = fix_commits(fe_dir, acfg["fe_branch"]) or fix_commits(be_dir, acfg["be_branch"])
+        has_fix = any_fix(acfg, run_dir)
         if verdict.startswith("ĐÃ SỬA") and has_fix and acfg.get("auto_ship"):
             set_status(root, display_id, state="shipping")
             log("%s: kiểm tra lại + push" % display_id)

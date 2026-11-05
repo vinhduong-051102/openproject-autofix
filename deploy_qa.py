@@ -583,9 +583,26 @@ def load():
     cfg = op_watch.load_config(argparse.Namespace(config=None, interval=None, on_change=None, no_notify=False))
     acfg = dict(af.AUTOFIX_DEFAULTS)
     acfg.update(cfg.get("autofix") or {})
+    deploy_repos(acfg)
     dcfg = dict(DEFAULTS)
     dcfg.update(envconf.overlay(envconf.deploy_config(), ROLLOUT_ENV))
     return cfg, acfg, dcfg
+
+
+def deploy_repos(acfg):
+    """Deploy theo KIỂU, không theo tên repo: repo có "deploy": "fe-bundle" → phần FE (build bundle tĩnh), "be-image" →
+    phần BE (build Docker image từ release branch). Ghi vào các khoá fe_* / be_* để logic deploy + QA dùng như cũ;
+    không có repo cho một kiểu thì khoá repo = None (bỏ qua phần đó). Repo "deploy": "none" không tham gia deploy."""
+    import repos as R
+    for prefix, kind in (("fe", "fe-bundle"), ("be", "be-image")):
+        r = next((x for x in R.repos(acfg) if x["deploy"] == kind), None)
+        acfg[prefix + "_repo"] = r["path"] if r else None
+        acfg[prefix + "_branch"] = r["branch"] if r else ""
+        acfg[prefix + "_upstream"] = r["upstream"] if r else ""
+        acfg[prefix + "_label"] = r["label"] if r else prefix.upper()
+        if prefix == "be":
+            acfg["be_subdir"] = (r or {}).get("subdir") or ""
+    return acfg
 
 
 def sh(cmd, cwd=None, logf=None, env=None, timeout=3600):
@@ -637,14 +654,18 @@ def set_compose_image(dcfg, service, image, logf):
 
 
 def git_lines(repo, *args):
+    if not repo:  # không có repo cho kiểu deploy này
+        return []
     return af.run(["git"] + list(args), cwd=repo, check=False).strip().splitlines()
 
 
 def pending(acfg, dcfg):
     """Commit mới chưa deploy: {"FE": [(hash, subject)], "BE": [...]}, cùng mốc so sánh."""
     fe, be = acfg["fe_repo"], acfg["be_repo"]
-    af.run(["git", "fetch", "-q", "origin", acfg["fe_upstream"]], cwd=fe)
-    af.run(["git", "fetch", "-q", "origin", acfg["be_upstream"], dcfg["be_release_branch"]], cwd=be)
+    if fe:
+        af.run(["git", "fetch", "-q", "origin", acfg["fe_upstream"]], cwd=fe)
+    if be:
+        af.run(["git", "fetch", "-q", "origin", acfg["be_upstream"], dcfg["be_release_branch"]], cwd=be)
     dev = "origin/" + acfg["fe_upstream"]
     last = git_lines(fe, "log", "-1", "--format=%H", "-i", "--grep=update version", dev)
     rng = "%s..%s" % (last[0], dev) if last else dev
@@ -728,7 +749,7 @@ def deploy_be(acfg, dcfg, root, logf, changes=None):
         # version "dev", commit / nhánh "unknown".
         commit = af.run(["git", "rev-parse", "--short", "HEAD"], cwd=work).strip()
         sh(["docker", "build", "-t", image, "-f", "docker/dev/Dockerfile",
-            "--build-arg", "SOAR_VERSION=" + tag, "--build-arg", "GIT_COMMIT=" + commit,
+            "--build-arg", envconf.get("DEPLOY_VERSION_ARG", "SOAR_VERSION") + "=" + tag, "--build-arg", "GIT_COMMIT=" + commit,
             "--build-arg", "GIT_BRANCH=" + release, "."], cwd=module, logf=logf, timeout=5400)
         tar = os.path.join(root, "%s.tar" % dcfg["be_image"])
         sh(["docker", "save", "-o", tar, image], logf=logf)
@@ -1763,7 +1784,7 @@ def run_all(dry_run=False, only=None, auto_only=False, force=False, review=None)
         if auto_only:  # review_watch: cùng điều kiện như ticket lấy từ OpenProject (có bản sửa trên server, chưa QA)
             auto = set(only)
     else:
-        new = sorted({t for items in commits.values() for _, s in items for t in re.findall(r"\[(SOAR-\d+)\]", s)})
+        new = sorted({t for items in commits.values() for _, s in items for t in re.findall(r"\[(%s)\]" % envconf.TICKET_RX, s)})
         try:
             auto = set(resolved_mine(api, cfg, acfg, dcfg)) - set(new) - set(waiting)
         except Exception as ex:  # noqa: BLE001 — không đọc được OpenProject thì vẫn QA như cũ
