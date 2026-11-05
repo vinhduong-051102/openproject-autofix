@@ -634,6 +634,9 @@ def set_merge_schedule(times, days):
 def action(body):
     cfg, acfg, root = load()
     kind = body.get("action")
+    if str(kind).startswith("config_"):  # trang Cấu hình
+        import config_page
+        return config_page.action(body, save_autofix)
     if str(kind).startswith("tg_"):  # yêu cầu tester qua Telegram
         import tg_requests
         return tg_requests.action(body)
@@ -981,6 +984,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"text": conflict_report(q.get("name", ""))})
             if url.path == "/api/file":
                 return self.send(200, {"text": run_file(q.get("id", ""), q.get("name", ""))})
+            if url.path.startswith("/api/config"):  # trang Cấu hình (config_page.py)
+                import config_page
+                _, acfg_, _ = load()
+                try:
+                    res = config_page.http_get_q(url.path, q, acfg_)
+                except ValueError as ex:
+                    return self.send(400, {"error": str(ex)})
+                return self.send(200 if res is not None else 404, res if res is not None else {"error": "not found"})
             if url.path.startswith("/api/tg/"):  # yêu cầu tester qua Telegram (tg_requests.py)
                 import tg_requests
                 try:

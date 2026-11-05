@@ -492,6 +492,27 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
 .tg-chatmsgs { flex: 1 1 auto; min-height: 0; max-height: none !important; overflow-y: auto; padding-top: 6px; }
 .tg-chatfoot { display: flex; gap: 10px; align-items: center; padding-top: 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }
 #tgModal.wide #tgmBody { overflow: hidden; }
+/* Trang Cấu hình */
+.view[data-view="config"].on { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; max-width: none; }
+#cfgRepoBox, #cfgEnvBox { min-height: 0; }
+.cfg-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 16px; flex-shrink: 1 !important; }
+.cfg-repo { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; background: var(--panel-2); }
+.cfg-repo .hd { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.cfg-repo .hd b { font: 600 14px var(--mono); }
+.cfg-grid { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 6px 10px; align-items: center; font-size: 13px; }
+.cfg-grid label { color: var(--text-2); }
+.cfg-grid input, .cfg-grid select, .cfg-grid textarea { width: 100%; }
+.cfg-grid textarea { font: 12.5px var(--mono); min-height: 34px; }
+.cfg-repo details { margin-top: 8px; } .cfg-repo summary { cursor: pointer; color: var(--text-2); font-size: 12.5px; }
+.cfg-group { border-bottom: 1px solid var(--border); padding: 4px 0 8px; }
+.cfg-group > summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+.cfg-item { display: grid; grid-template-columns: minmax(180px, 34%) minmax(0, 1fr); gap: 4px 12px; padding: 7px 0; border-top: 1px dashed var(--border); }
+.cfg-item .k { font: 600 12.5px var(--mono); overflow-wrap: anywhere; }
+.cfg-item .h { font-size: 12px; color: var(--text-3); grid-column: 1 / -1; }
+.cfg-item input, .cfg-item select { width: 100%; font-size: 12.5px; }
+.cfg-item.changed .k { color: var(--accent); }
+.cfg-item.changed input, .cfg-item.changed select { border-color: var(--accent); }
+.cfg-msg { font-size: 12.5px; margin: 6px 0; }
 /* Điện thoại — đặt cuối để thắng các quy tắc gốc phía trên */
 @media (max-width: 960px) {
   .view.split.on { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 2fr) minmax(0, 3fr); gap: 12px; }
@@ -502,6 +523,9 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
   .svc .chip { padding: 6px 8px; font-size: 12px; }
   #reviewBox { max-height: 40%; }
   .leftcol { gap: 12px; }
+  .view[data-view="config"].on { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  .cfg-item { grid-template-columns: minmax(0, 1fr); }
+  .cfg-grid { grid-template-columns: 96px minmax(0, 1fr); }
   .tg-chatwrap { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 32%) minmax(0, 1fr); }
   .tg-chatlist { border-right: 0; padding-right: 0; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
   /* Khung chi tiết hẹp: cả khung cuộn (đầu + nút + log), log cao cố định thay vì bị ép còn vài dòng */
@@ -536,6 +560,7 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
     <button data-view="ticket">Ticket</button>
     <button data-view="telegram">Telegram <span class="vbadge" id="tgN"></span></button>
     <button data-view="system">Hệ thống <span class="vbadge crit" id="sysN"></span></button>
+    <button data-view="config">Cấu hình <span class="vbadge" id="cfgN"></span></button>
   </nav>
   <div class="meta">
     <button class="health" id="health" title="Tình trạng các dịch vụ — bấm để xem">—</button>
@@ -610,6 +635,18 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
         <button id="tgSettingsBtn" title="Cấu hình nhận yêu cầu qua Telegram: tester, cách gom tin, tin trả lời…">⚙ Cài đặt</button>
       </div>
       <div class="op-list" id="tgList"><div class="empty">Đang tải…</div></div>
+    </section>
+  </div>
+  <div class="view" data-view="config">
+    <section id="cfgRepoBox">
+      <h2>Danh sách repo <span class="right muted" id="cfgRepoSum"></span></h2>
+      <div class="cfg-body" id="cfgRepos"><div class="empty">Đang tải…</div></div>
+    </section>
+    <section id="cfgEnvBox">
+      <h2>Biến cấu hình (.env) <span class="right muted" id="cfgEnvSum"></span></h2>
+      <div class="op-bar"><input type="search" id="cfgQ" placeholder="Tìm theo tên biến / ghi chú…">
+        <button class="primary" id="cfgSave" disabled>Lưu</button><button id="cfgApply" hidden title="Khởi động lại dịch vụ để dùng giá trị mới">⟳ Áp dụng</button></div>
+      <div class="cfg-body" id="cfgEnv"><div class="empty">Đang tải…</div></div>
     </section>
   </div>
   <div class="view" data-view="system">
@@ -2262,7 +2299,7 @@ $("tgBox").querySelector("h2").addEventListener("click", () => setTimeout(tgLoad
 tgLoad(); setInterval(tgLoad, 15000);
 
 // ---- Trang (nav trên header / đáy màn hình trên điện thoại) ----
-const VIEWS = ["todo", "autofix", "ticket", "telegram", "system"];
+const VIEWS = ["todo", "autofix", "ticket", "telegram", "system", "config"];
 function showView(v) {
   if (!VIEWS.includes(v)) v = "todo";
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("on", el.dataset.view === v));
@@ -2271,6 +2308,7 @@ function showView(v) {
   if (v === "telegram" && typeof tgLoad === "function") tgLoad();
   if (v === "ticket" && typeof loadOP === "function") loadOP();
   if (v === "todo") renderTodo();
+  if (v === "config") loadConfig();
   document.querySelectorAll(".view.on .scroll-reset").forEach((el) => { el.scrollTop = 0; });
 }
 document.querySelectorAll("nav.views [data-view]").forEach((b) => b.onclick = () => showView(b.dataset.view));
@@ -2353,6 +2391,131 @@ function renderTodo() {
   $$("[data-tconf]", (b) => { selectOther("conf", b.dataset.tconf); showView("autofix"); });
   if ($("todoUnhide")) $("todoUnhide").onclick = () => { try { localStorage.removeItem("todoHidden"); } catch (e) {} renderTodo(); };
 }
+
+// ---- Trang Cấu hình: danh sách repo (config.json) + biến .env (sinh tự động từ .env.example) ----
+const CFG = {env: null, repos: null, changes: new Map(), applied: []};
+const CFG_BASIC = [["key", "Key", "thư mục worktree, vd fe / be / playbook"], ["label", "Nhãn", "hiện trong log, mặc định KEY viết hoa"],
+  ["path", "Đường dẫn", "repo trên máy, vd ~/soar-fe"], ["branch", "Nhánh cá nhân", "autofix push lên"], ["upstream", "Nhánh chung", "merge vào, mở PR"],
+  ["subdir", "Thư mục con", "module chính trong repo (vd SOAR), có thể trống"]];
+const CFG_ADV = [["tech", "Công nghệ", "ghi trong prompt, vd Node.js"], ["describe", "Mô tả thêm", "sau “— nhánh …” trong prompt; dùng {dir} {subdir}"],
+  ["rules", "Quy ước code", "Claude theo khi sửa"], ["check", "Cách tự kiểm tra", "Claude đọc; trống = theo lệnh build / test"],
+  ["build", "Lệnh build", "mỗi dòng một lệnh; tool tự chạy để kiểm tra. {dir} {subdir}", true], ["test", "Lệnh test", "chạy khi bản sửa có file test; {tests} = tên test", true],
+  ["test_files", "Mẫu file test", "regex đường dẫn, vd \\.test\\.js$"], ["link", "Thư mục dùng chung", "mỗi dòng một thư mục, vd node_modules", true],
+  ["merge_check", "Build thử sau merge", "mỗi dòng một lệnh; trống = lệnh build", true], ["allow", "Quyền Bash thêm", "mỗi dòng một quy tắc, vd Bash(make *); trống = theo lệnh", true],
+  ["ref_hint", "Gợi ý khi soạn task", "AI đọc mã repo này để làm gì"]];
+async function loadConfig() {
+  try {
+    const [e, r] = await Promise.all([tgFetch("/api/config"), tgFetch("/api/config/repos")]);
+    CFG.env = e; CFG.repos = r; CFG.list = r.repos.map((x) => ({...x}));
+    renderCfgRepos(); renderCfgEnv();
+  } catch (err) { $("cfgEnv").innerHTML = `<div class="empty">Không tải được: ${esc(err.message)}</div>`; }
+}
+function cfgVal(x, k) { const v = x[k]; return Array.isArray(v) ? v.join("\n") : (v ?? ""); }
+function renderCfgRepos(msg) {
+  const R = CFG.repos, list = CFG.list, pre = R.presets || {};
+  $("cfgRepoSum").textContent = `${list.length} repo${R.declared ? "" : " · đang dùng FE/BE mặc định từ .env"}`;
+  $("cfgRepos").innerHTML = (R.declared ? "" : `<div class="muted cfg-msg">Chưa khai báo danh sách repo — đang dùng 2 repo FE / BE từ các biến FE_* / BE_*. Bấm <b>Lưu danh sách repo</b> để chuyển sang khai báo tại đây (thêm được repo khác).</div>`)
+    + (msg ? `<div class="cfg-msg">${msg}</div>` : "")
+    + list.map((x, i) => { const p = pre[x.preset] || {};
+      const ph = (k, d) => esc(cfgVal(p, k) || d || "");
+      const field = ([k, l, h, multi]) => `<label for="cr${i}_${k}">${esc(l)}</label>${multi
+        ? `<textarea id="cr${i}_${k}" data-ri="${i}" data-rk="${k}" rows="2" placeholder="${ph(k, h)}" title="${esc(h)}">${esc(cfgVal(x, k))}</textarea>`
+        : `<input type="text" id="cr${i}_${k}" data-ri="${i}" data-rk="${k}" value="${esc(cfgVal(x, k))}" placeholder="${ph(k, h)}" title="${esc(h)}">`}`;
+      return `<div class="cfg-repo"><div class="hd"><b>${esc(x.label || (x.key || "?").toUpperCase())}</b><span class="muted">${i === 0 ? "· thư mục làm việc của Claude" : ""}</span>
+          <span style="margin-left:auto;display:flex;gap:4px"><button class="link" data-rmove="${i}" data-d="-1" ${i ? "" : "disabled"} title="Lên">▲</button><button class="link" data-rmove="${i}" data-d="1" ${i < list.length - 1 ? "" : "disabled"} title="Xuống">▼</button><button class="link" data-rdel="${i}" title="Bỏ repo">✕</button></span></div>
+        <div class="cfg-grid">
+          <label for="cr${i}_preset">Mẫu</label><select id="cr${i}_preset" data-ri="${i}" data-rk="preset"><option value="">Tự khai báo</option><option value="fe" ${x.preset === "fe" ? "selected" : ""}>FE (React/Vite — npm run build)</option><option value="be" ${x.preset === "be" ? "selected" : ""}>BE (Spring Boot — Maven)</option></select>
+          ${CFG_BASIC.map(field).join("")}
+          <label for="cr${i}_deploy">Deploy</label><select id="cr${i}_deploy" data-ri="${i}" data-rk="deploy">${(R.deploy_kinds || []).map((k) => `<option value="${k}" ${(x.deploy || p.deploy || "none") === k ? "selected" : ""}>${{"fe-bundle": "fe-bundle (build bundle FE lên server test)", "be-image": "be-image (build image BE lên server test)", none: "không deploy"}[k] || k}</option>`).join("")}</select>
+          <label for="cr${i}_merge">Merge</label><label style="color:var(--text)"><input type="checkbox" id="cr${i}_merge" data-ri="${i}" data-rk="merge" ${x.merge !== false ? "checked" : ""} style="width:auto"> đưa nhánh cá nhân vào nhánh chung (PR Gitea) theo lịch</label>
+        </div>
+        <details><summary>Nâng cao — prompt, lệnh build / test${x.preset ? " (để trống = theo mẫu " + x.preset.toUpperCase() + ")" : ""}</summary><div class="cfg-grid" style="margin-top:8px">${CFG_ADV.map(field).join("")}</div></details></div>`; }).join("")
+    + `<div id="cfgPick"></div>
+      <div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap"><button class="primary" id="cfgRepoPick">📁 Thêm repo — chọn thư mục, AI điền</button><button id="cfgRepoAdd">+ Thêm thủ công</button><button id="cfgRepoCheck">Kiểm tra</button><button class="primary" id="cfgRepoSave">Lưu danh sách repo</button></div>
+      <div class="muted cfg-msg">Đổi danh sách repo áp dụng cho lượt autofix / merge / deploy kế tiếp (không cần khởi động lại).</div>`;
+  const sync = () => document.querySelectorAll("#cfgRepos [data-ri]").forEach((el) => { const x = list[+el.dataset.ri], k = el.dataset.rk;
+    x[k] = el.type === "checkbox" ? el.checked : el.tagName === "TEXTAREA" ? el.value.split("\n").map((v) => v.trim()).filter(Boolean) : el.value.trim(); });
+  document.querySelectorAll("#cfgRepos [data-ri]").forEach((el) => el.onchange = () => { sync(); if (el.dataset.rk === "preset" || el.dataset.rk === "key") renderCfgRepos(); });
+  document.querySelectorAll("[data-rdel]").forEach((b) => b.onclick = () => { sync(); if (confirm("Bỏ repo này khỏi danh sách?")) { list.splice(+b.dataset.rdel, 1); renderCfgRepos(); } });
+  document.querySelectorAll("[data-rmove]").forEach((b) => b.onclick = () => { sync(); const i = +b.dataset.rmove, j = i + +b.dataset.d; [list[i], list[j]] = [list[j], list[i]]; renderCfgRepos(); });
+  $("cfgRepoAdd").onclick = () => { sync(); list.push({key: "", path: "", branch: "", upstream: "", deploy: "none", merge: true}); renderCfgRepos(); };
+  $("cfgRepoPick").onclick = () => { sync(); cfgPick("~", true); };
+  const send = async (action) => { sync(); const r = await post({action, repos: list}); if (r) { if (action === "config_repos") { CFG.repos.declared = true; }
+    renderCfgRepos(esc(r.message)); } };
+  $("cfgRepoCheck").onclick = () => send("config_repos_check");
+  $("cfgRepoSave").onclick = () => confirm("Lưu danh sách repo? Lượt autofix / merge / deploy kế tiếp sẽ dùng danh sách này.") && send("config_repos");
+}
+
+// Chọn thư mục repo trên máy (trong home) → AI phân tích (chỉ đọc) → điền thẻ repo mới để xem / sửa rồi Lưu.
+async function cfgPick(path, withRepos) {
+  let d;
+  try { d = await tgFetch(`/api/config/browse?path=${encodeURIComponent(path)}${withRepos ? "&repos=1" : ""}`); } catch (e) { return toast(e.message, true); }
+  if (withRepos) CFG.gitRepos = d.git_repos || [];
+  const home = (d.crumbs[0] || {}).path || "";
+  const tilde = (p) => { p = (p || "").replace(/\/+$/, ""); return home && (p === home || p.startsWith(home + "/")) ? "~" + p.slice(home.length) : p; };
+  const used = new Set(CFG.list.map((x) => tilde(x.path)));
+  $("cfgPick").innerHTML = `<div class="cfg-repo"><div class="hd"><b>Chọn thư mục repo</b><button class="link" id="cfgPickClose" style="margin-left:auto">✕ đóng</button></div>
+    ${(CFG.gitRepos || []).length ? `<div class="muted cfg-msg">Repo git trên máy (mới dùng gần đây trước):</div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${CFG.gitRepos.map((p) => `<button class="${used.has(p) ? "" : ""}" data-pickrepo="${esc(p)}" ${used.has(p) ? "disabled title='đã có trong danh sách'" : ""}>${esc(p)}</button>`).join("")}</div>` : ""}
+    <div class="muted cfg-msg">Hoặc duyệt: ${d.crumbs.map((c) => `<button class="link" data-pickdir="${esc(c.path)}">${esc(c.name)}</button>`).join(" / ")}</div>
+    <div style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:4px">${d.parent ? `<div><button class="link" data-pickdir="${esc(d.parent)}">⬆ ..</button></div>` : ""}${d.dirs.map((x) => `<div style="display:flex;gap:8px;align-items:center;padding:2px 4px"><button class="link" data-pickdir="${esc(x.path)}">📁 ${esc(x.name)}</button>${x.git ? `<span class="badge ok">git</span><button data-pickrepo="${esc(tilde(x.path))}" style="margin-left:auto" ${used.has(tilde(x.path)) ? "disabled" : ""}>Chọn</button>` : ""}</div>`).join("") || '<div class="muted">(không có thư mục con)</div>'}</div>
+    ${d.git ? `<div class="tm-row" style="margin-top:8px"><button class="primary" data-pickrepo="${esc(tilde(d.path))}" ${used.has(tilde(d.path)) ? "disabled" : ""}>Chọn thư mục này (${esc(tilde(d.path))})</button></div>` : `<div class="muted cfg-msg">Thư mục đang xem không phải repo git — chọn thư mục có nhãn <b>git</b>.</div>`}
+    <div class="cfg-msg" id="cfgPickSt"></div></div>`;
+  $("cfgPickClose").onclick = () => { $("cfgPick").innerHTML = ""; };
+  document.querySelectorAll("[data-pickdir]").forEach((b) => b.onclick = () => cfgPick(b.dataset.pickdir, false));
+  document.querySelectorAll("[data-pickrepo]").forEach((b) => b.onclick = async () => {
+    $("cfgPickSt").innerHTML = `⏳ AI đang đọc <code>${esc(b.dataset.pickrepo)}</code> (cấu hình build, README, nhánh git… khoảng 20–60 giây)…`;
+    document.querySelectorAll("#cfgPick button").forEach((x) => { x.disabled = true; });
+    const existing = CFG.list.map((x) => ({key: x.key, label: x.label, path: x.path, branch: x.branch, upstream: x.upstream}));
+    const r = await post({action: "config_repo_analyze", path: b.dataset.pickrepo, existing}, b);
+    if (!r) { cfgPick(path, false); return; }
+    CFG.list.push(r.repo);
+    renderCfgRepos(`<b>${r.source === "ai" ? "🤖 AI đã điền" : "Đã đoán theo file (AI lỗi)"}</b> repo <code>${esc(r.repo.path)}</code> — xem lại các trường (mở “Nâng cao”) rồi bấm <b>Lưu danh sách repo</b>.${r.notes ? `<div class="muted">AI lưu ý: ${esc(r.notes)}</div>` : ""}`);
+    const cards = document.querySelectorAll(".cfg-repo"); const last = cards[cards.length - 1];
+    if (last) { const det = last.querySelector("details"); if (det) det.open = true; last.scrollIntoView({block: "start"}); }
+  });
+}
+function renderCfgEnv() {
+  const E = CFG.env; if (!E) return;
+  const q = tgFold($("cfgQ").value.trim());
+  let shown = 0, total = 0;
+  $("cfgEnv").innerHTML = `<div class="muted cfg-msg">Ghi vào <code>${esc(E.env_path)}</code> (sao lưu trước mỗi lần lưu). Danh sách + hướng dẫn lấy từ <code>.env.example</code>. Để trống = dùng JSON / mặc định. Biến bí mật không hiện lại.</div>`
+    + E.groups.map((g, gi) => {
+      const items = g.items.filter((it) => !q || tgFold(it.key + " " + it.help).includes(q));
+      total += g.items.length; shown += items.length;
+      if (!items.length) return "";
+      return `<details class="cfg-group" ${q || gi === 0 ? "open" : ""}><summary>${esc(g.title)} <span class="muted">(${g.items.length})</span></summary>${items.map((it) => {
+        const ch = CFG.changes.has(it.key), v = ch ? CFG.changes.get(it.key) : (it.value ?? "");
+        const ph = esc(it.secret ? (it.set ? "đã đặt — để trống nếu giữ nguyên" : "chưa đặt") : it.default ? "mặc định: " + it.default : "");
+        const input = it.kind === "bool" ? `<select data-ek="${it.key}"><option value="">(trống${it.default ? " — " + esc(it.default) : ""})</option>${["true", "false"].map((o) => `<option ${String(v).toLowerCase() === o ? "selected" : ""}>${o}</option>`).join("")}</select>`
+          : `<input type="${it.secret ? "password" : "text"}" data-ek="${it.key}" value="${it.secret ? esc(ch ? v : "") : esc(v)}" placeholder="${ph}" autocomplete="off" ${it.kind === "int" ? 'inputmode="numeric"' : ""}>`;
+        return `<div class="cfg-item ${ch ? "changed" : ""}"><div class="k">${esc(it.key)}${it.secret ? " 🔒" : ""}${it.in_env ? "" : ' <span class="muted" style="font-weight:400">· chưa có trong .env</span>'}</div><div>${input}</div>${it.help ? `<div class="h">${esc(it.help)}</div>` : ""}</div>`;
+      }).join("")}</details>`; }).join("") + (shown ? "" : `<div class="empty">Không có biến nào khớp.</div>`);
+  $("cfgEnvSum").textContent = q ? `${shown}/${total} biến` : `${total} biến`;
+  const n = CFG.changes.size; $("cfgSave").disabled = !n; $("cfgSave").textContent = n ? `Lưu ${n} thay đổi` : "Lưu";
+  $("cfgN").textContent = n || "";
+  document.querySelectorAll("#cfgEnv [data-ek]").forEach((el) => el.oninput = el.onchange = () => {
+    const it = E.groups.flatMap((g) => g.items).find((x) => x.key === el.dataset.ek), orig = it.secret ? "" : (it.value ?? "");
+    if (el.value === orig) CFG.changes.delete(it.key); else CFG.changes.set(it.key, el.value);
+    el.closest(".cfg-item").classList.toggle("changed", CFG.changes.has(it.key));
+    const m = CFG.changes.size; $("cfgSave").disabled = !m; $("cfgSave").textContent = m ? `Lưu ${m} thay đổi` : "Lưu"; $("cfgN").textContent = m || "";
+  });
+}
+$("cfgQ").oninput = () => { clearTimeout(CFG.qt); CFG.qt = setTimeout(renderCfgEnv, 200); };
+$("cfgSave").onclick = async () => {
+  if (!CFG.changes.size) return;
+  const changes = Object.fromEntries(CFG.changes);
+  if (!confirm(`Lưu ${CFG.changes.size} biến vào .env?\n\n${Object.keys(changes).join("\n")}`)) return;
+  const r = await post({action: "config_env", changes});
+  if (!r) return;
+  CFG.applied = [...new Set(CFG.applied.concat(r.changed || []))]; CFG.changes.clear();
+  $("cfgApply").hidden = !CFG.applied.length;
+  await loadConfig();
+};
+$("cfgApply").onclick = async () => {
+  if (!confirm("Khởi động lại op-watch / op-telegram / trang theo dõi để dùng giá trị mới?\n(lượt autofix đang chạy không bị dừng)")) return;
+  const r = await post({action: "config_apply", changed: CFG.applied});
+  if (r) { CFG.applied = []; $("cfgApply").hidden = true; setTimeout(() => location.reload(), 4000); }
+};
 (function () { let v = "todo"; try { v = localStorage.getItem("view") || "todo"; } catch (e) {} showView(v); })();
 loadTodoExtra(); setInterval(loadTodoExtra, 15000);
 </script>
