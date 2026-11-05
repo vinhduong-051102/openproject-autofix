@@ -1,0 +1,10 @@
+[Unit]
+Description=Cap nhat han muc moi goi Claude theo lich LIMITS_SCHEDULE (lo gio vi tat may thi chay khi bat may)
+
+[Timer]
+@LIMITS_ONCALENDAR@
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

@@ -10,7 +10,7 @@ PYTHON="$(command -v python3)"
 START=1
 if [[ "${1:-}" == "--no-start" ]]; then START=0; shift; fi
 NAMES=("$@")
-[[ ${#NAMES[@]} -eq 0 ]] && NAMES=(op-watch op-dashboard op-merge op-report)
+[[ ${#NAMES[@]} -eq 0 ]] && NAMES=(op-watch op-dashboard op-merge op-report op-limits)
 # op-telegram (yêu cầu tester qua Telegram) cài riêng: ./install.sh op-telegram, hoặc trang theo dõi → Telegram → ⚙ Cài đặt
 
 [[ -f "$TOOL_DIR/.env" ]] || echo "Chưa có $TOOL_DIR/.env — chạy: cp .env.example .env rồi điền giá trị" >&2
@@ -21,6 +21,7 @@ EXTRA_PATH="$(cd "$TOOL_DIR" && "$PYTHON" -c "import envconf; print(':'.join(env
 oncal() { local out="" IFS=';'; for t in $1; do t="$(echo "$t" | sed 's/^ *//;s/ *$//')"; [[ -n "$t" ]] && out+="OnCalendar=$t"$'\n'; done; printf '%s' "$out"; }
 MERGE_ONCALENDAR="$(oncal "$(read_env MERGE_SCHEDULE '*-*-* 12:00:00;*-*-* 18:00:00')")"
 REPORT_ONCALENDAR="$(oncal "$(read_env REPORT_SCHEDULE 'Mon..Fri *-*-* 08:00:00')")"
+LIMITS_ONCALENDAR="$(oncal "$(read_env LIMITS_SCHEDULE '*-*-* 08:00:00')")"
 
 mkdir -p "$UNIT_DIR"
 render() {
@@ -29,7 +30,8 @@ import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src, encoding="utf-8").read()
 for k, v in {"@TOOL_DIR@": """$TOOL_DIR""", "@PYTHON@": """$PYTHON""", "@EXTRA_PATH@": """$EXTRA_PATH""",
-             "@MERGE_ONCALENDAR@": """$MERGE_ONCALENDAR""".rstrip(), "@REPORT_ONCALENDAR@": """$REPORT_ONCALENDAR""".rstrip()}.items():
+             "@MERGE_ONCALENDAR@": """$MERGE_ONCALENDAR""".rstrip(), "@REPORT_ONCALENDAR@": """$REPORT_ONCALENDAR""".rstrip(),
+             "@LIMITS_ONCALENDAR@": """$LIMITS_ONCALENDAR""".rstrip()}.items():
     text = text.replace(k, v)
 open(dst, "w", encoding="utf-8").write(text)
 PY
