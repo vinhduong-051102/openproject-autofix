@@ -277,6 +277,10 @@ html { scroll-behavior: smooth; }
 }
 html.modal-open, html.modal-open body { overflow: hidden; }
 /* Modal Telegram (yêu cầu / chat / cài đặt): cao tối đa bằng màn hình, chỉ phần thân cuộn, trang phía sau đứng yên */
+#taskModal { overflow: hidden; align-items: center; padding: 3vh 16px; overscroll-behavior: contain; }
+#taskModal .modal-box { max-height: 94vh; display: flex; flex-direction: column; overflow: hidden; }
+#taskModal .modal-head { flex: 0 0 auto; }
+#tmStep1, #tmStep2 { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 6px; margin-right: -6px; }
 #tgModal { overflow: hidden; align-items: center; padding: 3vh 16px; overscroll-behavior: contain; }
 #tgModal .modal-box { max-height: 94vh; display: flex; flex-direction: column; overflow: hidden; }
 #tgModal .modal-head { flex: 0 0 auto; }
@@ -731,6 +735,7 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
         <input type="file" id="tmFiles" multiple hidden></div>
       <div id="tmFileList" class="tm-files"></div>
       <div class="tm-actions"><button class="primary" id="tmDraft">AI soạn mô tả</button><span class="muted" id="tmStatus"></span></div>
+      <div id="tmRecent"></div>
     </div>
     <div id="tmStep2" hidden>
       <label class="tm-label" for="tmSubject">Tiêu đề</label>
@@ -1499,9 +1504,32 @@ function tmAdd(list) {
 const tmB64 = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
 function tmOpen() {
   $("taskModal").hidden = false; $("tmStep1").hidden = false; $("tmStep2").hidden = true;
+  document.documentElement.classList.add("modal-open");
   $("tmStatus").textContent = ""; $("tmDraft").disabled = false; $("tmPrompt").focus();
+  tmRecent();
 }
-function tmCloseFn() { $("taskModal").hidden = true; if (tmPoll) clearInterval(tmPoll); }
+// Bản nháp chưa tạo (đóng popup giữa chừng vẫn mở lại được): đang soạn / đã soạn xong / lỗi.
+async function tmRecent() {
+  let list = [];
+  try { list = ((await (await fetch("/api/taskdraft")).json()).drafts || []).filter((d) => d.state !== "created"); } catch (e) {}
+  const lab = {ready: ["ok", "soạn xong"], drafting: ["warn", "đang soạn"], error: ["crit", "lỗi"]};
+  $("tmRecent").innerHTML = !list.length ? "" : `<div class="tm-label" style="margin-top:14px">Bản nháp chưa tạo (${list.length}) — bấm để mở lại</div>
+    ${list.map((d) => `<div class="tm-row" style="display:flex;gap:8px;align-items:center;margin:4px 0">
+      <span class="badge ${(lab[d.state] || ["", d.state])[0]}">${(lab[d.state] || ["", d.state])[1]}</span>
+      <button class="link" data-tmopen="${esc(d.id)}" style="text-align:left;flex:1">${esc(d.subject || d.prompt || d.id)}</button>
+      <span class="muted">${esc((d.updated_at || "").slice(11, 16))} ${esc((d.updated_at || "").slice(8, 10))}/${esc((d.updated_at || "").slice(5, 7))}</span></div>`).join("")}`;
+  document.querySelectorAll("[data-tmopen]").forEach((b) => b.onclick = async () => {
+    const st = await (await fetch("/api/taskdraft?id=" + encodeURIComponent(b.dataset.tmopen))).json();
+    tmDraftId = b.dataset.tmopen;
+    if (st.state === "ready") return tmShowDraft(st);
+    if (st.state === "drafting") { toast("AI vẫn đang soạn bản nháp này — mở lại sau ít phút"); return; }
+    toast("Bản nháp lỗi: " + (st.error || st.state), true);
+  });
+}
+function tmCloseFn() {
+  $("taskModal").hidden = true; if (tmPoll) clearInterval(tmPoll);
+  if ([...document.querySelectorAll(".modal")].every((m) => m.hidden)) document.documentElement.classList.remove("modal-open");
+}
 async function tmShowDraft(st) {
   const d = st.draft || {};
   $("tmStep1").hidden = true; $("tmStep2").hidden = false;

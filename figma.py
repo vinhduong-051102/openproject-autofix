@@ -30,6 +30,11 @@ MAX_LINKS = 6
 MAX_SPEC_LINES = 900
 MAX_DEPTH = 12
 FRAMES_NO_NODE = 3
+CACHE_VER = "v2"
+# Lớp "lá" (hình / chữ / ảnh…): chụp riêng chỉ ra một mảng màu → lấy frame màn hình chứa nó.
+LEAF_TYPES = {"RECTANGLE", "VECTOR", "ELLIPSE", "LINE", "STAR", "REGULAR_POLYGON", "BOOLEAN_OPERATION", "TEXT", "SLICE"}
+CONTAINER_TYPES = ("FRAME", "COMPONENT", "COMPONENT_SET", "INSTANCE", "SECTION")
+MAX_IMG_SIDE = 2400  # ảnh dài hơn (px, sau scale) thì hạ scale cho Claude đọc được
 TIMEOUT = 60
 
 
@@ -153,6 +158,29 @@ def _describe(n, origin):
     return " · ".join(parts)
 
 
+VECTOR_TYPES = {"VECTOR", "BOOLEAN_OPERATION", "ELLIPSE", "STAR", "REGULAR_POLYGON", "LINE"}
+
+
+def _vector_only(n):
+    """(số vector, {màu}) nếu mọi lá bên dưới là vector (icon / logo) — không thì None."""
+    if not n.get("children"):
+        return None
+    count, colors = 0, set()
+    stack = list(n["children"])
+    while stack:
+        c = stack.pop()
+        if c.get("children") and c.get("type") not in VECTOR_TYPES:
+            stack += c["children"]
+            continue
+        if c.get("type") not in VECTOR_TYPES:
+            return None
+        count += 1
+        col = _paints(c.get("fills"))
+        if col:
+            colors.add(col)
+    return (count, colors) if count else None
+
+
 def spec(node):
     """Cây node → các dòng markdown (thụt lề theo cấp), tối đa MAX_SPEC_LINES dòng."""
     bb = node.get("absoluteBoundingBox") or {}
@@ -161,6 +189,11 @@ def spec(node):
 
     def walk(n, depth):
         if len(lines) >= MAX_SPEC_LINES or n.get("visible") is False:
+            return
+        vec = _vector_only(n)
+        if vec and n.get("type") not in LEAF_TYPES:
+            lines.append("  " * depth + "- " + _describe(n, origin) + " · icon / hình vẽ (%d vector, màu %s)" % (
+                vec[0], ", ".join(sorted(vec[1])[:4]) or "?"))
             return
         lines.append("  " * depth + "- " + _describe(n, origin))
         if depth < MAX_DEPTH:
@@ -180,15 +213,52 @@ def _cache_dir():
     return d
 
 
+def _screen_of(file_key, node_id, tok):
+    """Frame màn hình chứa node: /files?ids= trả cây từ gốc tới node → frame cấp trang (con trực tiếp của page);
+    không có thì frame / component gần nhất bên trên."""
+    doc = _get("/files/%s?ids=%s" % (file_key, urllib.parse.quote(node_id)), tok).get("document") or {}
+
+    def path(n, trail):
+        if n.get("id") == node_id:
+            return trail
+        for c in n.get("children") or []:
+            r = path(c, trail + [c])
+            if r is not None:
+                return r
+        return None
+    for page in doc.get("children") or []:
+        trail = path(page, [])
+        if trail is None:
+            continue
+        # trail: [con của page, …, node]
+        anc = trail[:-1]
+        if anc and anc[0].get("type") in CONTAINER_TYPES:
+            return anc[0]["id"]
+        near = [a for a in anc if a.get("type") in CONTAINER_TYPES]
+        return near[-1]["id"] if near else None
+    return None
+
+
 def fetch_link(file_key, node_id, out_dir, tok=None):
     """Tải ảnh + thông số. Trả {"title", "images": [đường dẫn], "spec": đường dẫn .md, "nodes": [...]}."""
     tok = tok or token()
     if not tok:
         raise RuntimeError("chưa có FIGMA_TOKEN (Cấu hình → .env)")
     os.makedirs(out_dir, exist_ok=True)
-    meta = _get("/files/%s?depth=1" % file_key, tok)
+    latest = os.path.join(_cache_dir(), "latest-" + hashlib.sha1(("%s|%s|%s" % (CACHE_VER, file_key, node_id)).encode())
+                          .hexdigest()[:12])
+    try:
+        meta = _get("/files/%s?depth=1" % file_key, tok)
+    except RuntimeError as ex:
+        # Figma giới hạn số lần gọi (429) / mạng lỗi: dùng bản đã tải gần nhất của link này nếu có.
+        if os.path.exists(latest):
+            cache = open(latest, encoding="utf-8").read().strip()
+            if os.path.exists(os.path.join(cache, "result.json")):
+                return _copy_out(json.load(open(os.path.join(cache, "result.json"), encoding="utf-8")), cache, out_dir,
+                                 note="(Figma API tạm lỗi: %s — dùng bản tải gần nhất)" % str(ex)[:80])
+        raise
     version, title = meta.get("version") or "", meta.get("name") or file_key
-    tag = hashlib.sha1(("%s|%s|%s" % (file_key, node_id, version)).encode()).hexdigest()[:12]
+    tag = hashlib.sha1(("%s|%s|%s|%s" % (CACHE_VER, file_key, node_id, version)).encode()).hexdigest()[:12]
     cache = os.path.join(_cache_dir(), tag)
     if os.path.exists(os.path.join(cache, "result.json")):
         res = json.load(open(os.path.join(cache, "result.json"), encoding="utf-8"))
@@ -199,6 +269,15 @@ def fetch_link(file_key, node_id, out_dir, tok=None):
             nodes = [v["document"] for v in (data.get("nodes") or {}).values() if v and v.get("document")]
             if not nodes:
                 raise RuntimeError("Figma: không thấy node %s trong file" % node_id)
+            picked = nodes[0]
+            if picked.get("type") in LEAF_TYPES or not picked.get("children"):
+                frame = _screen_of(file_key, node_id, tok)
+                if frame and frame != node_id:
+                    data = _get("/files/%s/nodes?ids=%s" % (file_key, urllib.parse.quote(frame)), tok)
+                    up = [v["document"] for v in (data.get("nodes") or {}).values() if v and v.get("document")]
+                    if up:
+                        up[0]["_picked"] = "%s `%s`" % (picked.get("name"), picked.get("type"))
+                        nodes = up
         else:
             doc = _get("/files/%s?depth=2" % file_key, tok)["document"]
             pages = doc.get("children") or []
@@ -207,8 +286,11 @@ def fetch_link(file_key, node_id, out_dir, tok=None):
             ids = ",".join(f["id"] for f in frames[:FRAMES_NO_NODE])
             data = _get("/files/%s/nodes?ids=%s" % (file_key, urllib.parse.quote(ids)), tok) if ids else {"nodes": {}}
             nodes = [v["document"] for v in (data.get("nodes") or {}).values() if v and v.get("document")]
-        imgs = _get("/images/%s?ids=%s&format=png&scale=2" % (
-            file_key, urllib.parse.quote(",".join(n["id"] for n in nodes))), tok).get("images") or {}
+        big = max([max((n.get("absoluteBoundingBox") or {}).get("width") or 0,
+                       (n.get("absoluteBoundingBox") or {}).get("height") or 0) for n in nodes] + [1])
+        scale = 2 if big * 2 <= MAX_IMG_SIDE else max(0.5, round(MAX_IMG_SIDE / big, 2))
+        imgs = _get("/images/%s?ids=%s&format=png&scale=%s" % (
+            file_key, urllib.parse.quote(",".join(n["id"] for n in nodes)), scale), tok).get("images") or {}
         res = {"title": title, "version": version, "nodes": []}
         for n in nodes:
             safe = re.sub(r"[^\w-]+", "_", n["id"])
@@ -222,10 +304,17 @@ def fetch_link(file_key, node_id, out_dir, tok=None):
             bb = n.get("absoluteBoundingBox") or {}
             res["nodes"].append({"id": n["id"], "name": n.get("name"), "type": n.get("type"), "png": png,
                                  "size": "%s×%s" % (_num(bb.get("width", 0)), _num(bb.get("height", 0))),
-                                 "spec": spec(n)})
+                                 "picked": n.get("_picked"), "spec": spec(n)})
         with open(os.path.join(cache, "result.json"), "w", encoding="utf-8") as f:
             json.dump(res, f, ensure_ascii=False)
-    out = {"title": res["title"], "images": [], "nodes": res["nodes"]}
+    with open(latest, "w", encoding="utf-8") as f:
+        f.write(cache)
+    return _copy_out(res, cache, out_dir)
+
+
+def _copy_out(res, cache, out_dir, note=""):
+    os.makedirs(out_dir, exist_ok=True)
+    out = {"title": res["title"] + (" " + note if note else ""), "images": [], "nodes": res["nodes"]}
     for n in res["nodes"]:
         if n.get("png") and os.path.exists(os.path.join(cache, n["png"])):
             dst = os.path.join(out_dir, n["png"])
@@ -256,6 +345,9 @@ def ticket_section(text, out_dir):
         for n in r["nodes"]:
             lines.append("")
             lines.append("#### %s `%s` (%s)" % (n.get("name"), n.get("type"), n.get("size")))
+            if n.get("picked"):
+                lines.append("(Link trỏ vào lớp %s nằm trong màn hình này — tool lấy cả màn hình; phần cần sửa thường quanh "
+                             "lớp đó, đọc kỹ yêu cầu trong ticket để biết vùng nào.)" % n["picked"])
             if n.get("png_path"):
                 lines.append("Ảnh (đọc bằng Read): %s" % n["png_path"])
             lines.append("Thông số (kích thước · vị trí trong frame · auto-layout · màu · font cỡ/độ đậm):")
