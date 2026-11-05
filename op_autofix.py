@@ -651,6 +651,15 @@ def build_env(acfg):
     node_bin = os.path.expanduser(acfg.get("node_bin", ""))
     if node_bin and os.path.isdir(node_bin):
         env["PATH"] = node_bin + os.pathsep + env.get("PATH", "")
+    # Dịch vụ systemd chỉ có PATH tối thiểu: thêm thư mục công cụ cài theo người dùng (bun, cargo, go, pnpm, deno…)
+    # và EXTRA_PATH (.env) nếu có, để lệnh build / setup của repo tìm được như khi chạy tay trong terminal.
+    have = env.get("PATH", "").split(os.pathsep)
+    extra = envconf.extra_path() + [
+        os.path.expanduser(x) for x in ("~/.bun/bin", "~/.local/share/pnpm", "~/.deno/bin", "~/.cargo/bin", "~/go/bin",
+                                        "~/.npm-global/bin", "~/.local/bin")]
+    add = [x for x in extra if os.path.isdir(x) and x not in have]
+    if add:
+        env["PATH"] = os.pathsep.join(have + add) if not node_bin else env["PATH"] + os.pathsep + os.pathsep.join(add)
     # Gói Claude: lượt chạy đã chọn gói (use_profile) thì dùng gói đó, không thì gói đang chọn trên trang theo dõi.
     if "_config_dir" in acfg:
         config_dir, token_file = acfg["_config_dir"], acfg.get("_token_file")

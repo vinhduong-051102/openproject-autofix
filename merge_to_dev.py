@@ -95,14 +95,36 @@ def merge_upstream(acfg, work, own, dev):
     af.resolve_conflicts(acfg, work, "merge %s vào %s" % (dev, own))
     return True
 
-def check_build(acfg, label, work, log_path):
-    """Build thử trên kết quả merge: lệnh merge_check của repo (mặc định = lệnh build)."""
+def check_build(acfg, label, work, log_path, dev=None):
+    """Build thử trên kết quả merge: lệnh merge_check của repo (mặc định = lệnh build). build_compare "errors": lỗi
+    thì chạy lại trên origin/<dev> (nhánh chung trước merge) — chỉ chặn khi có dòng lỗi mới."""
     repo = R.find(acfg, label)
     for cmd in R.commands(repo, "merge_check", work) if repo else []:
         with open(log_path, "a", encoding="utf-8") as out:
             out.write("\n$ %s\n" % " ".join(cmd))
             out.flush()
+            start = out.tell()
             code = af.run_build(cmd, work, out, acfg)
+        if code != 0 and dev and repo.get("build_compare") == "errors":
+            with open(log_path, encoding="utf-8", errors="replace") as f:
+                f.seek(start)
+                fix_err = af.error_lines(f.read())
+            head = af.run(["git", "rev-parse", "HEAD"], cwd=work).strip()
+            try:
+                af.run(["git", "checkout", "-q", "--detach", "origin/" + dev], cwd=work)
+                with open(log_path + ".base", "w", encoding="utf-8") as bout:
+                    af.run_build(cmd, work, bout, acfg)
+                with open(log_path + ".base", encoding="utf-8", errors="replace") as f:
+                    base_err = af.error_lines(f.read())
+            finally:
+                af.run(["git", "checkout", "-q", "--detach", head], cwd=work, check=False)
+            new = sorted(fix_err - base_err)
+            with open(log_path, "a", encoding="utf-8") as out:
+                out.write("\n# so với origin/%s: %d dòng lỗi, %d có sẵn, mới: %s\n"
+                          % (dev, len(fix_err), len(fix_err & base_err), "; ".join(new[:20]) or "không có"))
+            if fix_err and not new:
+                log("%s: `%s` có %d lỗi sẵn trên %s (không do merge) — bỏ qua" % (label, " ".join(cmd)[-50:], len(fix_err), dev))
+                continue
         if code != 0:
             raise RuntimeError("%s `%s` lỗi sau khi merge (xem %s)" % (label, " ".join(cmd[:3]), log_path))
 
@@ -125,7 +147,7 @@ def process(acfg, gitea, label, repo, own, dev, dry_run, log_path):
             if err:
                 raise RuntimeError(err)
         merged = merge_upstream(acfg, work, own, dev)
-        check_build(acfg, label, work, log_path)
+        check_build(acfg, label, work, log_path, dev)
         if dry_run:
             return "%s: dry-run — %d commit (%s) sẵn sàng merge%s" % (
                 label, len(pending), ", ".join(tickets) or "không có mã ticket",
