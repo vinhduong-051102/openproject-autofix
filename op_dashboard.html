@@ -1239,11 +1239,7 @@ function renderDetail() {
   document.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { tab = b.dataset.tab; fileCache = ""; renderDetail(); loadTab(true); });
   const forceNote = () => $("ignoreLimits").checked ? " (bỏ qua ngưỡng hạn mức)" : "";
   $("rerun").onclick = () => confirm(`Chạy lại autofix cho ${r.display_id} bằng ${$("runProfile").value}${forceNote()}?`) && post({action: "rerun", display_id: r.display_id, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked});
-  if ($("assist")) $("assist").onclick = () => {
-    const note = prompt(`Claude hỗ trợ ${r.display_id} bằng ${$("runProfile").value}${forceNote()}.\nGhi chú / hướng dẫn cho Claude (có thể để trống):`, "");
-    if (note === null) return;
-    post({action: "assist", display_id: r.display_id, note, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked});
-  };
+  if ($("assist")) $("assist").onclick = () => runAssist(r.display_id, $("runProfile").value, $("ignoreLimits").checked);
   $("review").onclick = () => confirm(`Test lại ${r.display_id}${forceNote()}?`) && post({action: "review", display_id: r.display_id, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked});
   paintLog();
 }
@@ -1760,7 +1756,7 @@ async function openWP(id, opts) {
       <button class="link" data-wpjump>💬 ${nComments} bình luận · tới mới nhất ↓</button>
 </div>
       <h3>${esc(w.subject)}</h3></div><div style="display:flex;gap:8px;align-items:flex-start;flex:0 0 auto">
-      <button class="primary" id="wpSplit" title="AI đọc ticket + file đính kèm, đề xuất các việc con để tạo trên OpenProject">✂ Tách việc con</button>${close}</div></div>`;
+      ${wpAssistBtn(w.display_id)}<button class="primary" id="wpSplit" title="AI đọc ticket + file đính kèm, đề xuất các việc con để tạo trên OpenProject">✂ Tách việc con</button>${close}</div></div>`;
   $("wpBody").innerHTML = `
     <div class="wp-meta">${meta.map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join("")}</div>
     <div class="wp-sec">Mô tả</div>
@@ -1784,6 +1780,7 @@ async function openWP(id, opts) {
   $("wpStatusBtn").onclick = () => wpStatusPicker(w);
   $("wpAssigneeBtn").onclick = () => wpAssigneePicker(w);
   $("wpSplit").onclick = () => openSplit(w.display_id, w.subject);
+  if ($("wpAssist")) $("wpAssist").onclick = () => runAssist(w.display_id, null);
   if (opts && "focusAct" in opts) {
     const el = (opts.focusAct != null && $("wpa-" + opts.focusAct)) || [...document.querySelectorAll("#wpChat .wp-msg.mine")].pop();
     if (el) { el.scrollIntoView({block: "center"}); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1800); }
@@ -1791,6 +1788,23 @@ async function openWP(id, opts) {
   } else if (opts && opts.keepScroll != null) { $("wpBody").scrollTop = opts.keepScroll; if (chatScroll != null) $("wpChatScroll").scrollTop = chatScroll; }
   else { const c = $("wpChatScroll"); c.scrollTop = c.scrollHeight; }  // mở: mô tả ở đầu, hội thoại ở tin mới nhất
   bindWP();
+}
+// Nút "Claude hỗ trợ": lượt chạy mới nhất của ticket ra CẦN QUYẾT ĐỊNH / KHÔNG SỬA ĐƯỢC.
+function assistRun(displayId) {
+  const r = S && (S.runs || []).find((x) => x.display_id === displayId);
+  return r && /CẦN QUYẾT ĐỊNH|KHÔNG SỬA ĐƯỢC/.test(r.verdict || "") ? r : null;
+}
+function wpAssistBtn(displayId) {
+  const r = assistRun(displayId);
+  if (!r) return "";
+  const live = ["queued", "preparing", "running", "shipping"].includes(r.state);
+  return `<button id="wpAssist" ${live ? "disabled" : ""} title="${esc("Lượt " + (r.run_name || "") + ": " + (r.verdict || ""))} — Claude gỡ vướng: tải file đính kèm, ticket liên quan, gọi GET API server test">🤝 Claude hỗ trợ</button>`;
+}
+function runAssist(displayId, profile, ignoreLimits) {
+  const prof = profile || ((S.profiles || []).find((p) => p.active) || {}).name || "";
+  const note = prompt(`Claude hỗ trợ ${displayId}${prof ? " bằng " + prof : ""}${ignoreLimits ? " (bỏ qua ngưỡng hạn mức)" : ""}.\nGhi chú / hướng dẫn cho Claude (có thể để trống):`, "");
+  if (note === null) return;
+  post({action: "assist", display_id: displayId, note, profile: prof, ignore_limits: !!ignoreLimits});
 }
 async function wpStatusPicker(w) {
   const box = $("wpStatus"), btn = $("wpStatusBtn");

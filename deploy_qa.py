@@ -45,6 +45,7 @@ import envconf  # noqa: E402
 
 DEPLOY_CONFIG = envconf.DEPLOY_CONFIG
 SOAR_API = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soar_api.py")
+UI_CHECK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_check.py")
 DEFAULTS = {
     "fe_service": "soar-fe-nginx",
     "be_service": "service-product-content",
@@ -196,6 +197,9 @@ Ví dụ: `python3 {soar_api} GET /api/v1/...`, `python3 {soar_api} POST /api/v1
 `python3 {soar_api} UPLOAD /api/v1/file-attachments/upload file=@{qa_dir}/a.txt type=1 caseId=5`,
 `python3 {soar_api} --header 'Accept-Language: en' GET ...`, FE tĩnh: `python3 {soar_api} GET {fe_url}/index.html`.
 Chạy `python3 {soar_api}` không tham số để xem hướng dẫn. File test tạm: ghi trong {qa_dir}.
+Giao diện thật (trình duyệt, tự đăng nhập tài khoản trong ticket): ghi bước JSON vào {qa_dir}/ui/<tên>.json rồi
+`python3 {ui_check} {qa_dir}/ui/<tên>.json` — hướng dẫn bước ở đầu file {ui_check}; ảnh ra {qa_dir}/ui/<tên>-shots/
+(xem bằng Read), chụp có khoanh đỏ vùng cần chú ý: {{"screenshot": "ten", "mark": ["css"], "note": "…"}}.
 
 ## Làm
 1. Tái hiện đúng các bước trong ticket (Reopened thì theo comment tester gần nhất), so với kết quả mong đợi.
@@ -219,6 +223,8 @@ Ghi {qa_dir}/qa.md bằng tiếng Việt. Dòng đầu đúng một trong: `QA: 
 ## Kết quả — ngắn gọn cho tester: đã test gì, trên bản nào, kết quả (dùng làm comment ticket)
 ## Bằng chứng — từng request → mã HTTP + phần response quan trọng
 ## Ghi chú — dữ liệu đã tạo / đã dọn, điều chưa kiểm tra được
+## Ảnh minh chứng — mỗi ảnh một dòng `- SAU: <đường dẫn ảnh> — <chú thích cho tester>` (ảnh chụp server, có khoanh
+vùng) và `- TRƯỚC: {qa_dir}/ticket/images/<id>.png — <chú thích>` (ảnh gốc của tester, nếu có); tối đa 6, không có thì bỏ.
 """
 
 GEMINI_QA_PROMPT = """KHÔNG dùng bất kỳ công cụ nào (không chạy lệnh, không đọc file, không gọi mạng). Một chương trình khác gọi
@@ -229,7 +235,16 @@ Làm ĐÚNG như mô tả trong ticket: tái hiện các bước tái hiện (ti
 KẾT QUẢ MONG ĐỢI của ticket. Không mở rộng sang việc khác ngoài ticket.
 
 Gọi API: mỗi phần tử `calls` gồm
-- method: GET | POST | PUT | PATCH | UPLOAD (multipart) | SEARCH | DELETE (chỉ cho: {delete_allow})
+- method: GET | POST | PUT | PATCH | UPLOAD (multipart) | SEARCH | UI | DELETE (chỉ cho: {delete_allow})
+- UI: thao tác GIAO DIỆN thật bằng trình duyệt (tự đăng nhập tài khoản ghi trong ticket; không có thì tài khoản QA,
+  hoặc account=<tên> như API). target = "/" ; body = chuỗi JSON mảng các bước:
+  {{"goto": "/duong-dan"}}, {{"click": "text=Lưu"}} (selector Playwright: text=…, css, role=button[name="…"]),
+  {{"fill": ["css", "chữ"]}}, {{"press": "Enter"}}, {{"select": ["css", "giá trị"]}}, {{"hover": "css"}},
+  {{"wait": 1500}} | {{"wait": "text=Đã lưu"}}, {{"text": "css"}} (đọc chữ), {{"style": ["css", ["color", "font-size"]]}}
+  (CSS tính toán), {{"lang": "en"}}, {{"screenshot": "ten", "mark": ["css vùng cần chú ý"], "note": "nhãn ngắn"}}
+  (chụp + khoanh đỏ vùng cần chú ý). Màn hình đăng nhập / trang công khai: body = {{"login": false, "steps": [...]}}.
+  Kết quả trả về: từng bước OK / LỖI, chữ / CSS đọc được, đường dẫn ảnh. Bạn KHÔNG xem được ảnh: kết luận dựa trên
+  chữ / CSS đọc được; ảnh dùng làm minh chứng cho tester. Nút xoá / đăng xuất bị chặn. Tối đa 2 request UI mỗi vòng.
 - SEARCH: tìm trong TOÀN BỘ mã FE đang chạy (index.html + mọi file /assets/*.js, *.css đã tải sẵn); target = đoạn
   chữ hoặc regex (Python) cần tìm, ví dụ một chuỗi i18n, tên class, aria-label, mã màu trong diff. Trả các đoạn khớp
   kèm tên file và ngữ cảnh. Dùng SEARCH để kiểm tra lỗi giao diện thay vì GET file bundle (file rất lớn, bị cắt).
@@ -271,9 +286,13 @@ Không xoá tài khoản (để dùng lại); ghi các tài khoản đã tạo v
 An toàn — môi trường dùng chung với tester: không sửa dữ liệu không do mình tạo; dữ liệu test đặt tên bắt đầu `QA_AUTO_`;
 đổi cấu hình thì gọi trả lại giá trị cũ ngay trong vòng sau.
 
-Lỗi chỉ thấy trên giao diện (màu, focus, nhãn trình đọc màn hình…): dùng SEARCH tìm các chuỗi / đoạn code đặc trưng
-mà diff thêm vào (i18n, aria-label, class, hằng số) trong mã FE đang chạy; thấy đủ thay đổi của diff → ĐẠT (ghi rõ là
-kiểm tra mã đã deploy); thiếu → KHÔNG ĐẠT; chỉ khi không xác định được chuỗi đặc trưng nào mới KHÔNG TỰ TEST ĐƯỢC.
+Lỗi thấy trên giao diện (màu, vị trí, chữ, icon, focus…): ƯU TIÊN dùng UI làm đúng các bước của ticket, đọc chữ / CSS
+của vùng liên quan và chụp ảnh có khoanh vùng đó; kết hợp SEARCH tìm chuỗi đặc trưng của diff trong mã FE đang chạy.
+Đúng kết quả mong đợi → ĐẠT; sai → KHÔNG ĐẠT; chỉ khi không làm được cả UI lẫn SEARCH mới KHÔNG TỰ TEST ĐƯỢC.
+
+ẢNH MINH CHỨNG (shots, khi kết thúc; tối đa 6): ảnh chụp từ request UI (đường dẫn trong kết quả) với kind "SAU" và
+note ngắn cho tester (vùng khoanh đỏ là gì, đúng / sai thế nào); kèm ảnh gốc của tester trong ticket (dạng
+`ticket/images/<id>.png`, ảnh `images/<id>.png` trong mô tả / comment) với kind "TRƯỚC" nếu có. Không có ảnh thì bỏ trống.
 
 Ticket KHÔNG RÕ RÀNG — đọc cả mô tả, comment, diff mà vẫn không xác định được cần kiểm tra gì: không có bước tái hiện
 lẫn kết quả mong đợi, mô tả mâu thuẫn với comment, hoặc không biết màn hình / API / dữ liệu nào → KHÔNG test (không
@@ -310,6 +329,9 @@ QA_SCHEMA = {
             "why": {"type": "string"}}, "required": ["method", "target"]}},
         "verdict": {"type": "string", "enum": ["ĐẠT", "KHÔNG ĐẠT", "KHÔNG TỰ TEST ĐƯỢC", "KHÔNG RÕ YÊU CẦU", "CHƯA"]},
         "result": {"type": "string"}, "evidence": {"type": "string"}, "notes": {"type": "string"},
+        "shots": {"type": "array", "items": {"type": "object", "properties": {
+            "path": {"type": "string"}, "kind": {"type": "string", "enum": ["TRƯỚC", "SAU"]},
+            "note": {"type": "string"}}, "required": ["path", "kind"]}},
     },
     "required": ["done", "verdict"],
 }
@@ -329,16 +351,41 @@ def clean_output(data):
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", head + sep + body)
 
 
+def ui_call(qa_dir, call):
+    """Request UI của QA: các bước giao diện (JSON) → ui_check.py (trình duyệt thật). Trả kết quả (đã cắt)."""
+    try:
+        steps = json.loads(call.get("body") or "[]")
+    except ValueError as ex:
+        return "UI: body không phải JSON hợp lệ (%s)" % ex
+    ui_dir = os.path.join(qa_dir, "ui")
+    os.makedirs(ui_dir, exist_ok=True)
+    path = os.path.join(ui_dir, "ui-%d.json" % (len([f for f in os.listdir(ui_dir) if f.endswith(".json")]) + 1))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(steps, f, ensure_ascii=False, indent=1)
+    cmd = ["python3", UI_CHECK, path, "--ticket", os.path.join(qa_dir, "ticket", "ticket.md")]
+    if call.get("account"):
+        cmd += ["--as", call["account"]] + (["--password", call["password"]] if call.get("password") else [])
+    try:
+        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=420,
+                             stdin=subprocess.DEVNULL, universal_newlines=True, errors="replace").stdout
+    except subprocess.TimeoutExpired:
+        return "UI: HẾT THỜI GIAN (420s)"
+    out = out.replace(qa_dir + "/", "")  # đường dẫn ảnh tương đối thư mục QA (dùng lại trong shots)
+    return out if len(out) <= 4000 else out[:4000] + "\n… (cắt, tổng %d ký tự)" % len(out)
+
+
 def soar_call(qa_dir, call, dcfg=None):
     """Một request Gemini yêu cầu → chạy soar_api.py. Trả chuỗi kết quả (đã cắt)."""
     method = (call.get("method") or "GET").upper()
     if method == "SEARCH" and dcfg:
         return bundle_search(dcfg, call.get("target", ""))
+    if method == "UI":
+        return ui_call(qa_dir, call)
     if method == "DELETE":
         if not dcfg or not any(re.search(rx, call.get("target", "")) for rx in dcfg.get("qa_delete_allow", [])):
             return "BỊ CHẶN: DELETE chỉ cho đường dẫn khớp %s" % (dcfg or {}).get("qa_delete_allow")
     elif method not in ("GET", "POST", "PUT", "PATCH", "UPLOAD"):
-        return "BỊ CHẶN: chỉ cho GET / POST / PUT / PATCH / UPLOAD / SEARCH / DELETE (giới hạn)"
+        return "BỊ CHẶN: chỉ cho GET / POST / PUT / PATCH / UPLOAD / SEARCH / UI / DELETE (giới hạn)"
     rep_notes = []
     call = dict(call)
     for k in ("target", "body", "file_name", "file_content"):
@@ -530,7 +577,14 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
                           rnd, ": " + err.strip().splitlines()[-1][:300] if err.strip() else "")}
         if answer.get("done") or not answer.get("calls"):
             break
-        calls = answer["calls"][:dcfg["qa_calls_per_round"]]
+        calls, n_ui = [], 0
+        for c in answer["calls"][:dcfg["qa_calls_per_round"]]:
+            if str(c.get("method") or "").upper() == "UI":
+                n_ui += 1
+                if n_ui > 2:
+                    continue
+                c = dict(c, parallel=False)  # trình duyệt: chạy lần lượt
+            calls.append(c)
         parallel = [c for c in calls if c.get("parallel")]
         results = {}
         if len(parallel) > 1:
@@ -562,16 +616,23 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
     verdict = answer.get("verdict") if answer.get("verdict") in ("ĐẠT", "KHÔNG ĐẠT", "KHÔNG TỰ TEST ĐƯỢC",
                                                                  "KHÔNG RÕ YÊU CẦU") \
         else "KHÔNG TỰ TEST ĐƯỢC"
+    shots = []
+    for sh in (answer.get("shots") or [])[:6]:
+        p = str(sh.get("path") or "").strip().strip("`")
+        if p and os.path.isfile(p if os.path.isabs(p) else os.path.join(qa_dir, p)):
+            shots.append("- %s: %s — %s" % ("TRƯỚC" if sh.get("kind") == "TRƯỚC" else "SAU", p,
+                                             str(sh.get("note") or "").replace("\n", " ")[:300]))
     text = "QA: %s\n\n_QA bằng Gemini (%s), %d request_\n\n## Kết quả\n%s\n\n## Bằng chứng\n%s\n\n## Ghi chú\n%s\n\n" \
-           "## Toàn bộ request\n%s\n" % (
+           "%s## Toàn bộ request\n%s\n" % (
                verdict, dcfg.get("qa_model") or acfg.get("gemini_model") or "agy", len(transcript), answer.get("result", ""),
-               answer.get("evidence", ""), answer.get("notes", ""), "\n\n".join(transcript))
+               answer.get("evidence", ""), answer.get("notes", ""),
+               ("## Ảnh minh chứng\n%s\n\n" % "\n".join(shots)) if shots else "", "\n\n".join(transcript))
     with open(os.path.join(qa_dir, "qa.md"), "w", encoding="utf-8") as f:
         f.write(text)
     return text
 
 
-QA_TOOLS = ["Read", "Glob", "Grep", "Bash(python3 %s*)" % SOAR_API, "Bash(ls *)", "Bash(head *)", "Bash(tail *)",
+QA_TOOLS = ["Read", "Glob", "Grep", "Bash(python3 %s*)" % SOAR_API, "Bash(python3 %s *)" % UI_CHECK, "Bash(ls *)", "Bash(head *)", "Bash(tail *)",
             "Bash(grep *)", "Bash(wc *)", "Bash(cat *)"]
 
 
@@ -1653,7 +1714,7 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
         gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard)
     else:
         prompt = QA_PROMPT.format(display_id=display_id, subject=wp.get("subject", ""), deployed=deployed,
-                                  qa_dir=qa_dir, soar_api=SOAR_API, fe_url=dcfg["fe_url"],
+                                  qa_dir=qa_dir, soar_api=SOAR_API, fe_url=dcfg["fe_url"], ui_check=UI_CHECK,
                                   ticket_accounts=", ".join(dcfg.get("qa_ticket_accounts") or []) or "trống — không dùng")
         prompt += "\n\n# RULE TỪ CÁC LẦN QA SAI TRƯỚC (BẮT BUỘC TUÂN THEO)\n" + load_qa_rules()
         with open(os.path.join(qa_dir, "prompt.md"), "w", encoding="utf-8") as f:
@@ -1680,6 +1741,7 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
         body = af.report_section(text, "Kết quả") or "Đã kiểm tra đạt."
         comment = "**[QA tự động] Đã deploy lên môi trường test (%s) và kiểm tra lại: ĐẠT** — %schuyển %s.\n\n%s" % (
             deployed, "chuyển Resolved, " if review else "", dcfg["qa_user_name"], af.for_tester(body)[:3000])
+        comment += "\n".join(af.evidence_lines(api, wp["id"], text, qa_dir))
         af.op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp["id"], {"comment": {"raw": comment}})
         lock_version = api.get("/api/v3/work_packages/%s" % wp["id"])["lockVersion"]
         links = {"assignee": {"href": "/api/v3/users/%s" % dcfg["qa_user_id"]}}
@@ -1703,6 +1765,7 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
         body = af.report_section(text, "Kết quả") or "QA tự động không xác định được cần kiểm tra gì."
         comment = "**[QA tự động] Chưa test trên môi trường test (%s): yêu cầu chưa rõ** — chuyển UNREVIEWED.\n\n%s" % (
             deployed, af.for_tester(body)[:3000])
+        comment += "\n".join(af.evidence_lines(api, wp["id"], text, qa_dir))
         af.op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp["id"], {"comment": {"raw": comment}})
         lock_version = api.get("/api/v3/work_packages/%s" % wp["id"])["lockVersion"]
         af.op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp["id"], {

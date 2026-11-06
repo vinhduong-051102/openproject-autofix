@@ -433,7 +433,7 @@ def wp_status_id(api, wp_id):
     return int(href.rstrip("/").split("/")[-1])
 
 
-def mark_for_review(api, wp_id, status_id, report_text, run_name):
+def mark_for_review(api, wp_id, status_id, report_text, run_name, run_dir=None):
     """Ticket cần người duyệt: comment lý do (mục "Cần quyết định" của báo cáo) + chuyển trạng thái chờ duyệt."""
     reason = report_section(report_text, "Cần quyết định") or report_section(report_text, "Nguyên nhân") \
         or "Xem báo cáo autofix %s." % run_name
@@ -444,6 +444,7 @@ def mark_for_review(api, wp_id, status_id, report_text, run_name):
     if decider:
         comment += "\n\n_Người quyết: %s%s_" % ("Tester — sẽ xin ý kiến qua Telegram" if decider == "tester" else "Dev",
                                                (" (" + plain_md(why) + ")") if why else "")
+    comment += "\n".join(evidence_lines(api, wp_id, report_text, run_dir))
     op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": comment}})
     w = api.get("/api/v3/work_packages/%s" % wp_id)
     op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp_id, {
@@ -1168,6 +1169,52 @@ def referenced_commits(report_text, dirs):
     return out
 
 
+EVIDENCE_RX = re.compile(r"^\s*[-*]\s*(TRƯỚC|SAU)\s*:\s*`?([^\s`]+\.(?:png|jpe?g|webp))`?\s*(?:[—–:-]+\s*(.*))?$", re.I)
+
+
+def evidence_lines(api, wp_id, report_text, run_dir, limit=6):
+    """Mục `## Ảnh minh chứng` của report.md (dòng `- TRƯỚC: <ảnh> — <chú thích>` / `- SAU: …`) → các dòng markdown
+    chèn vào comment. Ảnh gốc của ticket (ticket/images/<id>.png) dùng lại file đính kèm sẵn có; ảnh khác (trong thư
+    mục lượt chạy, ≤ 5 MB) được upload lên ticket. Lỗi upload chỉ bỏ ảnh đó."""
+    sec = report_section(report_text or "", "Ảnh minh chứng")
+    if not sec or not run_dir:
+        return []
+    root = os.path.realpath(run_dir)
+    before, after = [], []
+    for line in sec.splitlines():
+        m = EVIDENCE_RX.match(line)
+        if not m or len(before) + len(after) >= limit:
+            continue
+        kind, path, note = m.group(1).upper(), m.group(2), (m.group(3) or "").strip()
+        path = os.path.realpath(path if os.path.isabs(path) else os.path.join(run_dir, path))
+        if not path.startswith(root + os.sep) or not os.path.isfile(path) or os.path.getsize(path) > 5 * 1024 * 1024:
+            log("ảnh minh chứng bỏ qua (ngoài thư mục lượt chạy / không có / quá 5 MB): %s" % path)
+            continue
+        g = re.fullmatch(re.escape(os.path.join(root, "ticket", "images")) + r"/(\d+)\.png", path)
+        att = g.group(1) if g else ""
+        if not att:
+            try:
+                import task_create
+                ext = os.path.splitext(path)[1].lower()
+                ctype = {".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
+                name = "autofix-%s-%s" % ("truoc" if kind.startswith("TR") else "sau", os.path.basename(path))
+                att = str(task_create.upload_attachment(api, wp_id, path, name, ctype).get("id") or "")
+            except Exception as ex:  # noqa: BLE001
+                log("upload ảnh minh chứng lỗi %s: %s" % (path, ex))
+                continue
+        if att:
+            note = for_tester(note)[:300]
+            (before if kind.startswith("TR") else after).append(
+                "%s\n![%s](/api/v3/attachments/%s/content)" % (("_%s_" % note) if note else "", note or "ảnh", att))
+    out = []
+    for title, items in (("Trước khi sửa", before), ("Sau khi sửa", after)):
+        if items:
+            out += ["", "**Ảnh minh chứng — %s** (khung đỏ: vùng cần chú ý):" % title]
+            for it in items:
+                out += ["", it]
+    return out
+
+
 def comment_and_status(api, wp_id, lines, status_id):
     op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join(lines)}})
     if status_id:
@@ -1206,6 +1253,7 @@ def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir
                  "AI kiểm tra lại xác nhận đạt. Cần test trên bản deploy mới nhất."]
         if body:
             lines += ["", body]
+        lines += evidence_lines(api, wp_id, report_text, run_dir)
         comment_and_status(api, wp_id, lines, acfg["resolved_status_id"])
         return "Gemini ĐẠT · đã sửa sẵn (không commit mới), comment + chuyển Resolved"
     gemini_text = open(os.path.join(run_dir, "gemini.md"), encoding="utf-8").read() \
@@ -1217,6 +1265,7 @@ def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir
     lines += ["- " + i for i in items]
     if body:
         lines += ["", "**Nhận định của autofix:**", body]
+    lines += evidence_lines(api, wp_id, report_text, run_dir)
     comment_and_status(api, wp_id, lines, review_id)
     return "Gemini %s · đã sửa sẵn (không commit mới) → %s" % (
         verdict or "không chạy được", "comment + chuyển UNREVIEWED" if review_id else "đã comment")
@@ -1499,7 +1548,8 @@ def claude_cmd(acfg, prompt, run_dir, be_dir=None):
     # được mọi nơi trên máy — chỉ cho trong thư mục của lượt chạy (worktree + report).
     cmd += ["--allowedTools"] + ALLOWED_TOOLS + write_rules(run_dir, acfg) + ["--disallowedTools"] + DISALLOWED_TOOLS
     if acfg.get("_assist"):  # bước Claude hỗ trợ: được gọi GET API server test (chỉ đọc) qua soar_api.py
-        cmd[cmd.index("--disallowedTools"):cmd.index("--disallowedTools")] = ["Bash(python3 %s GET *)" % SOAR_API]
+        cmd[cmd.index("--disallowedTools"):cmd.index("--disallowedTools")] = [
+            "Bash(python3 %s GET *)" % SOAR_API, "Bash(python3 %s *)" % UI_CHECK]
     if acfg.get("model"):
         cmd += ["--model", acfg["model"]]
     return cmd
@@ -1687,7 +1737,7 @@ def _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, rep
         inbox(cfg, "**CLAUDE REVIEW** %s — %s · %s" % (display_id, shown, os.path.join(run_dir, "followup.md")))
         if decision == "CẦN QUYẾT ĐỊNH":
             if acfg.get("review_status_id"):
-                mark_for_review(api, wp_id, acfg["review_status_id"], followup_text, os.path.basename(run_dir))
+                mark_for_review(api, wp_id, acfg["review_status_id"], followup_text, os.path.basename(run_dir), run_dir)
                 return False, " · ".join(notes) + " → đã chuyển UNREVIEWED, chưa push phần mới"
             return False, " · ".join(notes) + " → chờ quyết định, chưa push"
         if decision == "SỬA THÊM":
@@ -1775,6 +1825,7 @@ def _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, rep
                 if cause and not re.fullmatch(r"[-*\s]*(Không có|Không)\.?[^\n]*", cause, re.I):
                     body = "**Nguyên nhân lỗi:** %s\n\n%s" % (first_sentence(for_tester(cause), 300), body)
             lines += [""] + (["**%s:**" % title] if title else []) + [body]
+    lines += evidence_lines(api, wp_id, followup_text if review_of is not None else report_text, run_dir)
     if queued:
         lines += [""] + waiting_comment(run_dir, pushed=True)
     op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join(lines)}})
@@ -2417,6 +2468,7 @@ def ship_run(cfg, acfg, run_name, profile=None):
 
 
 SOAR_API = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soar_api.py")
+UI_CHECK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_check.py")
 
 ASSIST_NOTE = """
 
@@ -2436,11 +2488,22 @@ Công cụ ĐÃ lấy sẵn thêm tài liệu cho bạn:
    ghi lại report.md `KẾT QUẢ: CẦN QUYẾT ĐỊNH`, mục "Cần quyết định / rủi ro" nói rõ đã thử tài liệu nào và vì sao vẫn
    chưa đủ, câu hỏi cụ thể cho người quyết.
 4. Worktree có thể đã có commit của lượt trước: xem `git -C <worktree> log --oneline -3` trước, không commit trùng.
+5. Có ảnh minh chứng (lỗi giao diện, hoặc đã test trên giao diện) → thêm vào report.md mục `## Ảnh minh chứng`, mỗi ảnh
+   một dòng `- TRƯỚC: <đường dẫn ảnh> — <chú thích ngắn cho tester>` hoặc `- SAU: …` (tối đa 6 ảnh). TRƯỚC = hiện
+   trạng lỗi: ảnh gốc của tester ({run_dir}/ticket/images/…) và / hoặc ảnh chụp server test có khoanh vùng lỗi; SAU =
+   ảnh đã đúng (chỉ khi server đã chạy bản có bản sửa). Công cụ tự upload ảnh và chèn vào comment trên ticket.
 """
 
 ASSIST_API_NOTE = """Gọi API server test (CHỈ ĐỌC, tự đăng nhập): `python3 {soar_api} GET /api/v1/...` (một lệnh đơn đúng dạng này;
 file tĩnh FE: `python3 {soar_api} GET {fe_url}/index.html`). Không gọi được POST / PUT / DELETE: cần ghi dữ liệu thì
 ghi vào báo cáo. Server test có thể đang chạy bản cũ hơn code trong worktree.
+Test trên GIAO DIỆN thật (trình duyệt, tự đăng nhập bằng tài khoản / OTP ghi trong ticket): ghi các bước bằng Write vào
+{run_dir}/ui/<tên>.json rồi chạy `python3 {ui_check} {run_dir}/ui/<tên>.json` (một lệnh đơn). Ảnh ra
+{run_dir}/ui/<tên>-shots/*.png — xem bằng Read. Bước (mảng JSON): {{"goto": "/duong-dan"}}, {{"click": "text=Lưu"}},
+{{"fill": ["css", "chữ"]}}, {{"press": "Enter"}}, {{"wait": 1500}}, {{"text": "css"}}, {{"style": ["css", ["color"]]}},
+{{"screenshot": "ten", "mark": ["css vùng cần chú ý", …], "note": "nhãn ngắn"}} (khoanh đỏ vùng cần chú ý). Màn hình
+đăng nhập / trang công khai: {{"login": false, "steps": [...]}}. Chỉ thao tác để tái hiện / kiểm tra, KHÔNG tạo / sửa /
+xoá dữ liệu thật (nút xoá / đăng xuất bị chặn). Giao diện server là bản ĐÃ DEPLOY (chưa có bản sửa trong worktree).
 """
 
 
@@ -2540,7 +2603,8 @@ def assist_step(api, cfg, acfg, wp, run_dir, report_text, note=""):
         prompt = f.read()
     prompt += ASSIST_NOTE.format(
         before=before if os.path.exists(before) else "(không có)", material="\n".join(material), run_dir=run_dir,
-        api_note=ASSIST_API_NOTE.format(soar_api=SOAR_API, fe_url=fe_url) if api_ok else "",
+        api_note=ASSIST_API_NOTE.format(soar_api=SOAR_API, fe_url=fe_url, ui_check=UI_CHECK, run_dir=run_dir)
+        if api_ok else "",
         note=("\n## Ghi chú của dev cho lượt hỗ trợ này (làm theo)\n%s\n" % note.strip()) if note and note.strip() else "")
     with open(os.path.join(run_dir, "assist", "prompt.md"), "w", encoding="utf-8") as f:
         f.write(prompt)
@@ -2622,7 +2686,7 @@ def assist_run(cfg, acfg, run_name, note="", profile=None):
         return
     if verdict.startswith("CẦN QUYẾT ĐỊNH") and acfg.get("review_status_id"):
         try:
-            mark_for_review(api, wp_id, acfg["review_status_id"], report_text, run_name)
+            mark_for_review(api, wp_id, acfg["review_status_id"], report_text, run_name, run_dir)
             verdict += " → đã chuyển UNREVIEWED"
         except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
             verdict += " (chuyển UNREVIEWED lỗi: %s)" % ex
@@ -3223,7 +3287,7 @@ def main():
                 report_text, verdict = report_verdict(report)
         if verdict.startswith("CẦN QUYẾT ĐỊNH") and acfg.get("review_status_id"):
             try:
-                mark_for_review(api, wp_id, acfg["review_status_id"], report_text, run_name)
+                mark_for_review(api, wp_id, acfg["review_status_id"], report_text, run_name, run_dir)
                 verdict += " → đã chuyển UNREVIEWED"
             except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
                 verdict += " (chuyển UNREVIEWED lỗi: %s)" % ex
