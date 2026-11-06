@@ -1228,6 +1228,7 @@ function renderDetail() {
       <select id="runProfile" title="Gói dùng cho lượt chạy lại">${opts}</select>
       <button class="primary" id="rerun" ${live ? "disabled" : ""}>Chạy lại autofix</button>
       <button id="review" ${live ? "disabled" : ""} title="Gemini test lại bản đã push, Claude xem lại các ý chưa đạt">Test lại</button>
+      ${/CẦN QUYẾT ĐỊNH|KHÔNG SỬA ĐƯỢC/.test(r.verdict || "") ? `<button id="assist" ${live ? "disabled" : ""} title="Claude gỡ vướng trên đúng lượt này: tải file đính kèm, ticket liên quan, gọi GET API server test; nhập thêm ghi chú hướng dẫn nếu cần">🤝 Claude hỗ trợ</button>` : ""}
       <label class="force" title="Chạy dù gói đã quá ngưỡng 5 giờ / 7 ngày tự đặt. Gói đã hết hạn mức thật thì vẫn không chạy được.">
         <input type="checkbox" id="ignoreLimits"> Bỏ qua ngưỡng hạn mức</label>
       ${r.wp_id ? `<a href="${esc(S.op_url)}/work_packages/${esc(r.wp_id)}" target="_blank" rel="noopener"><button>Mở OpenProject ↗</button></a>` : ""}
@@ -1238,6 +1239,11 @@ function renderDetail() {
   document.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { tab = b.dataset.tab; fileCache = ""; renderDetail(); loadTab(true); });
   const forceNote = () => $("ignoreLimits").checked ? " (bỏ qua ngưỡng hạn mức)" : "";
   $("rerun").onclick = () => confirm(`Chạy lại autofix cho ${r.display_id} bằng ${$("runProfile").value}${forceNote()}?`) && post({action: "rerun", display_id: r.display_id, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked});
+  if ($("assist")) $("assist").onclick = () => {
+    const note = prompt(`Claude hỗ trợ ${r.display_id} bằng ${$("runProfile").value}${forceNote()}.\nGhi chú / hướng dẫn cho Claude (có thể để trống):`, "");
+    if (note === null) return;
+    post({action: "assist", display_id: r.display_id, note, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked});
+  };
   $("review").onclick = () => confirm(`Test lại ${r.display_id}${forceNote()}?`) && post({action: "review", display_id: r.display_id, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked});
   paintLog();
 }
@@ -1688,7 +1694,7 @@ const wpFmt = (t) => t ? new Date(t).toLocaleString("vi-VN", {hour12: false, day
 const wpSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
 let wpReq = 0, WP_CUR = null;
 // Thao tác ghi lên OpenProject (từ trang này, hoặc tiến trình nền vừa cập nhật) → tải lại mọi chỗ hiện dữ liệu OP.
-const OP_WRITE = new Set(["task_create", "rerun", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
+const OP_WRITE = new Set(["task_create", "rerun", "assist", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
   "tg_approve", "tg_link", "tg_retry", "tg_ask_reopen", "tg_ask_resolve", "tg_triage"]);
 let opChangedT = null;
 function opChanged(fromBackground, skipWp) {
@@ -1721,7 +1727,8 @@ async function openWP(id, opts) {
     $("wpBody").innerHTML = `<div class="empty">${esc(w.error)}</div>`; bindWP(); return; }
   const meta = [["Trạng thái", `<span class="wp-status" id="wpStatus"><span class="badge ${opBadge(w.status)}">${esc(w.status)}</span>
       <button class="link" id="wpStatusBtn" title="Đổi trạng thái trên OpenProject">đổi ▾</button></span>`], ["Loại", esc(w.type)],
-    ["Ưu tiên", esc(w.priority)], ["Người được giao", esc(w.assignee || "—")], ["Phụ trách", esc(w.responsible || "—")],
+    ["Ưu tiên", esc(w.priority)], ["Người được giao", `<span class="wp-status" id="wpAssignee"><span>${esc(w.assignee || "—")}</span>
+      <button class="link" id="wpAssigneeBtn" title="Đổi người được giao trên OpenProject">đổi ▾</button></span>`], ["Phụ trách", esc(w.responsible || "—")],
     ["Người tạo", esc(w.author || "—")], ["Phiên bản", esc(w.version || "—")], ["Danh mục", esc(w.category || "—")],
     ["Tạo lúc", wpFmt(w.created)], ["Cập nhật", wpFmt(w.updated)]];
   if (w.start || w.due) meta.push(["Bắt đầu → hạn", `${esc(w.start || "—")} → ${esc(w.due || "—")}`]);
@@ -1775,6 +1782,7 @@ async function openWP(id, opts) {
   $("wpSend").onclick = () => sendComment(w.id, draftKey);
   document.querySelector("[data-wpjump]").onclick = () => wpScrollEnd();
   $("wpStatusBtn").onclick = () => wpStatusPicker(w);
+  $("wpAssigneeBtn").onclick = () => wpAssigneePicker(w);
   $("wpSplit").onclick = () => openSplit(w.display_id, w.subject);
   if (opts && "focusAct" in opts) {
     const el = (opts.focusAct != null && $("wpa-" + opts.focusAct)) || [...document.querySelectorAll("#wpChat .wp-msg.mine")].pop();
@@ -1814,6 +1822,41 @@ async function wpStatusPicker(w) {
       if (typeof loadOP === "function") loadOP(true);
     } catch (e) {
       toast("Đổi trạng thái lỗi: " + e.message, true); ok.classList.remove("busy"); ok.disabled = false;
+    }
+  };
+}
+async function wpAssigneePicker(w) {
+  const box = $("wpAssignee"), btn = $("wpAssigneeBtn");
+  btn.classList.add("busy"); btn.disabled = true;
+  let d;
+  try { d = await (await fetch("/api/op/assignees?id=" + encodeURIComponent(w.id))).json(); }
+  catch (e) { d = {error: "dashboard mất kết nối"}; }
+  btn.classList.remove("busy"); btn.disabled = false;
+  if (d.error) { toast("Không lấy được danh sách người được giao: " + d.error, true); return; }
+  if (!d.writable) { toast("Tài khoản API token không được đổi người được giao ticket này", true); return; }
+  const me = d.users.find((u) => u.id === d.me), others = d.users.filter((u) => u.id !== d.me);
+  const opt = (id, label) => `<option value="${esc(id)}" ${id === d.current ? "selected" : ""}>${esc(label)}</option>`;
+  box.innerHTML = `<select id="wpAssigneeSel" aria-label="Người được giao mới">${opt("", "— Chưa giao —")}
+      ${me ? opt(me.id, me.name + " (tôi)") : ""}${others.map((u) => opt(u.id, u.name + (u.type === "Group" ? " (nhóm)" : ""))).join("")}</select>
+    <button class="primary" id="wpAssigneeOk">Lưu</button><button class="link" id="wpAssigneeNo">Huỷ</button>`;
+  const sel = $("wpAssigneeSel"); sel.focus();
+  $("wpAssigneeNo").onclick = () => openWP(String(w.id), {keepScroll: $("wpBody").scrollTop});
+  $("wpAssigneeOk").onclick = async () => {
+    if (sel.value === d.current) { toast("Chưa chọn người khác", true); return; }
+    const to = sel.value ? (d.users.find((u) => u.id === sel.value) || {}).name : "Chưa giao";
+    if (!confirm(`Đổi người được giao ${w.display_id} từ "${w.assignee || "Chưa giao"}" sang "${to}" trên OpenProject?`)) return;
+    const ok = $("wpAssigneeOk"); ok.classList.add("busy"); ok.disabled = true;
+    try {
+      const r = await fetch("/api/op/assignee", {method: "POST", headers: {"Content-Type": "application/json", "X-Autofix": "1"},
+        body: JSON.stringify({id: String(w.id), user_id: sel.value, lock_version: w.lock_version})});
+      const res = await r.json().catch(() => ({}));
+      if (!r.ok || res.error) throw new Error(res.error || ("HTTP " + r.status));
+      toast(`${w.display_id} → giao cho ${res.assignee || "(chưa giao)"}`);
+      await openWP(String(w.id), {keepScroll: $("wpBody").scrollTop});
+      opChanged(false, true);
+      if (typeof loadOP === "function") loadOP(true);
+    } catch (e) {
+      toast("Đổi người được giao lỗi: " + e.message, true); ok.classList.remove("busy"); ok.disabled = false;
     }
   };
 }

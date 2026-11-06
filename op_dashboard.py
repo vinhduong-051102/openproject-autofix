@@ -893,6 +893,26 @@ def action(body):
     if kind == "followup_drop":
         af.clear_followup(root, body.get("display_id") or "")
         return "Đã bỏ %s khỏi hàng chờ (trạng thái ticket giữ nguyên, đổi tay nếu cần)" % body.get("display_id")
+    if kind == "assist":
+        display_id = body.get("display_id") or ""
+        if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):
+            raise ValueError("mã ticket không hợp lệ")
+        s = find_run(root, display_id) or {}
+        if s.get("state") in ACTIVE_STATES and af.status_alive(s):
+            raise ValueError("%s đang chạy" % display_id)
+        run_name = s.get("run_name") or ""
+        if not re.match(r"^%s-[\w-]+$" % envconf.TICKET_RX, run_name) or not run_name.startswith(display_id + "-"):
+            raise ValueError("không tìm thấy lượt chạy của %s" % display_id)
+        note = (body.get("note") or "").strip()
+        if len(note) > 4000:
+            raise ValueError("ghi chú quá dài (tối đa 4000 ký tự)")
+        extra = ["--profile", body["profile"]] if body.get("profile") in names else []
+        prof, why = af.choose_profile(root, acfg, body.get("profile"))
+        if prof is None:
+            raise ValueError("không có gói dùng được: " + why + ("" if force else " — tick \"Bỏ qua ngưỡng\" để chạy"))
+        spawn(["--assist", run_name] + (["--note", note] if note else []) + extra + force, display_id)
+        return "Claude đang hỗ trợ %s (tải file đính kèm, ticket liên quan, GET API server test)%s" % (
+            display_id, " · có ghi chú" if note else "")
     if kind in ("rerun", "review"):
         display_id = body.get("display_id") or ""
         if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):
@@ -957,6 +977,13 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/op/statuses":
                 try:
                     return self.send(200, op_allowed_statuses(q.get("id", "")))
+                except ValueError as ex:
+                    return self.send(400, {"error": str(ex)})
+                except OPError as ex:
+                    return self.send(502, {"error": str(ex)})
+            if url.path == "/api/op/assignees":
+                try:
+                    return self.send(200, op_allowed_assignees(q.get("id", "")))
                 except ValueError as ex:
                     return self.send(400, {"error": str(ex)})
                 except OPError as ex:
@@ -1039,6 +1066,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(200, res)
                 except OPError as ex:
                     return self.send(502, {"error": str(ex)})
+            if urlparse(self.path).path == "/api/op/assignee":
+                try:
+                    res = op_set_assignee(body.get("id"), body.get("user_id"), body.get("lock_version"))
+                    op_changed()
+                    return self.send(200, res)
+                except OPError as ex:
+                    return self.send(502, {"error": str(ex)})
             if urlparse(self.path).path == "/api/op/comment":
                 try:
                     res = op_comment(body.get("id"), body.get("text"))
@@ -1066,7 +1100,7 @@ _OP_CACHE = {}
 
 # Thao tác từ trang có ghi lên OpenProject → xoá cache đọc OpenProject (danh sách ticket, trạng thái ticket trong mục
 # Telegram / Xin ý kiến) để lần tải ngay sau đó lấy dữ liệu mới.
-OP_WRITE_ACTIONS = {"task_create", "task_split_create", "rerun", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
+OP_WRITE_ACTIONS = {"task_create", "task_split_create", "rerun", "assist", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
                     "tg_approve", "tg_link", "tg_retry", "tg_ask_reopen", "tg_ask_resolve", "tg_triage"}
 
 
@@ -1275,6 +1309,63 @@ def op_set_status(wp_id, status_id, lock_version=None):
         _OP_CACHE.clear()
     print("op-dashboard: [ghi OP] đổi trạng thái wp %s → %s (%s)" % (wp_id, names[status_id], status_id), flush=True)
     return {"ok": True, "status": names[status_id]}
+
+
+def op_allowed_assignees(wp_id):
+    """Người có thể được giao ticket (available_assignees theo schema form; POST /form không ghi gì)."""
+    wp_id = str(wp_id or "").strip()
+    if not re.fullmatch(r"\d{1,12}", wp_id):
+        raise ValueError("mã work package không hợp lệ")
+    api, _cfg = op_api()
+    try:
+        w = api.get("/api/v3/work_packages/%s" % wp_id)
+        form = af.op_write(api, "POST", "/api/v3/work_packages/%s/form" % wp_id, {"lockVersion": w["lockVersion"]})
+        sch = ((form.get("_embedded") or {}).get("schema") or {}).get("assignee") or {}
+        href = ((sch.get("_links") or {}).get("allowedValues") or {}).get("href") \
+            or "/api/v3/work_packages/%s/available_assignees" % wp_id
+        users = api.get(href, {"pageSize": 500}).get("_embedded", {}).get("elements", [])
+    except urllib.error.HTTPError as ex:
+        raise _op_http_error(ex)
+    except Exception as ex:  # noqa: BLE001
+        raise OPError("Không gọi được OpenProject: %s" % str(ex)[:200])
+    cur = ((w.get("_links") or {}).get("assignee") or {}).get("href") or ""
+    users = sorted(({"id": str(u.get("id")), "name": (u.get("name") or "").strip(), "type": u.get("_type") or ""}
+                    for u in users if u.get("id") is not None), key=lambda u: u["name"].lower())
+    return {"writable": bool(sch.get("writable", True)), "current": cur.rstrip("/").split("/")[-1] if cur else "",
+            "me": op_me_id(api), "users": users, "lock_version": w["lockVersion"]}
+
+
+def op_set_assignee(wp_id, user_id, lock_version=None):
+    """Đổi người được giao (ghi thật lên OpenProject). user_id "" / "none" = bỏ giao; chỉ nhận người trong
+    available_assignees. lock_version khác hiện tại → báo người khác vừa sửa, không ghi đè."""
+    user_id = str(user_id or "").strip()
+    if user_id == "none":
+        user_id = ""
+    if user_id and not re.fullmatch(r"\d{1,12}", user_id):
+        raise ValueError("người được giao không hợp lệ")
+    info = op_allowed_assignees(wp_id)
+    if not info["writable"]:
+        raise ValueError("tài khoản API token không được đổi người được giao ticket này")
+    names = {u["id"]: u["name"] for u in info["users"]}
+    if user_id and user_id not in names:
+        raise ValueError("người này không được giao ticket trong dự án")
+    if lock_version not in (None, "") and str(lock_version) != str(info["lock_version"]):
+        raise OPError("Ticket vừa được người khác cập nhật — tải lại chi tiết rồi đổi lại")
+    api, _cfg = op_api()
+    link = {"href": "/api/v3/users/%s" % user_id} if user_id else {"href": None}
+    try:
+        af.op_write(api, "PATCH", "/api/v3/work_packages/%s" % str(wp_id).strip(), {
+            "lockVersion": info["lock_version"], "_links": {"assignee": link}})
+    except urllib.error.HTTPError as ex:
+        raise _op_http_error(ex)
+    except Exception as ex:  # noqa: BLE001
+        raise OPError("Không gọi được OpenProject: %s" % str(ex)[:200])
+    with _OP_LOCK:
+        _OP_CACHE.clear()
+    name = names.get(user_id, "") if user_id else ""
+    print("op-dashboard: [ghi OP] đổi người được giao wp %s → %s (%s)" % (wp_id, name or "chưa giao", user_id or "-"),
+          flush=True)
+    return {"ok": True, "assignee": name}
 
 
 def op_html(html, base):

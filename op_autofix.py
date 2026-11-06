@@ -109,6 +109,11 @@ AUTOFIX_DEFAULTS = {
     # chuyển sang gói khác còn hạn mức; tắt thì hoãn như cũ.
     "auto_switch": True,
     "switch_above_7d": 0.95,
+    # CẦN QUYẾT ĐỊNH với NGƯỜI QUYẾT: DEV (agent cần hỗ trợ) → tool tự chạy thêm một lượt "Claude hỗ trợ": tải mọi file
+    # đính kèm, ticket liên quan, cho gọi GET API server test (soar_api.py), rồi Claude gỡ vướng và sửa tiếp. Vẫn kẹt
+    # mới chuyển UNREVIEWED. Trang theo dõi có nút chạy lại bước này kèm ghi chú (op_autofix.py --assist RUN).
+    "assist_auto": True,
+    "assist_max_related": 8,
 }
 
 ALLOWED_TOOLS = [
@@ -596,7 +601,7 @@ def any_fix(acfg, run_dir):
     return any(fix_commits(d, r["branch"]) for r, d in R.trees(acfg, run_dir) if os.path.isdir(d))
 
 
-def fetch_ticket(api, wp_id, out_dir):
+def fetch_ticket(api, wp_id, out_dir, figma_designs=True):
     """Mô tả + toàn bộ comment/thay đổi + ảnh đính kèm, để Claude đọc offline."""
     os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
     wp = api.get("/api/v3/work_packages/%s" % wp_id)
@@ -629,7 +634,7 @@ def fetch_ticket(api, wp_id, out_dir):
                     [(a.get("comment") or {}).get("raw") or "" for a in acts])
     try:
         import figma
-        sec = figma.ticket_section(raw, os.path.join(out_dir, "figma"))
+        sec = "" if not figma_designs else figma.ticket_section(raw, os.path.join(out_dir, "figma"))
         if sec:
             lines.append(sec)
             log("%s: đã đọc thiết kế Figma (%d link)" % (wp.get("displayId"), len(figma.find_links(raw))))
@@ -1493,6 +1498,8 @@ def claude_cmd(acfg, prompt, run_dir, be_dir=None):
     # Mỗi quy tắc là một tham số riêng (quy tắc có khoảng trắng, không nối chuỗi được). Edit/Write để trống thì ghi
     # được mọi nơi trên máy — chỉ cho trong thư mục của lượt chạy (worktree + report).
     cmd += ["--allowedTools"] + ALLOWED_TOOLS + write_rules(run_dir, acfg) + ["--disallowedTools"] + DISALLOWED_TOOLS
+    if acfg.get("_assist"):  # bước Claude hỗ trợ: được gọi GET API server test (chỉ đọc) qua soar_api.py
+        cmd[cmd.index("--disallowedTools"):cmd.index("--disallowedTools")] = ["Bash(python3 %s GET *)" % SOAR_API]
     if acfg.get("model"):
         cmd += ["--model", acfg["model"]]
     return cmd
@@ -2409,6 +2416,228 @@ def ship_run(cfg, acfg, run_name, profile=None):
             slot.close()
 
 
+SOAR_API = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soar_api.py")
+
+ASSIST_NOTE = """
+
+## BƯỚC CLAUDE HỖ TRỢ (lý do lượt chạy này)
+Lượt trước của ticket này kết luận CẦN QUYẾT ĐỊNH / chưa làm được vì thiếu thứ mà lượt chạy nền không tự lấy được.
+Báo cáo của lượt trước (đọc kỹ mục "Cần quyết định / rủi ro" và "Người quyết định"): {before}
+Công cụ ĐÃ lấy sẵn thêm tài liệu cho bạn:
+{material}
+{api_note}{note}
+## Làm
+1. Đọc lý do bị kẹt trong báo cáo lượt trước, rồi dùng tài liệu trên để gỡ: file đính kèm đúng tên gốc nằm trong
+   {run_dir}/assist/attachments/ (svg / ảnh / tài liệu… — đưa vào repo bằng Read rồi Write nếu cần dùng làm asset);
+   ticket liên quan trong {run_dir}/assist/related/<MÃ>/ticket.md; dữ liệu thật trên server test qua GET API.
+2. Gỡ được → làm tiếp việc sửa như hướng dẫn ở trên (sửa, tự kiểm tra hồi quy, build / test, commit) và ghi lại
+   {run_dir}/report.md với `KẾT QUẢ: ĐÃ SỬA` (ghi rõ trong "Nguyên nhân" đã dùng tài liệu nào để gỡ).
+3. Vẫn cần người quyết (đổi hành vi sản phẩm, thiếu thông tin không có trong tài liệu, ý kiến trái nhau…) → KHÔNG đoán,
+   ghi lại report.md `KẾT QUẢ: CẦN QUYẾT ĐỊNH`, mục "Cần quyết định / rủi ro" nói rõ đã thử tài liệu nào và vì sao vẫn
+   chưa đủ, câu hỏi cụ thể cho người quyết.
+4. Worktree có thể đã có commit của lượt trước: xem `git -C <worktree> log --oneline -3` trước, không commit trùng.
+"""
+
+ASSIST_API_NOTE = """Gọi API server test (CHỈ ĐỌC, tự đăng nhập): `python3 {soar_api} GET /api/v1/...` (một lệnh đơn đúng dạng này;
+file tĩnh FE: `python3 {soar_api} GET {fe_url}/index.html`). Không gọi được POST / PUT / DELETE: cần ghi dữ liệu thì
+ghi vào báo cáo. Server test có thể đang chạy bản cũ hơn code trong worktree.
+"""
+
+
+def _safe_name(name):
+    name = re.sub(r"[^\w.\-() ]+", "_", os.path.basename(name or "file")).strip(" .") or "file"
+    return name[:120]
+
+
+def gather_assist(api, acfg, wp, run_dir, report_text, note=""):
+    """Tài liệu cho bước Claude hỗ trợ (công cụ có mạng, Claude thì không): mọi file đính kèm + ticket liên quan.
+    Trả danh sách dòng mô tả (đưa vào prompt)."""
+    display_id = wp.get("displayId") or "WP-%s" % wp["id"]
+    out = os.path.join(run_dir, "assist")
+    att_dir, rel_dir = os.path.join(out, "attachments"), os.path.join(out, "related")
+    os.makedirs(att_dir, exist_ok=True)
+    os.makedirs(rel_dir, exist_ok=True)
+    lines = []
+    try:
+        atts = api.get("/api/v3/work_packages/%s/attachments" % wp["id"]).get("_embedded", {}).get("elements", [])
+    except (op_watch.urllib.error.URLError, OSError, ValueError) as ex:
+        atts = []
+        lines.append("- (không lấy được danh sách file đính kèm: %s)" % ex)
+    used = set()
+    for a in atts:
+        name = _safe_name(a.get("fileName"))
+        if name in used:
+            name = "%s-%s" % (a.get("id"), name)
+        used.add(name)
+        size = a.get("fileSize") or 0
+        if size > 20 * 1024 * 1024:
+            lines.append("- %s (%d MB) — bỏ qua, quá 20 MB" % (name, size // 1048576))
+            continue
+        path = os.path.join(att_dir, name)
+        req = op_watch.urllib.request.Request(api.url + "/api/v3/attachments/%s/content" % a.get("id"),
+                                              headers=api.headers)
+        try:
+            with op_watch.urllib.request.urlopen(req, timeout=60) as resp, open(path, "wb") as f:
+                shutil.copyfileobj(resp, f)
+            lines.append("- %s (%s, %s byte, đăng lúc %s)" % (path, a.get("contentType") or "?", size,
+                                                            (a.get("createdAt") or "")[:16].replace("T", " ")))
+        except (op_watch.urllib.error.URLError, OSError) as ex:
+            lines.append("- %s — tải lỗi: %s" % (name, ex))
+    text = report_text + "\n" + (note or "")
+    try:
+        with open(os.path.join(run_dir, "ticket", "ticket.md"), encoding="utf-8") as f:
+            text = f.read() + "\n" + text
+    except OSError:
+        pass
+    related = []
+    for rid in re.findall(r"\b(%s)\b" % envconf.TICKET_RX, text):
+        if rid != display_id and rid not in related:
+            related.append(rid)
+    for rid in related[:int(acfg.get("assist_max_related") or 8)]:
+        try:
+            w = api.get("/api/v3/work_packages/%s" % rid)
+            fetch_ticket(api, w["id"], os.path.join(rel_dir, rid), figma_designs=False)
+            lines.append("- Ticket liên quan %s — %s: %s/ticket.md" % (rid, w.get("subject", ""),
+                                                                    os.path.join(rel_dir, rid)))
+        except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+            lines.append("- Ticket liên quan %s — không tải được: %s" % (rid, ex))
+    if not lines:
+        lines.append("- (ticket không có file đính kèm / ticket liên quan)")
+    with open(os.path.join(out, "material.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    log("%s: hỗ trợ — %d file đính kèm, %d ticket liên quan" % (display_id, len(atts), min(len(related),
+                                                                 int(acfg.get("assist_max_related") or 8))))
+    return lines
+
+
+def report_verdict(report_path):
+    """(nội dung report.md, kết luận dòng đầu không có "KẾT QUẢ:")."""
+    try:
+        with open(report_path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return "", ""
+    first = text.strip().splitlines()[0] if text.strip() else ""
+    return text, first.replace("KẾT QUẢ:", "").strip() or first
+
+
+def assist_step(api, cfg, acfg, wp, run_dir, report_text, note=""):
+    """Một lượt Claude hỗ trợ trên worktree của lượt chạy: tải tài liệu, chạy Claude (thêm quyền GET API server test),
+    trả (report_text, verdict) mới. Báo cáo cũ giữ ở report-before-assist.md."""
+    display_id = wp.get("displayId") or "WP-%s" % wp["id"]
+    report = os.path.join(run_dir, "report.md")
+    before = os.path.join(run_dir, "report-before-assist.md")
+    if os.path.exists(report):
+        shutil.copy(report, before)
+    material = gather_assist(api, acfg, wp, run_dir, report_text, note)
+    try:
+        dcfg = envconf.deploy_config()
+    except Exception:  # noqa: BLE001 — thiếu cấu hình server test thì chỉ không cho gọi API
+        dcfg = {}
+    fe_url = dcfg.get("fe_url") or ""
+    api_ok = os.path.exists(SOAR_API) and bool(dcfg.get("api_url"))
+    with open(os.path.join(run_dir, "prompt.md"), encoding="utf-8") as f:
+        prompt = f.read()
+    prompt += ASSIST_NOTE.format(
+        before=before if os.path.exists(before) else "(không có)", material="\n".join(material), run_dir=run_dir,
+        api_note=ASSIST_API_NOTE.format(soar_api=SOAR_API, fe_url=fe_url) if api_ok else "",
+        note=("\n## Ghi chú của dev cho lượt hỗ trợ này (làm theo)\n%s\n" % note.strip()) if note and note.strip() else "")
+    with open(os.path.join(run_dir, "assist", "prompt.md"), "w", encoding="utf-8") as f:
+        f.write(prompt)
+    log("%s: Claude hỗ trợ (tài liệu thêm + GET API server test)%s" % (display_id, " — có ghi chú" if note else ""))
+    inbox(cfg, "**AUTOFIX HỖ TRỢ** %s — agent cần hỗ trợ, Claude đang gỡ bằng file đính kèm / ticket liên quan / API "
+               "server test" % display_id)
+    t0 = time.time()
+    acfg["_assist"] = True
+    try:
+        code = run_claude(acfg, prompt, run_dir, append=True)
+    finally:
+        acfg.pop("_assist", None)
+    log_time(api, acfg, str(wp["id"]), time.time() - t0, "dev",
+             "[Autofix] Claude hỗ trợ (%s)" % os.path.basename(run_dir))
+    with open(os.path.join(run_dir, "assist", "done"), "w") as f:
+        f.write(datetime.now().isoformat(timespec="seconds"))
+    text, verdict = report_verdict(report)
+    if not text:
+        verdict = "KHÔNG CÓ BÁO CÁO sau bước hỗ trợ (Claude thoát mã %s)" % code
+    log("%s: sau bước hỗ trợ — %s" % (display_id, verdict))
+    return text, verdict
+
+
+def wants_assist(acfg, verdict, report_text):
+    return bool(acfg.get("assist_auto", True)) and verdict.startswith("CẦN QUYẾT ĐỊNH") \
+        and review_decider(report_text)[0] == "dev"
+
+
+def assist_run(cfg, acfg, run_name, note="", profile=None):
+    """Nút "Claude hỗ trợ" (chạy tay, kèm ghi chú): một lượt hỗ trợ trên lượt chạy cũ rồi giao kết quả như thường."""
+    root = os.path.expanduser(acfg["root"])
+    if re.match(r"^%s$" % envconf.TICKET_RX, run_name):
+        runs = sorted((d for d in os.listdir(root) if d.startswith(run_name + "-")
+                       and os.path.isfile(os.path.join(root, d, "prompt.md"))),
+                      key=lambda d: os.path.getmtime(os.path.join(root, d)))
+        if runs:
+            run_name = runs[-1]
+    run_dir = os.path.join(root, run_name)
+    m = re.match(r"^(%s)-" % envconf.TICKET_RX, run_name)
+    if not m or not os.path.isfile(os.path.join(run_dir, "prompt.md")):
+        sys.exit("không có lượt chạy %s" % run_name)
+    display_id = m.group(1)
+    missing = [r["label"] for r, d in R.trees(acfg, run_dir) if not os.path.isdir(d)]
+    if missing:
+        sys.exit("%s: worktree %s đã bị dọn — bấm Chạy lại autofix (kèm comment hướng dẫn trên ticket) thay vì hỗ trợ"
+                 % (run_name, ", ".join(missing)))
+    for r, d in R.trees(acfg, run_dir):
+        R.link_shared(r, d)
+    ticket_lock = open(os.path.join(root, ".%s.lock" % display_id), "w")
+    try:
+        fcntl.flock(ticket_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("%s đang được xử lý" % display_id)
+    api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    wp = api.get("/api/v3/work_packages/%s" % display_id)
+    wp_id = str(wp["id"])
+    prof, why = choose_profile(root, acfg, profile)
+    if prof is None:
+        ticket_lock.close()
+        sys.exit("%s: không có gói Claude dùng được (%s)" % (display_id, why))
+    use_profile(acfg, prof)
+    slot = acquire_slot(root, acfg)
+    set_status(root, display_id, state="running", run_dir=run_dir, run_name=run_name, wp_id=wp_id, pid=os.getpid(),
+               event="ASSIST", profile=acfg.get("_profile"), started_at=datetime.now().isoformat(timespec="seconds"))
+    try:
+        fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))  # comment mới nhất (vd hướng dẫn của dev)
+        report_text, _old = report_verdict(os.path.join(run_dir, "report.md"))
+        report_text, verdict = assist_step(api, cfg, acfg, wp, run_dir, report_text, note)
+    except Exception as ex:  # noqa: BLE001
+        set_status(root, display_id, state="error", verdict="hỗ trợ lỗi: " + str(ex).splitlines()[0][:200])
+        inbox(cfg, "**AUTOFIX LỖI** %s — bước hỗ trợ: %s" % (display_id, str(ex).splitlines()[0]))
+        slot.close()
+        ticket_lock.close()
+        raise
+    slot.close()
+    ticket_lock.close()  # ship_run tự lấy lại khoá ticket + suất chạy
+    if verdict.startswith(("ĐÃ SỬA", "KHÔNG SỬA ĐƯỢC")):
+        ship_run(cfg, acfg, run_name, acfg.get("_profile"))
+        return
+    if verdict.startswith("CẦN QUYẾT ĐỊNH") and acfg.get("review_status_id"):
+        try:
+            mark_for_review(api, wp_id, acfg["review_status_id"], report_text, run_name)
+            verdict += " → đã chuyển UNREVIEWED"
+        except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+            verdict += " (chuyển UNREVIEWED lỗi: %s)" % ex
+    elif verdict.startswith("CẦN TEST TAY"):
+        try:
+            verdict += " → " + report_manual_test(api, wp_id, report_text, run_name, acfg.get("review_status_id"))
+        except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+            verdict += " (comment lên ticket lỗi: %s)" % ex
+    verdict = "Sau hỗ trợ: " + verdict
+    set_status(root, display_id, state="done", verdict=verdict)
+    inbox(cfg, "**AUTOFIX** %s — %s · báo cáo: %s" % (display_id, verdict, os.path.join(run_dir, "report.md")))
+    notify("[AUTOFIX] %s: %s" % (display_id, verdict[:120]), wp.get("subject", ""))
+    print(verdict)
+
+
 # =================================================================== hàng chờ Claude xem lại
 
 def pending_dir(root):
@@ -2716,6 +2945,10 @@ def main():
                         help="giao lại lượt đã sửa mà chưa push (tên thư mục, vd SOAR-2797-1103-1515, hoặc mã ticket = lượt mới nhất): kiểm tra lại, "
                              "Gemini xem lại, push, comment, Resolved; ĐÃ SỬA không commit mới → Gemini kiểm code hiện "
                              "tại rồi Resolved / UNREVIEWED; KHÔNG SỬA ĐƯỢC → comment + UNREVIEWED")
+    parser.add_argument("--assist", metavar="RUN",
+                        help="Claude hỗ trợ lượt CẦN QUYẾT ĐỊNH (tên thư mục hoặc mã ticket = lượt mới nhất): tải file "
+                             "đính kèm, ticket liên quan, cho GET API server test, gỡ vướng rồi giao như thường")
+    parser.add_argument("--note", default="", help="ghi chú / hướng dẫn của dev cho --assist")
     parser.add_argument("--status", action="store_true", help="xem các lượt đang chờ / đang chạy / vừa xong")
     parser.add_argument("--follow", nargs="?", const="", metavar="TICKET",
                         help="xem trực tiếp thao tác của lượt đang chạy (hoặc của TICKET)")
@@ -2757,6 +2990,10 @@ def main():
         return
     if args.ship:
         ship_run(cfg, acfg, args.ship, args.profile)
+        return
+    if args.assist:
+        os.makedirs(root, exist_ok=True)
+        assist_run(cfg, acfg, args.assist, args.note, args.profile)
         return
     if args.set_dev is not None:
         api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
@@ -2976,6 +3213,14 @@ def main():
                 report_text = f.read()
             first = report_text.strip().splitlines()[0] if report_text.strip() else ""
             verdict = first.replace("KẾT QUẢ:", "").strip() or first
+        if wants_assist(acfg, verdict, report_text) and not os.path.exists(os.path.join(run_dir, "assist", "done")):
+            set_status(root, display_id, state="running", verdict="Claude hỗ trợ (agent cần hỗ trợ)")
+            try:
+                report_text, verdict = assist_step(api, cfg, acfg, wp, run_dir, report_text)
+                verdict = verdict or "KHÔNG CÓ BÁO CÁO sau bước hỗ trợ"
+            except Exception as ex:  # noqa: BLE001 — hỗ trợ lỗi thì giao kết quả cũ như thường
+                log("%s: bước hỗ trợ lỗi: %s" % (display_id, ex))
+                report_text, verdict = report_verdict(report)
         if verdict.startswith("CẦN QUYẾT ĐỊNH") and acfg.get("review_status_id"):
             try:
                 mark_for_review(api, wp_id, acfg["review_status_id"], report_text, run_name)
