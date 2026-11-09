@@ -1229,14 +1229,64 @@ def tester_body(report_text, *headings):
     return ""
 
 
+def assisted(run_dir):
+    """Báo cáo hiện tại (report.md) do bước Claude hỗ trợ viết ra (assist/done ghi ngay sau khi Claude hỗ trợ xong)."""
+    done, report = os.path.join(run_dir, "assist", "done"), os.path.join(run_dir, "report.md")
+    try:
+        return os.path.getmtime(done) >= os.path.getmtime(report) - 1
+    except OSError:
+        return False
+
+
+def handover_to_qa(api, wp_id, display_id):
+    """Claude hỗ trợ đã test trên server test: giao người QA như QA tự động ĐẠT (deploy_qa không QA lại bằng Gemini
+    — trước đây ticket UI (hover…) bị Gemini kết luận KHÔNG TỰ TEST ĐƯỢC → UNREVIEWED → hỗ trợ lại → lặp). Trả mô tả."""
+    try:
+        dcfg = envconf.deploy_config()
+    except Exception:  # noqa: BLE001
+        dcfg = {}
+    try:  # đặt lại số lần QA server không đạt của ticket
+        path = os.path.join(envconf.autofix_root(), "qa-fail-count.json")
+        with open(path, encoding="utf-8") as f:
+            counts = json.load(f)
+        if counts.get(display_id):
+            counts[display_id] = 0
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(counts, f, indent=1)
+    except (OSError, ValueError):
+        pass
+    qa_id = dcfg.get("qa_user_id")
+    if not qa_id:
+        return "chưa đặt QA_USER_ID — ticket vẫn giao mình, QA server có thể test lại"
+    lock_version = api.get("/api/v3/work_packages/%s" % wp_id)["lockVersion"]
+    op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp_id, {
+        "lockVersion": lock_version, "_links": {"assignee": {"href": "/api/v3/users/%s" % qa_id}}})
+    return "đã chuyển " + (dcfg.get("qa_user_name") or "QA")
+
+
 def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, report_text):
     """
     ĐÃ SỬA mà không có commit mới (lỗi đã được sửa sẵn trong code hiện tại): Gemini kiểm tra code hiện tại theo
     ticket. ĐẠT → comment cho tester + Resolved; còn lại (hoặc Gemini tắt / không chạy được) → comment + UNREVIEWED.
-    Trả mô tả.
+    Kết luận do bước Claude hỗ trợ đưa ra (đã kiểm tra trên server test) → không test lại bằng Gemini: comment +
+    Resolved + giao người QA. Trả mô tả.
     """
     dirs = tuple((r["label"], d, r["branch"]) for r, d in R.trees(acfg, run_dir))
     review_id = acfg.get("review_status_id")
+    body = tester_body(report_text, "Comment cho tester", "Đề xuất")
+    if assisted(run_dir):
+        log("%s: không có commit mới, Claude hỗ trợ đã có kết quả — bỏ Gemini test lại" % display_id)
+        lines = ["**[Autofix] Đã được sửa sẵn** — lỗi này đã được xử lý trong bản code hiện tại; Claude hỗ trợ đã "
+                 "kiểm tra lại trên môi trường test."]
+        if body:
+            lines += ["", body]
+        lines += evidence_lines(api, wp_id, report_text, run_dir)
+        comment_and_status(api, wp_id, lines, acfg["resolved_status_id"])
+        try:
+            qa = handover_to_qa(api, wp_id, display_id)
+        except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+            qa = "chuyển QA lỗi: %s" % ex
+        return "Claude hỗ trợ đã kiểm tra · đã sửa sẵn (không commit mới, bỏ Gemini), comment + chuyển Resolved, " + qa
     verdict = ""
     if acfg.get("gemini_enabled"):
         log("%s: không có commit mới (đã sửa sẵn) — Gemini kiểm tra code hiện tại" % display_id)
@@ -1247,7 +1297,6 @@ def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir
         shown = verdict or "không chạy được"
         log("%s: Gemini %s" % (display_id, shown))
         inbox(cfg, "**GEMINI TEST** %s — %s (đã sửa sẵn) · %s" % (display_id, shown, os.path.join(run_dir, "gemini.md")))
-    body = tester_body(report_text, "Comment cho tester", "Đề xuất")
     if verdict == "ĐẠT":
         lines = ["**[Autofix] Đã được sửa sẵn** — lỗi này đã được xử lý trong bản code hiện tại (bản sửa trước đó); "
                  "AI kiểm tra lại xác nhận đạt. Cần test trên bản deploy mới nhất."]
@@ -1674,6 +1723,10 @@ def _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, rep
             m = re.search(r"KẾT LUẬN:\s*(KHÔNG ĐẠT|ĐẠT|CẦN XEM)", f.read()[:500])
         gemini_verdict = m.group(1) if m else ""
         notes.append("Gemini %s (lượt trước)" % (gemini_verdict or "?"))
+    elif review_of is None and assisted(run_dir):
+        # Bản sửa do bước Claude hỗ trợ làm và đã có kết quả kiểm tra → không test lại bằng Gemini.
+        log("%s: Claude hỗ trợ đã có kết quả — bỏ Gemini test lại" % display_id)
+        notes.append("bỏ Gemini (Claude hỗ trợ đã kiểm tra)")
     elif acfg.get("gemini_enabled"):
         log("%s: Gemini test lại" % display_id)
         notify("[GEMINI TEST] %s" % display_id, "Build/test đã qua — Gemini đang test lại bản sửa: " + subject)
@@ -2473,7 +2526,8 @@ UI_CHECK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_check.py
 ASSIST_NOTE = """
 
 ## BƯỚC CLAUDE HỖ TRỢ (lý do lượt chạy này)
-Lượt trước của ticket này kết luận CẦN QUYẾT ĐỊNH / chưa làm được vì thiếu thứ mà lượt chạy nền không tự lấy được.
+Ticket đang bị kẹt chờ người: lượt trước kết luận CẦN QUYẾT ĐỊNH / chưa làm được vì thiếu thứ mà lượt chạy nền không tự
+lấy được, hoặc QA trên server chuyển UNREVIEWED vì CẦN TEST TAY (xem comment [Cần duyệt] mới nhất trong ticket.md).
 Báo cáo của lượt trước (đọc kỹ mục "Cần quyết định / rủi ro" và "Người quyết định"): {before}
 Công cụ ĐÃ lấy sẵn thêm tài liệu cho bạn:
 {material}
@@ -2487,8 +2541,15 @@ Công cụ ĐÃ lấy sẵn thêm tài liệu cho bạn:
 3. Vẫn cần người quyết (đổi hành vi sản phẩm, thiếu thông tin không có trong tài liệu, ý kiến trái nhau…) → KHÔNG đoán,
    ghi lại report.md `KẾT QUẢ: CẦN QUYẾT ĐỊNH`, mục "Cần quyết định / rủi ro" nói rõ đã thử tài liệu nào và vì sao vẫn
    chưa đủ, câu hỏi cụ thể cho người quyết.
-4. Worktree có thể đã có commit của lượt trước: xem `git -C <worktree> log --oneline -3` trước, không commit trùng.
-5. Có ảnh minh chứng (lỗi giao diện, hoặc đã test trên giao diện) → thêm vào report.md mục `## Ảnh minh chứng`, mỗi ảnh
+4. CẦN TEST TAY (QA tự động không kiểm được, vd lỗi giao diện / hover / màu): TỰ TEST trên giao diện server test bằng
+   ui_check theo đúng bước của ticket / hướng dẫn test trong comment (FLOW nhúng trong iframe ở trang Kịch bản: bước
+   {{"frame": "iframe"}}; hover rồi đọc CSS {{"style": ["css", ["background-color", "cursor"]]}}; giao diện sáng / tối:
+   {{"theme": "dark"}} / {{"theme": "light"}} hoặc nút đổi theme trên thanh trên). Chụp ảnh có khoanh vùng.
+   Đúng kết quả mong đợi → `KẾT QUẢ: ĐÃ SỬA` (không cần commit mới), mục `## Comment cho tester` nêu đã test gì trên
+   giao diện + kết quả, kèm ảnh SAU; sai → tìm nguyên nhân và sửa như bình thường; vẫn không test được → giữ
+   `KẾT QUẢ: CẦN TEST TAY` và ghi rõ vì sao.
+5. Worktree có thể đã có commit của lượt trước: xem `git -C <worktree> log --oneline -3` trước, không commit trùng.
+6. Có ảnh minh chứng (lỗi giao diện, hoặc đã test trên giao diện) → thêm vào report.md mục `## Ảnh minh chứng`, mỗi ảnh
    một dòng `- TRƯỚC: <đường dẫn ảnh> — <chú thích ngắn cho tester>` hoặc `- SAU: …` (tối đa 6 ảnh). TRƯỚC = hiện
    trạng lỗi: ảnh gốc của tester ({run_dir}/ticket/images/…) và / hoặc ảnh chụp server test có khoanh vùng lỗi; SAU =
    ảnh đã đúng (chỉ khi server đã chạy bản có bản sửa). Công cụ tự upload ảnh và chèn vào comment trên ticket.
@@ -2647,10 +2708,17 @@ def assist_run(cfg, acfg, run_name, note="", profile=None):
     if not m or not os.path.isfile(os.path.join(run_dir, "prompt.md")):
         sys.exit("không có lượt chạy %s" % run_name)
     display_id = m.group(1)
-    missing = [r["label"] for r, d in R.trees(acfg, run_dir) if not os.path.isdir(d)]
+    missing = [(r, d) for r, d in R.trees(acfg, run_dir) if not os.path.isdir(d)]
     if missing:
-        sys.exit("%s: worktree %s đã bị dọn — bấm Chạy lại autofix (kèm comment hướng dẫn trên ticket) thay vì hỗ trợ"
-                 % (run_name, ", ".join(missing)))
+        # Worktree đã bị dọn (cleanup sau khi giao QA): tạo lại từ code mới nhất của nhánh dev, nhánh auto mới.
+        branch = "auto/%s-assist-%s" % (run_name, datetime.now().strftime("%m%d%H%M"))
+        log("%s: tạo lại worktree %s (%s)" % (display_id, ", ".join(r["label"] for r, _ in missing), branch))
+        for r, d in missing:
+            make_worktree(r["path"], r["branch"], r["upstream"], d, branch, acfg)
+            R.link_shared(r, d)
+            err = R.run_setup(r, d, build_env(acfg), os.path.join(run_dir, "setup.log"))
+            if err:
+                log(err)
     for r, d in R.trees(acfg, run_dir):
         R.link_shared(r, d)
     ticket_lock = open(os.path.join(root, ".%s.lock" % display_id), "w")
@@ -2668,7 +2736,8 @@ def assist_run(cfg, acfg, run_name, note="", profile=None):
     use_profile(acfg, prof)
     slot = acquire_slot(root, acfg)
     set_status(root, display_id, state="running", run_dir=run_dir, run_name=run_name, wp_id=wp_id, pid=os.getpid(),
-               event="ASSIST", profile=acfg.get("_profile"), started_at=datetime.now().isoformat(timespec="seconds"))
+               event="ASSIST", profile=acfg.get("_profile"), started_at=datetime.now().isoformat(timespec="seconds"),
+               verdict="🤝 Claude đang hỗ trợ%s" % ((": " + note.strip()[:120]) if note and note.strip() else ""))
     try:
         fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))  # comment mới nhất (vd hướng dẫn của dev)
         report_text, _old = report_verdict(os.path.join(run_dir, "report.md"))
@@ -3278,7 +3347,7 @@ def main():
             first = report_text.strip().splitlines()[0] if report_text.strip() else ""
             verdict = first.replace("KẾT QUẢ:", "").strip() or first
         if wants_assist(acfg, verdict, report_text) and not os.path.exists(os.path.join(run_dir, "assist", "done")):
-            set_status(root, display_id, state="running", verdict="Claude hỗ trợ (agent cần hỗ trợ)")
+            set_status(root, display_id, state="running", verdict="🤝 Claude đang hỗ trợ (agent cần hỗ trợ)")
             try:
                 report_text, verdict = assist_step(api, cfg, acfg, wp, run_dir, report_text)
                 verdict = verdict or "KHÔNG CÓ BÁO CÁO sau bước hỗ trợ"

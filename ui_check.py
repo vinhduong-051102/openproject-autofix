@@ -21,6 +21,8 @@ File bước (JSON, mảng; mỗi phần tử một bước):
     {"style": ["css…", ["color", "background-color", "font-size"]]}   in CSS tính toán
     {"theme": "dark"|"light"}                    đổi theme qua localStorage rồi tải lại (nếu FE hỗ trợ)
     {"lang": "vi"|"en"}
+    {"frame": "iframe"}                         các bước sau thao tác TRONG iframe (vd ứng dụng FLOW nhúng ở trang Kịch bản);
+                                                {"frame": ""} quay lại trang chính
 Dạng object {"login": false, "steps": [...]}: không đăng nhập (xem màn hình đăng nhập / trang công khai).
 
 Giới hạn an toàn: chỉ mở trang trên máy chủ FE của server test (DEPLOY_FE_URL hoặc Link trong ticket nếu cùng máy chủ);
@@ -58,9 +60,20 @@ def ticket_account(path):
     def field(*labels):
         for src in (desc, text):
             for lb in labels:
-                m = re.search(r"%s\s*[:：]\s*\**\s*\[?([^\s*\]\[]+)" % lb, src, re.I)
-                if m:
-                    return m.group(1).strip("`'\".,;")
+                m = re.search(r"%s\s*[:：]\s*([^\n]*)" % lb, src, re.I)
+                if not m:
+                    continue
+                val = m.group(1).strip()
+                # Còn để trống trong ticket: [Cần bổ sung], (chưa có), TBD, … → coi như không có
+                if re.match(r"^\W*(cần bổ sung|can bo sung|chưa có|chua co|tbd|n/?a|\.\.\.|…)", val, re.I) \
+                        or re.match(r"^\[(?!https?:)[^\]]*\]\s*$", val):
+                    continue
+                link = re.search(r"https?://[^\s)\]]+", val)
+                if link and lb.lower().startswith("link"):
+                    return link.group(0)
+                tok = re.search(r"[^\s*`\[\]]+", val)
+                if tok:
+                    return tok.group(0).strip("'\".,;")
         return ""
 
     return (field(r"Link"), field(r"Tài khoản", r"Tai khoan", r"Username", r"User"),
@@ -105,11 +118,11 @@ def login(page, fe, user, password, otp):
     raise RuntimeError("đăng nhập %s không thành công%s" % (user, (": " + err.inner_text()[:200]) if err else ""))
 
 
-def mark(page, selectors, note=""):
+def mark(page, selectors, scope=None, note=""):
     """Khoanh đỏ (viền + nhãn) các phần tử khớp selector Playwright; trả số vùng tìm thấy."""
     found = 0
     for k, sel in enumerate(selectors):
-        loc = page.locator(sel)
+        loc = (scope or page).locator(sel)
         for j in range(min(loc.count(), 5)):
             box = loc.nth(j).bounding_box()
             if not box:
@@ -142,6 +155,7 @@ def same_host(url, fe):
 def run_steps(page, fe, steps, out):
     results = []
     t0 = time.time()
+    scope = page  # trang chính hoặc iframe (bước "frame")
     for i, st in enumerate(steps[:MAX_STEPS], 1):
         if time.time() - t0 > DEADLINE:
             results.append("%d. dừng: quá %d giây" % (i, DEADLINE))
@@ -159,7 +173,7 @@ def run_steps(page, fe, steps, out):
                 page.goto(url, wait_until="networkidle", timeout=60000)
                 msg = "mở %s → %s" % (url, page.url)
             elif kind == "click":
-                el = page.locator(str(arg)).first
+                el = scope.locator(str(arg)).first
                 el.wait_for(state="visible", timeout=10000)
                 label = (el.inner_text(timeout=2000) or "") + " " + (el.get_attribute("aria-label") or "") + " " + \
                     (el.get_attribute("title") or "")
@@ -170,7 +184,7 @@ def run_steps(page, fe, steps, out):
                 msg = "bấm %s" % arg
             elif kind == "fill":
                 sel, val = arg
-                page.locator(sel).first.fill(str(val), timeout=10000)
+                scope.locator(sel).first.fill(str(val), timeout=10000)
                 msg = "nhập %s" % sel
             elif kind == "press":
                 page.keyboard.press(str(arg))
@@ -178,27 +192,27 @@ def run_steps(page, fe, steps, out):
                 msg = "phím %s" % arg
             elif kind == "select":
                 sel, val = arg
-                page.locator(sel).first.select_option(str(val), timeout=10000)
+                scope.locator(sel).first.select_option(str(val), timeout=10000)
                 msg = "chọn %s = %s" % (sel, val)
             elif kind == "hover":
-                page.locator(str(arg)).first.hover(timeout=10000)
+                scope.locator(str(arg)).first.hover(timeout=10000)
                 msg = "rê chuột %s" % arg
             elif kind == "wait":
                 if isinstance(arg, (int, float)):
                     page.wait_for_timeout(min(int(arg), 30000))
                     msg = "chờ %d ms" % min(int(arg), 30000)
                 else:
-                    page.locator(str(arg)).first.wait_for(state="visible", timeout=30000)
+                    scope.locator(str(arg)).first.wait_for(state="visible", timeout=30000)
                     msg = "đã thấy %s" % arg
             elif kind == "screenshot":
                 name = re.sub(r"[^\w.-]", "_", str(arg))[:60] or "shot"
                 path = os.path.join(out, "%02d-%s.png" % (i, name))
                 marks = st.get("mark") or []
                 marks = [marks] if isinstance(marks, str) else list(marks)[:10]
-                found = mark(page, marks, str(st.get("note") or "")) if marks else 0
+                found = mark(page, marks, scope=scope, note= str(st.get("note") or "")) if marks else 0
                 try:
                     if st.get("selector"):
-                        page.locator(st["selector"]).first.screenshot(path=path, timeout=10000)
+                        scope.locator(st["selector"]).first.screenshot(path=path, timeout=10000)
                     else:
                         page.screenshot(path=path, full_page=bool(st.get("full", False)))
                 finally:
@@ -206,16 +220,24 @@ def run_steps(page, fe, steps, out):
                         page.evaluate("() => document.querySelectorAll('[data-ui-check-mark]').forEach(e => e.remove())")
                 msg = "ảnh %s%s" % (path, (" · khoanh %d/%d vùng" % (found, len(marks))) if marks else "")
             elif kind == "text":
-                els = page.locator(str(arg))
+                els = scope.locator(str(arg))
                 n = min(els.count(), 20)
                 texts = [els.nth(k).inner_text(timeout=3000).strip().replace("\n", " ⏎ ")[:300] for k in range(n)]
                 msg = "chữ %s (%d): %s" % (arg, els.count(), json.dumps(texts, ensure_ascii=False))
             elif kind == "style":
                 sel, props = arg
-                vals = page.locator(sel).first.evaluate(
+                vals = scope.locator(sel).first.evaluate(
                     "(el, ps) => { const c = getComputedStyle(el); return Object.fromEntries(ps.map(p => [p, c.getPropertyValue(p)])); }",
                     list(props)[:20])
                 msg = "CSS %s: %s" % (sel, json.dumps(vals, ensure_ascii=False))
+            elif kind == "frame":
+                if arg:
+                    page.locator(str(arg)).first.wait_for(state="attached", timeout=30000)
+                    scope = page.frame_locator(str(arg)).first
+                    msg = "vào iframe %s" % arg
+                else:
+                    scope = page
+                    msg = "về trang chính"
             elif kind in ("theme", "lang"):
                 key = {"theme": ["theme", "vite-ui-theme"], "lang": ["i18nextLng", "language"]}[kind]
                 page.evaluate("([ks, v]) => ks.forEach(k => localStorage.setItem(k, v))", [key, str(arg)])
@@ -286,33 +308,53 @@ def main():
         sys.exit("Thiếu Playwright: python3 -m pip install --user playwright")
     print("Server test: %s · %s" % (fe, ("tài khoản: %s (%s)" % (user, source))
                                     if do_login else "không đăng nhập"))
-    lock = None
-    if do_login:  # mỗi tài khoản một phiên: lượt khác cùng tài khoản chờ (đăng nhập lại sẽ đá phiên đang test)
-        lock = open(state_path(user) + ".lock", "w")
-        fcntl.flock(lock, fcntl.LOCK_EX)
     with sync_playwright() as p:
         browser = p.chromium.launch(channel="chrome", headless=True)
-        sp = state_path(user) if do_login else ""
-        ctx = browser.new_context(ignore_https_errors=True, viewport={"width": args.width, "height": args.height},
-                                  storage_state=sp if sp and os.path.exists(sp) else None, locale="vi-VN")
 
-        def guard(route):
-            req = route.request
-            if req.is_navigation_request() and req.frame == page.main_frame and not same_host(req.url, fe):
-                return route.abort()
-            return route.continue_()
+        def session(user, password, otp):
+            """(context, page, storage_state path, lock) đã đăng nhập (hoặc chưa, khi do_login=False)."""
+            lock = None
+            if do_login:  # mỗi tài khoản một phiên: lượt khác cùng tài khoản chờ (đăng nhập lại sẽ đá phiên đang test)
+                lock = open(state_path(user) + ".lock", "w")
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            sp = state_path(user) if do_login else ""
+            ctx = browser.new_context(ignore_https_errors=True, viewport={"width": args.width, "height": args.height},
+                                      storage_state=sp if sp and os.path.exists(sp) else None, locale="vi-VN")
+            page = ctx.new_page()
 
-        page = ctx.new_page()
-        page.route("**/*", guard)
-        page.goto(fe + "/", wait_until="networkidle", timeout=60000)
-        if not do_login:
-            pass
-        elif "/login" in page.url:
-            print(login(page, fe, user, password, otp))
-            ctx.storage_state(path=sp)
-            os.chmod(sp, 0o600)
-        else:
-            print("dùng lại phiên đăng nhập đã lưu của %s" % user)
+            def guard(route):
+                req = route.request
+                if req.is_navigation_request() and req.frame == page.main_frame and not same_host(req.url, fe):
+                    return route.abort()
+                return route.continue_()
+
+            page.route("**/*", guard)
+            page.goto(fe + "/", wait_until="networkidle", timeout=60000)
+            try:
+                if do_login and "/login" in page.url:
+                    print(login(page, fe, user, password, otp))
+                    ctx.storage_state(path=sp)
+                    os.chmod(sp, 0o600)
+                elif do_login:
+                    print("dùng lại phiên đăng nhập đã lưu của %s" % user)
+            except Exception:
+                ctx.close()
+                if lock:
+                    lock.close()
+                raise
+            return ctx, page, sp, lock
+
+        try:
+            ctx, page, sp, lock = session(user, password, otp)
+        except RuntimeError as ex:
+            if source != "từ ticket":
+                raise
+            # Tài khoản trong ticket không đăng nhập được (sai / thiếu mật khẩu, OTP…) → tài khoản QA của deploy.json
+            import soar_api
+            dcfg = envconf.deploy_config()
+            qa_user, qa_pass = soar_api.credentials(dcfg, None)
+            print("%s → thử bằng tài khoản QA %s" % (ex, qa_user))
+            ctx, page, sp, lock = session(qa_user, qa_pass, str(dcfg.get("app_otp") or otp or ""))
         for line in run_steps(page, fe, steps, out):
             print(line)
         if sp and "/login" not in page.url:

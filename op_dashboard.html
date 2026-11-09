@@ -243,6 +243,8 @@ section[hidden] { display: none !important; }
 *::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--text-3) 75%, transparent); }
 *::-webkit-scrollbar-corner { background: transparent; }
 html { scroll-behavior: smooth; }
+#wpRunLive { border-color: var(--accent, #3b82f6); color: var(--accent, #3b82f6); animation: wpPulse 1.6s ease-in-out infinite; }
+@keyframes wpPulse { 50% { opacity: .55; } }
 .wp-status { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .wp-status select { font-size: 12.5px; padding: 3px 6px; max-width: 100%; }
 /* Tab OpenProject (qua API) */
@@ -1228,7 +1230,7 @@ function renderDetail() {
       <select id="runProfile" title="Gói dùng cho lượt chạy lại">${opts}</select>
       <button class="primary" id="rerun" ${live ? "disabled" : ""}>Chạy lại autofix</button>
       <button id="review" ${live ? "disabled" : ""} title="Gemini test lại bản đã push, Claude xem lại các ý chưa đạt">Test lại</button>
-      ${/CẦN QUYẾT ĐỊNH|KHÔNG SỬA ĐƯỢC/.test(r.verdict || "") ? `<button id="assist" ${live ? "disabled" : ""} title="Claude gỡ vướng trên đúng lượt này: tải file đính kèm, ticket liên quan, gọi GET API server test; nhập thêm ghi chú hướng dẫn nếu cần">🤝 Claude hỗ trợ</button>` : ""}
+      ${ASSIST_RX.test(r.verdict || "") ? `<button id="assist" ${live ? "disabled" : ""} title="Claude gỡ vướng trên đúng lượt này: tải file đính kèm, ticket liên quan, gọi GET API server test; nhập thêm ghi chú hướng dẫn nếu cần">🤝 Claude hỗ trợ</button>` : ""}
       <label class="force" title="Chạy dù gói đã quá ngưỡng 5 giờ / 7 ngày tự đặt. Gói đã hết hạn mức thật thì vẫn không chạy được.">
         <input type="checkbox" id="ignoreLimits"> Bỏ qua ngưỡng hạn mức</label>
       ${r.wp_id ? `<a href="${esc(S.op_url)}/work_packages/${esc(r.wp_id)}" target="_blank" rel="noopener"><button>Mở OpenProject ↗</button></a>` : ""}
@@ -1756,7 +1758,7 @@ async function openWP(id, opts) {
       <button class="link" data-wpjump>💬 ${nComments} bình luận · tới mới nhất ↓</button>
 </div>
       <h3>${esc(w.subject)}</h3></div><div style="display:flex;gap:8px;align-items:flex-start;flex:0 0 auto">
-      ${wpAssistBtn(w.display_id)}<button class="primary" id="wpSplit" title="AI đọc ticket + file đính kèm, đề xuất các việc con để tạo trên OpenProject">✂ Tách việc con</button>${close}</div></div>`;
+      ${wpAssistBtn(w.display_id, w.status)}<button class="primary" id="wpSplit" title="AI đọc ticket + file đính kèm, đề xuất các việc con để tạo trên OpenProject">✂ Tách việc con</button>${close}</div></div>`;
   $("wpBody").innerHTML = `
     <div class="wp-meta">${meta.map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join("")}</div>
     <div class="wp-sec">Mô tả</div>
@@ -1781,6 +1783,7 @@ async function openWP(id, opts) {
   $("wpAssigneeBtn").onclick = () => wpAssigneePicker(w);
   $("wpSplit").onclick = () => openSplit(w.display_id, w.subject);
   if ($("wpAssist")) $("wpAssist").onclick = () => runAssist(w.display_id, null);
+  if ($("wpRunLive")) $("wpRunLive").onclick = () => { closeWP(); select(w.display_id); tab = "Thao tác"; showView("autofix"); renderDetail(); loadTab(true); };
   if (opts && "focusAct" in opts) {
     const el = (opts.focusAct != null && $("wpa-" + opts.focusAct)) || [...document.querySelectorAll("#wpChat .wp-msg.mine")].pop();
     if (el) { el.scrollIntoView({block: "center"}); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1800); }
@@ -1789,22 +1792,31 @@ async function openWP(id, opts) {
   else { const c = $("wpChatScroll"); c.scrollTop = c.scrollHeight; }  // mở: mô tả ở đầu, hội thoại ở tin mới nhất
   bindWP();
 }
-// Nút "Claude hỗ trợ": lượt chạy mới nhất của ticket ra CẦN QUYẾT ĐỊNH / KHÔNG SỬA ĐƯỢC.
-function assistRun(displayId) {
+// Nút "Claude hỗ trợ": lượt chạy mới nhất của ticket ra CẦN QUYẾT ĐỊNH / KHÔNG SỬA ĐƯỢC / CẦN TEST TAY, hoặc ticket
+// đang UNREVIEWED (vd QA trên server chuyển sang vì cần test tay) và đã có lượt autofix.
+const ASSIST_RX = /CẦN QUYẾT ĐỊNH|KHÔNG SỬA ĐƯỢC|CẦN TEST TAY|UNREVIEWED/;
+function assistRun(displayId, status) {
   const r = S && (S.runs || []).find((x) => x.display_id === displayId);
-  return r && /CẦN QUYẾT ĐỊNH|KHÔNG SỬA ĐƯỢC/.test(r.verdict || "") ? r : null;
+  return r && (ASSIST_RX.test(r.verdict || "") || /UNREVIEWED/i.test(status || "")) ? r : null;
 }
-function wpAssistBtn(displayId) {
-  const r = assistRun(displayId);
+function wpAssistBtn(displayId, status) {
+  const cur = S && (S.runs || []).find((x) => x.display_id === displayId);
+  const busy = cur && ["queued", "preparing", "running", "shipping"].includes(cur.state);
+  if (busy) {  // đang chạy (hỗ trợ / autofix / giao): báo rõ, bấm để xem log thao tác trực tiếp
+    const what = cur.event === "ASSIST" ? "🤝 Claude đang hỗ trợ" : cur.state === "shipping" ? "⏳ Đang kiểm tra + push" : "⏳ Autofix đang chạy";
+    return `<button class="busy-run" id="wpRunLive" data-run="${esc(displayId)}" title="${esc((cur.verdict || "") + " — bấm để xem log thao tác trực tiếp")}">${what}… xem ▸</button>`;
+  }
+  const r = assistRun(displayId, status);
   if (!r) return "";
-  const live = ["queued", "preparing", "running", "shipping"].includes(r.state);
+  const live = false;
   return `<button id="wpAssist" ${live ? "disabled" : ""} title="${esc("Lượt " + (r.run_name || "") + ": " + (r.verdict || ""))} — Claude gỡ vướng: tải file đính kèm, ticket liên quan, gọi GET API server test">🤝 Claude hỗ trợ</button>`;
 }
 function runAssist(displayId, profile, ignoreLimits) {
   const prof = profile || ((S.profiles || []).find((p) => p.active) || {}).name || "";
   const note = prompt(`Claude hỗ trợ ${displayId}${prof ? " bằng " + prof : ""}${ignoreLimits ? " (bỏ qua ngưỡng hạn mức)" : ""}.\nGhi chú / hướng dẫn cho Claude (có thể để trống):`, "");
   if (note === null) return;
-  post({action: "assist", display_id: displayId, note, profile: prof, ignore_limits: !!ignoreLimits});
+  post({action: "assist", display_id: displayId, note, profile: prof, ignore_limits: !!ignoreLimits})
+    .then(() => setTimeout(() => { if (WP_CUR && !$("wpModal").hidden) openWP(String(WP_CUR), {keepScroll: ($("wpBody") || {}).scrollTop}); }, 2500));
 }
 async function wpStatusPicker(w) {
   const box = $("wpStatus"), btn = $("wpStatusBtn");
