@@ -81,7 +81,8 @@ def _chat_entry(x, default_mode="all"):
     mode = x.get("mode") if x.get("mode") in CHAT_MODES else ("mention" if group else default_mode)
     flag = lambda k: x.get(k) if isinstance(x.get(k), bool) else envconf._bool(x[k]) if k in x else True  # noqa: E731
     return {"ref": ref, "label": str(x.get("label") or "").strip()[:80], "mode": mode,
-            "requests": flag("requests"), "asks": flag("asks"), "notify": flag("notify")}
+            "requests": flag("requests"), "asks": flag("asks"), "notify": flag("notify"),
+            "project": str(x.get("project") or "").strip()[:40]}  # dự án nhận việc từ chat này (trống = mặc định)
 
 
 def _conv(kind, v, from_env):
@@ -921,7 +922,12 @@ def _queue_reply(req, key, **extra):
                  (req["chat_id"], text, first["tg_msg_id"] if first else None, now()))
 
 
-def approve(rid, auto_create=True, note="", force=False):
+def chat_project(chat_id):
+    """Dự án tạo việc cho tin từ chat này (Cài đặt Telegram → nguồn chat → Dự án), trống = dự án mặc định."""
+    return ((chat_cfg(chat_id) or {}).get("project")) or None
+
+
+def approve(rid, auto_create=True, note="", force=False, project=None):
     """Duyệt: AI soạn ticket theo mẫu tester (chạy nền). auto_create: soạn xong tự tạo task New giao cho mình.
     AI đã lọc là việc đã có / trò chuyện thì phải force (mình xác nhận vẫn tạo việc mới)."""
     import task_create
@@ -936,7 +942,8 @@ def approve(rid, auto_create=True, note="", force=False):
         raise ValueError("yêu cầu không có tin nhắn")
     if note:
         req["note"] = note
-    did = task_create.start_draft(_prompt_for(req, msgs), _files_for(msgs, req.get("ai_files") or None), {"source": "telegram", "request_id": rid})
+    did = task_create.start_draft(_prompt_for(req, msgs), _files_for(msgs, req.get("ai_files") or None), {"source": "telegram", "request_id": rid,
+                                                                                                         "project": project or req.get("project") or chat_project(req["chat_id"])})
     update(rid, status="drafting", draft_id=did, auto_create=1 if auto_create else 0, decided_at=now(),
            note=note or req.get("note"), error=None, reject_reason=None)
     return {"message": "Đã duyệt #%s — AI đang soạn task%s" % (rid, ", xong sẽ tự tạo trên OpenProject" if auto_create
@@ -1063,7 +1070,8 @@ def action(body):
     kind = body.get("action")
     rid = body.get("id")
     if kind == "tg_approve":
-        return approve(int(rid), bool(body.get("auto", True)), (body.get("note") or "").strip(), bool(body.get("force")))
+        return approve(int(rid), bool(body.get("auto", True)), (body.get("note") or "").strip(), bool(body.get("force")),
+                       (body.get("project") or "").strip() or None)
     if str(kind).startswith("tg_ask_"):
         return ask_action(kind, body)
     if kind == "tg_clarify":
@@ -1224,6 +1232,29 @@ def _live_wp(display_id):
     return info
 
 
+def _live_wps(pairs):
+    """Nạp trước trạng thái nhiều work package bằng MỘT truy vấn (pairs: [(mã hiển thị, id)]) vào cache _LIVE — tránh
+    gọi OpenProject lần lượt từng ticket (mở "Xin ý kiến" từng chậm vài giây)."""
+    import time
+    want = {str(wid): did for did, wid in pairs if wid and not (
+        _LIVE.get(did) and time.time() - _LIVE[did][0] < 60)}
+    if not want:
+        return
+    try:
+        import task_create
+        import op_watch
+        cfg = task_create.load()[0]
+        data = op_watch.OpenProject(cfg["url"], cfg["api_key"]).get("/api/v3/work_packages", {
+            "filters": json.dumps([{"id": {"operator": "=", "values": list(want)}},
+                                   {"status": {"operator": "*", "values": []}}]), "pageSize": len(want)})
+    except Exception:  # noqa: BLE001 — lỗi thì _live_wp tự gọi từng cái như trước
+        return
+    for w in data.get("_embedded", {}).get("elements", []):
+        did = want.get(str(w.get("id")))
+        if did:
+            _LIVE[did] = (time.time(), _wp_line(w))
+
+
 def work_state(ref):
     """done: ticket đã ở trạng thái xong (TG_DONE_STATUSES); doing: autofix đang làm / đã sửa chờ duyệt; todo: chưa làm."""
     done = [x.lower() for x in settings()["done_statuses"]]
@@ -1296,14 +1327,19 @@ def _recent_wps(api, cfg):
     import time
     if time.time() - _RECENT["at"] < 300:
         return _RECENT["text"]
+    import projects as P
+    elements = []
     try:
-        data = api.get("/api/v3/projects/%s/work_packages" % cfg["project"], {
-            "filters": json.dumps([{"status": {"operator": "*", "values": []}},
-                                   {"updatedAt": {"operator": ">t-", "values": ["21"]}}]),
-            "sortBy": json.dumps([["updatedAt", "desc"]]), "pageSize": 200})
+        for proj in P.projects(cfg):  # ticket gần đây của mọi dự án (so trùng)
+            data = api.get("/api/v3/projects/%s/work_packages" % proj["op_project"], {
+                "filters": json.dumps([{"status": {"operator": "*", "values": []}},
+                                       {"updatedAt": {"operator": ">t-", "values": ["21"]}}]),
+                "sortBy": json.dumps([["updatedAt", "desc"]]), "pageSize": 200})
+            elements += data.get("_embedded", {}).get("elements", [])
     except Exception as ex:  # noqa: BLE001 — OpenProject chậm: vẫn lọc, chỉ thiếu danh sách so trùng
-        return _RECENT["text"] or "(không lấy được danh sách ticket gần đây: %s)" % str(ex)[:80]
-    text = "\n".join(_fmt_wp(_wp_line(w)) for w in data.get("_embedded", {}).get("elements", [])) or "(không lấy được)"
+        if not elements:
+            return _RECENT["text"] or "(không lấy được danh sách ticket gần đây: %s)" % str(ex)[:80]
+    text = "\n".join(_fmt_wp(_wp_line(w)) for w in elements) or "(không lấy được)"
     _RECENT.update(at=time.time(), text=text)
     return text
 
@@ -1343,17 +1379,12 @@ def _run_claude_json(prompt, model):
     import task_create
     import op_autofix as af
     _, acfg, _ = task_create.load()
-    prof, why = af.choose_profile(os.path.expanduser(acfg["root"]), acfg)
-    if prof is None:
-        raise RuntimeError("không có gói Claude dùng được (%s)" % why)
-    af.use_profile(acfg, prof)
     cmd = [acfg["claude"], "-p", prompt, "--permission-mode", "dontAsk", "--max-budget-usd", "0.5",
            "--output-format", "json", "--disallowedTools", "Bash", "Read", "Write", "Edit", "Glob", "Grep",
            "WebFetch", "WebSearch", "Task"]
     if model:
         cmd += ["--model", model]
-    res = subprocess.run(cmd, cwd=data_dir(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                         universal_newlines=True, env=af.build_env(acfg), timeout=300)
+    res, _ = af.claude_oneshot(acfg, cmd, cwd=data_dir(), timeout=300)  # gói bị vô hiệu → tự dùng gói khác
     try:
         text = json.loads(res.stdout).get("result") or ""
     except ValueError:
@@ -1450,8 +1481,17 @@ def triage(rid):
 
 
 def _project_text(t):
-    """Tên dự án / tiền tố mã ticket trong prompt lấy từ cấu hình (OP_PROJECT_NAME, OP_TICKET_PREFIX)."""
-    return t.replace("@@P@@", envconf.PROJECT_NAME).replace("@@T@@", envconf.TICKET_PREFIX)
+    """Tên dự án / tiền tố mã ticket trong prompt lấy từ cấu hình (Cấu hình → Dự án; nhiều dự án thì ghi đủ)."""
+    try:
+        import projects as P
+        import op_watch
+        import argparse
+        items = P.projects(op_watch.load_config(argparse.Namespace(config=None, interval=None, on_change=None,
+                                                                    no_notify=True)))
+        names, prefixes = " / ".join(p["name"] for p in items), items[0]["prefix"]
+    except (Exception, SystemExit):  # noqa: BLE001
+        names, prefixes = envconf.PROJECT_NAME, envconf.TICKET_PREFIX
+    return t.replace("@@P@@", names).replace("@@T@@", prefixes)
 
 
 TRIAGE_PROMPT = _project_text(TRIAGE_PROMPT)
@@ -1695,9 +1735,13 @@ def scan_unreviewed():
     if not sid:
         raise ValueError("chưa cấu hình trạng thái chờ duyệt (OP_STATUS_REVIEW)")
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
-    data = api.get("/api/v3/projects/%s/work_packages" % cfg["project"], {
-        "filters": json.dumps([{"status": {"operator": "=", "values": [str(sid)]}},
-                               {"assignee": {"operator": "=", "values": ["me"]}}]), "pageSize": 100})
+    import projects as P
+    data = {"_embedded": {"elements": []}}
+    for proj in P.projects(cfg):  # ticket chờ duyệt của mọi dự án
+        d_ = api.get("/api/v3/projects/%s/work_packages" % proj["op_project"], {
+            "filters": json.dumps([{"status": {"operator": "=", "values": [str(sid)]}},
+                                   {"assignee": {"operator": "=", "values": ["me"]}}]), "pageSize": 100})
+        data["_embedded"]["elements"] += d_.get("_embedded", {}).get("elements", [])
     done = 0
     for w in data.get("_embedded", {}).get("elements", []):
         did = w.get("displayId") or "WP-%s" % w["id"]
@@ -1727,6 +1771,7 @@ def asks_overview(status="open"):
         items = rows("SELECT * FROM asks WHERE status IN (%s) ORDER BY id DESC" % ",".join("?" * len(ASK_OPEN)), ASK_OPEN)
     else:
         items = rows("SELECT * FROM asks ORDER BY id DESC LIMIT 100")
+    _live_wps([(a["display_id"], a.get("wp_id")) for a in items if a["status"] in ASK_OPEN])
     for a in items:
         a["status_label"] = ASK_LABELS.get(a["status"], a["status"])
         a["kind"] = a.get("kind") or "decision"

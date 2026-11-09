@@ -141,24 +141,21 @@ def _attachments(api, wp, d):
 
 def _run(d, display_id, hint):
     try:
-        cfg, acfg, _ = task_create.load()
+        import projects as P
+        cfg, acfg, _ = task_create.load(P.prefix_of(display_id) or None)  # dự án của ticket cha
         acfg = dict(af.AUTOFIX_DEFAULTS, **acfg)
         api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
         wp = af.fetch_ticket(api, display_id, os.path.join(d, "ticket"))
         docs = _attachments(api, wp, d)
         task_create.set_state(d, wp_id=wp["id"], subject=wp.get("subject"), docs=len(docs))
         out = os.path.join(d, "split.json")
-        prompt = PROMPT.format(project_name=envconf.PROJECT_NAME, display_id=wp.get("displayId") or display_id, d=d,
+        prompt = PROMPT.format(project_name=P.name(acfg), display_id=wp.get("displayId") or display_id, d=d,
                                docs=("\n" + "\n".join(docs)) if docs else "(không có)",
                                hint=("\n## Ghi chú của người dùng khi tách\n%s\n" % hint) if hint else "",
                                repo_refs=R.prompt_refs(acfg), max_tasks=MAX_TASKS,
-                               title_template=envconf.TASK_TITLE_TEMPLATE, out=out)
+                               title_template=P.title_template(acfg), out=out)
         with open(os.path.join(d, "prompt.md"), "w", encoding="utf-8") as f:
             f.write(prompt)
-        prof, why = af.choose_profile(os.path.expanduser(acfg["root"]), acfg)
-        if prof is None:
-            raise RuntimeError("không có gói Claude dùng được (%s)" % why)
-        af.use_profile(acfg, prof)
         scope = lambda p: "//" + p.lstrip("/") + "/**"  # noqa: E731
         paths = [r["path"] for r in R.repos(acfg)]
         allowed = ["Read(%s)" % scope(d)] + ["Read(%s)" % scope(x) for x in paths] + [
@@ -168,10 +165,9 @@ def _run(d, display_id, hint):
             "--allowedTools"] + allowed + ["--disallowedTools", "Bash", "WebFetch", "WebSearch"]
         if acfg.get("model"):
             cmd += ["--model", acfg["model"]]
-        with open(os.path.join(d, "claude.json"), "w", encoding="utf-8") as so, \
-                open(os.path.join(d, "claude.err"), "w", encoding="utf-8") as se:
-            code = subprocess.run(cmd, cwd=d, stdout=so, stderr=se, stdin=subprocess.DEVNULL,
-                                  env=af.build_env(acfg), timeout=1200).returncode
+        res, prof = af.claude_oneshot(acfg, cmd, os.path.join(d, "claude.json"), os.path.join(d, "claude.err"),
+                                      cwd=d, timeout=1200)  # gói bị vô hiệu → tự dùng gói khác
+        code = res.returncode
         if not os.path.exists(out):
             raise RuntimeError("Claude không ghi kết quả (mã %s, xem %s/claude.err)" % (code, d))
         res = json.load(open(out, encoding="utf-8"))
@@ -194,7 +190,8 @@ def create_children(split_id, tasks, assignee="me"):
         raise ValueError("chưa chọn việc con nào")
     if len(tasks) > MAX_TASKS:
         raise ValueError("tối đa %d việc con" % MAX_TASKS)
-    cfg, acfg, _ = task_create.load()
+    import projects as P
+    cfg, acfg, _ = task_create.load(P.prefix_of(split_id) or None)  # việc con vào dự án của ticket cha
     d = _dir(acfg, split_id)
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
     types = {t["name"]: t["id"] for t in api.get("/api/v3/projects/%s/types" % cfg["project"])["_embedded"]["elements"]}

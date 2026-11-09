@@ -57,6 +57,29 @@ cạnh nó nên service không cần `EnvironmentFile`. Sửa `.env` xong: `syst
 Lần chạy đầu chỉ ghi mốc các việc đang có (không báo); dùng `--notify-existing` để báo cả các việc đó.
 Trạng thái lưu ở `OP_WATCH_STATE` (mặc định `~/.local/state/op-watch/state.json`; `--reset` để xoá).
 
+## Nhiều dự án (projects.py — Cấu hình → Dự án)
+
+Tool làm được cho nhiều dự án OpenProject cùng lúc; mỗi dự án có repo, server test, quy ước riêng. Chưa khai báo thì
+dùng MỘT dự án dựng từ cấu hình cũ (`OP_PROJECT`, `OP_TICKET_PREFIX`, `OP_PROJECT_NAME`, danh sách repo, `deploy.json`)
+— chạy như trước.
+
+Thêm dự án: trang theo dõi → **Cấu hình → Dự án** → chọn dự án OpenProject → **+ Thêm dự án** (tự đọc tên + tiền tố mã
+ticket) → điền bối cảnh, server test → **Lưu dự án** → bấm **Repo ↓** để thêm repo cho dự án (chọn thư mục, AI điền)
+→ **⟳ Áp dụng**. Lần lưu đầu, repo hiện có chuyển vào dự án đầu tiên (`config.json` → `projects`, sao lưu `.bak-*`).
+
+| Phần | Theo dự án như thế nào |
+| --- | --- |
+| op-watch | theo dõi ticket giao cho mình ở mọi dự án (trạng thái chung hoặc `statuses` riêng của dự án) |
+| autofix | nhận dự án theo **tiền tố mã ticket** (SOAR-123 → dự án SOAR): chỉ dùng repo, bối cảnh, mẫu tiêu đề, ngưỡng `min_ticket_number` của dự án đó; dự án tắt "tự sửa" thì chỉ chạy khi bấm tay |
+| merge | đưa nhánh cá nhân của repo **mọi dự án** vào nhánh chung (`merge_to_dev.py --project X`: một dự án) |
+| deploy + QA | lần lượt từng dự án có repo deploy / bật QA; server lấy từ phần **Server test** của dự án (dự án dựng từ cấu hình cũ dùng `deploy.json`). QA tự động dùng `soar_api` / `ui_check` (đăng nhập kiểu SOAR) — dự án khác để tắt QA, vẫn có autofix + Gemini review + merge + deploy. `deploy_qa.py --project X` |
+| soar_api / ui_check | đọc server của dự án qua biến `OP_PROJECT_KEY` (autofix / deploy_qa tự đặt cho tiến trình con) |
+| Tạo task / Tách việc | Tạo task chọn dự án; tách việc tạo việc con vào dự án của ticket cha |
+| Telegram | mỗi nguồn chat chọn dự án nhận việc (Cài đặt Telegram → cột Cách nhận) |
+| Tab OpenProject | chọn dự án / Tất cả dự án |
+
+Ràng buộc: mã dự án, tiền tố mã ticket, dự án OP và **mã repo (key)** không trùng giữa các dự án.
+
 ## Dùng
 
 ```bash

@@ -68,11 +68,24 @@ Ghi file {out} (JSON, UTF-8) đúng dạng:
 """
 
 
-def load():
+def load(project=None):
+    """(cfg, acfg, dcfg) theo dự án (mã / tiền tố; trống = dự án mặc định) — tạo task vào dự án OP đó."""
+    import projects as P
     cfg = op_watch.load_config(argparse.Namespace(config=None, interval=None, on_change=None, no_notify=True))
     acfg = dict(af.AUTOFIX_DEFAULTS)
     acfg.update(cfg.get("autofix") or {})
-    return cfg, acfg, envconf.deploy_config()
+    proj = (P.get(cfg, project) if project else None) or P.default(cfg)
+    cfg, acfg = P.scope(cfg, acfg, proj)
+    return cfg, acfg, envconf.deploy_config(proj["key"])
+
+
+def draft_project(d):
+    """Dự án của bản nháp (chọn lúc tạo, lưu trong request.json → opts.project)."""
+    try:
+        with open(os.path.join(d, "request.json"), encoding="utf-8") as f:
+            return (json.load(f).get("opts") or {}).get("project") or None
+    except (OSError, ValueError):
+        return None
 
 
 def drafts_root(acfg):
@@ -95,8 +108,10 @@ def safe_name(name, used):
 
 def examples(api, cfg, qa_user_id, n=2):
     """Mô tả vài ticket gần nhất do tester (người QA) tạo — làm mẫu (lưu đệm 1 ngày)."""
+    import projects as P
     _, acfg, _ = load()
-    cache = os.path.join(os.path.expanduser(acfg["root"]), ".task-examples.json")
+    cache = os.path.join(os.path.expanduser(acfg["root"]), ".task-examples%s.json" % (
+        "" if (P.current(cfg) or {}).get("_legacy", True) else "-" + P.current(cfg)["key"]))
     try:
         if time.time() - os.path.getmtime(cache) < 86400:
             with open(cache, encoding="utf-8") as f:
@@ -140,7 +155,7 @@ def start_draft(prompt, files, opts=None):
         raise ValueError("cần mô tả task hoặc file đính kèm")
     if len(files) > MAX_FILES:
         raise ValueError("tối đa %d file" % MAX_FILES)
-    cfg, acfg, dcfg = load()
+    cfg, acfg, dcfg = load((opts or {}).get("project"))
     draft_id = datetime.now().strftime("%m%d-%H%M%S") + "-" + secrets.token_hex(2)
     d = os.path.join(drafts_root(acfg), draft_id)
     os.makedirs(os.path.join(d, "files"))
@@ -212,13 +227,14 @@ def refine_draft(draft_id, answers, subject="", description=""):
 
 def _run_draft(d):
     try:
-        cfg, acfg, dcfg = load()
+        cfg, acfg, dcfg = load(draft_project(d))
         req = json.load(open(os.path.join(d, "request.json"), encoding="utf-8"))
         api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
         files = "\n".join("- %s/files/%s (%s, %d byte)" % (d, x["name"], x["type"] or "?", x["size"])
                           for x in req["files"]) or "(không có)"
         out = os.path.join(d, "draft.json")
-        prompt = PROMPT.format(project_name=envconf.PROJECT_NAME, title_template=envconf.TASK_TITLE_TEMPLATE, prompt=req["prompt"] or "(xem file đính kèm)", files=files,
+        import projects as P
+        prompt = PROMPT.format(project_name=P.name(acfg), title_template=P.title_template(acfg), prompt=req["prompt"] or "(xem file đính kèm)", files=files,
                                repo_refs=R.prompt_refs(acfg), fe_url=dcfg.get("fe_url", ""),
                                api_url=dcfg.get("api_url", ""), out=out,
                                examples=examples(api, cfg, dcfg.get("qa_user_id") or 0))
@@ -230,11 +246,6 @@ def _run_draft(d):
                                                                          for a in ref["answers"]))
         with open(os.path.join(d, "prompt.md"), "w", encoding="utf-8") as f:
             f.write(prompt)
-        root = os.path.expanduser(acfg["root"])
-        prof, why = af.choose_profile(root, acfg)
-        if prof is None:
-            raise RuntimeError("không có gói Claude dùng được (%s)" % why)
-        af.use_profile(acfg, prof)
         scope = lambda p: "//" + p.lstrip("/") + "/**"  # noqa: E731
         paths = [r["path"] for r in R.repos(acfg)]
         allowed = ["Read(%s)" % scope(d)] + ["Read(%s)" % scope(x) for x in paths] + [
@@ -244,10 +255,9 @@ def _run_draft(d):
                "--allowedTools"] + allowed + ["--disallowedTools", "Bash", "WebFetch", "WebSearch"]
         if acfg.get("model"):
             cmd += ["--model", acfg["model"]]
-        with open(os.path.join(d, "claude.json"), "w", encoding="utf-8") as so, \
-                open(os.path.join(d, "claude.err"), "w", encoding="utf-8") as se:
-            code = subprocess.run(cmd, cwd=d, stdout=so, stderr=se, stdin=subprocess.DEVNULL,
-                                  env=af.build_env(acfg), timeout=600).returncode
+        res, prof = af.claude_oneshot(acfg, cmd, os.path.join(d, "claude.json"), os.path.join(d, "claude.err"),
+                                      cwd=d, timeout=600)  # gói bị vô hiệu → tự dùng gói khác
+        code = res.returncode
         if not os.path.exists(out):
             raise RuntimeError("Claude không ghi bản nháp (mã %s, xem %s/claude.err)" % (code, d))
         draft = json.load(open(out, encoding="utf-8"))
@@ -294,7 +304,7 @@ def create(draft_id, subject, description, type_name="Bug", priority_name="High"
     subject = (subject or "").strip()
     if not subject:
         raise ValueError("cần tiêu đề")
-    cfg, acfg, dcfg = load()
+    cfg, acfg, dcfg = load((st.get("opts") or {}).get("project"))
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
     types = {t["name"]: t["id"] for t in api.get("/api/v3/projects/%s/types" % cfg["project"])["_embedded"]["elements"]}
     prios = {p["name"]: p["id"] for p in api.get("/api/v3/priorities")["_embedded"]["elements"]}

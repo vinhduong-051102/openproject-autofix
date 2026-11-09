@@ -511,8 +511,11 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
 .tg-chatfoot { display: flex; gap: 10px; align-items: center; padding-top: 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }
 #tgModal.wide #tgmBody { overflow: hidden; }
 /* Trang Cấu hình */
-.view[data-view="config"].on { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; max-width: none; }
-#cfgRepoBox, #cfgEnvBox { min-height: 0; }
+.view[data-view="config"].on { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; max-width: none;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "proj env" "repo env"; }
+#cfgProjBox { grid-area: proj; } #cfgRepoBox { grid-area: repo; } #cfgEnvBox { grid-area: env; }
+#cfgProjBox, #cfgRepoBox, #cfgEnvBox { min-height: 0; }
+.cfg-repo .hd { flex-wrap: wrap; } .cfg-repo .hd > span:last-child { white-space: nowrap; }
 .cfg-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 16px; flex-shrink: 1 !important; }
 .cfg-repo { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; background: var(--panel-2); }
 .cfg-repo .hd { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
@@ -541,7 +544,8 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
   .svc .chip { padding: 6px 8px; font-size: 12px; }
   #reviewBox { max-height: 40%; }
   .leftcol { gap: 12px; }
-  .view[data-view="config"].on { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  .view[data-view="config"].on { grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(3, minmax(0, 1fr));
+    grid-template-areas: "proj" "repo" "env"; gap: 12px; }
   .cfg-item { grid-template-columns: minmax(0, 1fr); }
   .cfg-grid { grid-template-columns: 96px minmax(0, 1fr); }
   .tg-chatwrap { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 32%) minmax(0, 1fr); }
@@ -632,7 +636,8 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
       <div class="op-bar">
         <div class="seg" id="opScope"><button data-v="mine" class="on">Của tôi</button><button data-v="all">Cả project</button></div>
         <div class="seg" id="opStatus"><button data-v="open" class="on">Đang mở</button><button data-v="all">Tất cả</button></div>
-        <input id="opQ" type="search" placeholder="Tìm tiêu đề / nội dung / SOAR-…">
+        <select id="opProj" hidden title="Dự án OpenProject"></select>
+        <input id="opQ" type="search" placeholder="Tìm tiêu đề / nội dung / mã ticket…">
         <button id="opRefresh" title="Tải lại từ OpenProject">↻</button>
       </div>
       <div class="op-list" id="opList"><div class="empty">Đang tải…</div></div>
@@ -656,6 +661,10 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
     </section>
   </div>
   <div class="view" data-view="config">
+    <section id="cfgProjBox">
+      <h2>Dự án <span class="right muted" id="cfgProjSum"></span></h2>
+      <div class="cfg-body" id="cfgProjs"><div class="empty">Đang tải…</div></div>
+    </section>
     <section id="cfgRepoBox">
       <h2>Danh sách repo <span class="right muted" id="cfgRepoSum"></span></h2>
       <div class="cfg-body" id="cfgRepos"><div class="empty">Đang tải…</div></div>
@@ -731,6 +740,8 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
   <div class="modal-box">
     <div class="modal-head"><h3 id="tmTitle">Tạo task trên OpenProject</h3><button class="link" id="tmClose" aria-label="Đóng">✕</button></div>
     <div id="tmStep1">
+      <div class="tm-row" id="tmProjRow" hidden><label class="tm-label" for="tmProj" style="margin:0">Dự án</label>
+        <select id="tmProj" style="width:auto"></select></div>
       <label class="tm-label" for="tmPrompt">Mô tả task <span class="muted">— lỗi gì, ở màn nào, tài khoản nào, mong muốn ra sao… (AI sẽ viết lại theo mẫu của tester)</span></label>
       <textarea id="tmPrompt" rows="6" placeholder="Ví dụ: Màn Quản trị > Giám sát kết nối, đăng nhập admint, cột STT quá rộng làm cột Kết nối bị rớt dòng. Mong muốn STT ~70px, cột Kết nối rộng hơn."></textarea>
       <div class="tm-drop" id="tmDrop" tabindex="0">Kéo thả file vào đây, dán ảnh (Ctrl+V) hoặc <button class="link" id="tmPick">chọn file</button>
@@ -1400,6 +1411,7 @@ function renderAgents() {
 async function refresh() {
   try {
     S = await (await fetch("/api/state")).json();
+    if (projList().length > 1 && $("opProj").hidden) { opProjects(); OP.page = 1; loadOP(); }  // có nhiều dự án: hiện ô chọn dự án ở tab OpenProject
     $("updated").textContent = "Cập nhật " + new Date().toLocaleTimeString("vi-VN");
     renderChips(); renderAgents(); renderProfiles(); renderSummaries(); renderPending(); renderReview(); renderActs(); renderInbox();
     renderTodo();
@@ -1506,7 +1518,17 @@ function tmAdd(list) {
   tmRenderFiles();
 }
 const tmB64 = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
+function projList() { return (S && S.projects) || []; }
+function projOf(displayId) {  // dự án của mã ticket (theo tiền tố), chỉ khi có nhiều dự án
+  const ps = projList(); if (ps.length < 2) return null;
+  const pre = String(displayId || "").split("-")[0].toUpperCase();
+  return ps.find((p) => p.prefix === pre) || null;
+}
 function tmOpen() {
+  const ps = projList(), cur = $("tmProj").value;
+  $("tmProjRow").hidden = ps.length < 2;
+  $("tmProj").innerHTML = ps.map((p) => `<option value="${esc(p.key)}">${esc(p.name)} (${esc(p.prefix)})</option>`).join("");
+  if (cur && ps.some((p) => p.key === cur)) $("tmProj").value = cur;
   $("taskModal").hidden = false; $("tmStep1").hidden = false; $("tmStep2").hidden = true;
   document.documentElement.classList.add("modal-open");
   $("tmStatus").textContent = ""; $("tmDraft").disabled = false; $("tmPrompt").focus();
@@ -1590,7 +1612,7 @@ $("tmDraft").onclick = async () => {
   setBusy($("tmDraft"), true); $("tmStatus").textContent = "Đang gửi…";
   const files = [];
   for (const f of tmFiles) files.push({name: f.name, type: f.type, data: await tmB64(f)});
-  const r = await post({action: "task_draft", prompt, files}, null);
+  const r = await post({action: "task_draft", prompt, files, opts: {project: $("tmProj").value || ""}}, null);
   if (!r) { setBusy($("tmDraft"), false); flash($("tmDraft"), "fail"); $("tmStatus").textContent = ""; return; }
   tmDraftId = r.id; const t0 = Date.now();
   if (tmPoll) clearInterval(tmPoll);
@@ -1627,15 +1649,28 @@ $("tmCreate").onclick = async () => {
 })();
 
 // ---- Tab OpenProject: work package qua API (op.cytech.ai chặn nhúng iframe) ----
-const OP = {scope: "mine", status: "open", q: "", page: 1, busy: false, timer: null};
+const OP = {scope: "mine", status: "open", q: "", page: 1, busy: false, timer: null, project: ""};
+function opProjects() {  // ô chọn dự án (chỉ hiện khi khai báo nhiều dự án)
+  const ps = projList(), el = $("opProj");
+  if (ps.length < 2) { el.hidden = true; return; }
+  const want = ps.map((p) => p.key).join(",");
+  if (el.dataset.keys !== want) {
+    el.innerHTML = `<option value="all">Tất cả dự án</option>` + ps.map((p) => `<option value="${esc(p.key)}">${esc(p.name)}</option>`).join("");
+    el.dataset.keys = want;
+    try { const v = localStorage.getItem("opProj"); if (v && (v === "all" || ps.some((p) => p.key === v))) el.value = v; } catch (e) {}
+    OP.project = el.value;
+  }
+  el.hidden = false;
+}
 const opBadge = (st) => /resolved|closed|done|đóng/i.test(st) ? "ok" : /reopen|reject/i.test(st) ? "crit"
   : /progress|review|test|qa/i.test(st) ? "warn" : /new|mới/i.test(st) ? "accent" : "";
 async function loadOP(refresh) {
-  if (OP.busy) return;
+  if (OP.busy) { OP.again = true; return; }
   OP.busy = true;
   const list = $("opList");
   try {
-    const qs = new URLSearchParams({scope: OP.scope, status: OP.status, q: OP.q, page: OP.page, refresh: refresh ? "1" : "0"});
+    opProjects();
+    const qs = new URLSearchParams({scope: OP.scope, status: OP.status, q: OP.q, page: OP.page, refresh: refresh ? "1" : "0", project: OP.project});
     const d = await (await fetch("/api/op?" + qs)).json();
     if (d.op_url) $("opExt").href = d.op_url + "/projects";
     if (d.error) { list.innerHTML = `<div class="empty">${esc(d.error)}</div>`; $("opFoot").textContent = ""; return; }
@@ -1646,7 +1681,7 @@ async function loadOP(refresh) {
         <span class="subj">${esc(w.subject)}</span>
         <span class="when">${esc((w.updated || "").slice(5, 16).replace("T", " "))}</span>
         <span class="tags"><span class="badge ${opBadge(w.status)}">${esc(w.status)}</span>
-          <span>${esc(w.type)}</span>·<span>${esc(w.priority)}</span>${w.assignee ? `·<span>${esc(w.assignee)}</span>` : ""}</span>
+          ${OP.project === "all" && w.project ? `<span>${esc(w.project)}</span>·` : ""}<span>${esc(w.type)}</span>·<span>${esc(w.priority)}</span>${w.assignee ? `·<span>${esc(w.assignee)}</span>` : ""}</span>
       </a>`).join("") : '<div class="empty">Không có work package nào</div>';
     const pages = Math.max(1, Math.ceil(d.total / d.page_size));
     $("opFoot").innerHTML = pages > 1 ? `<button class="link" id="opPrev" ${OP.page <= 1 ? "disabled" : ""}>‹ Trước</button>
@@ -1657,7 +1692,7 @@ async function loadOP(refresh) {
     }
   } catch (e) {
     list.innerHTML = '<div class="empty">Không tải được — dashboard mất kết nối?</div>';
-  } finally { OP.busy = false; }
+  } finally { OP.busy = false; if (OP.again) { OP.again = false; loadOP(); } }
 }
 [["opScope", "scope"], ["opStatus", "status"]].forEach(([id, k]) => $(id).querySelectorAll("button").forEach((b) => b.onclick = () => {
   $(id).querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
@@ -1665,6 +1700,7 @@ async function loadOP(refresh) {
 }));
 $("opQ").oninput = () => { clearTimeout(OP.timer); OP.timer = setTimeout(() => { OP.q = $("opQ").value.trim(); OP.page = 1; loadOP(); }, 400); };
 $("opRefresh").onclick = () => loadOP(true);
+$("opProj").onchange = () => { OP.project = $("opProj").value; try { localStorage.setItem("opProj", OP.project); } catch (e) {} OP.page = 1; loadOP(); };
 loadOP(); setInterval(() => { if (!$("opBox").classList.contains("closed")) loadOP(); }, 120000);
 
 // ---- Chi tiết work package trong dashboard (xem qua Tailscale không vào được op.cytech.ai) ----
@@ -2355,7 +2391,8 @@ function tgChatsRender(st, rows) {
       return `<tr data-i="${i}"><td><div>${x ? `${TG_KIND[x.kind] || ""} <b>${esc(x.name)}</b>` : `<b>${esc(r.ref)}</b>`}
           ${miss ? ` <span class="badge crit" title="${esc(miss.error)}">không tìm thấy</span>` : on ? ` <span class="badge ok">đang nghe</span>` : ` <span class="badge">lưu xong sẽ nghe</span>`}</div>
         <div class="muted" style="font-size:11.5px">${esc(r.ref)}</div><input type="text" data-k="label" value="${esc(r.label || "")}" placeholder="tên hiển thị (tuỳ chọn)"></td>
-        <td><select data-k="mode">${Object.entries(modes).map(([k, l]) => `<option value="${k}" ${r.mode === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></td>
+        <td><select data-k="mode">${Object.entries(modes).map(([k, l]) => `<option value="${k}" ${r.mode === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          ${projList().length > 1 ? `<select data-k="project" title="Việc từ chat này tạo vào dự án" style="margin-top:4px"><option value="">Dự án: mặc định (${esc(projList()[0].name)})</option>${projList().map((p) => `<option value="${esc(p.key)}" ${r.project === p.key ? "selected" : ""}>Dự án: ${esc(p.name)}</option>`).join("")}</select>` : ""}</td>
         ${["requests", "asks", "notify"].map((k) => `<td class="c"><input type="checkbox" data-k="${k}" ${r[k] !== false ? "checked" : ""} aria-label="${k}"></td>`).join("")}
         <td><button class="link" data-del="${i}" title="Bỏ nguồn này" aria-label="Bỏ ${esc(r.ref)}">✕</button></td></tr>`; }).join("")
       || `<tr><td colspan="6" class="muted">Chưa có nguồn chat nào — chọn bên dưới.</td></tr>`}
@@ -2441,6 +2478,11 @@ $("tgSettingsBtn").onclick = tgSettings;
 const ASK_BADGE = {proposed: "warn", queued: "accent", sent: "accent", answered: "ok", kept: "", closed: ""};
 async function tgAsks(all) {
   let d;
+  if (!TG.asks || $("tgModal").hidden) {  // mở cửa sổ ngay, nội dung tải sau
+    TG.cur = null; TG.chat = null; TG.asks = true;
+    tgShow(); $("tgmTitle").textContent = "Xin ý kiến — ticket UNREVIEWED";
+    $("tgmBody").innerHTML = '<div class="empty">Đang tải…</div>';
+  }
   try { d = await tgFetch("/api/tg/asks" + (all ? "?status=all" : "")); } catch (e) { return toast(e.message, true); }
   TG.cur = null; TG.chat = null; TG.asks = true;
   tgShow(); $("tgmTitle").textContent = "Xin ý kiến — ticket UNREVIEWED";
@@ -2618,16 +2660,103 @@ const CFG_DEPLOY = [["deploy_cmd", "Lệnh deploy", "cả ô là một script ba
   ["deploy_ref", "Nhánh deploy", "trống = nhánh chung"], ["deploy_health", "URL kiểm tra", "sau deploy đợi URL trả 2xx, trống = không kiểm tra"]];
 async function loadConfig() {
   try {
-    const [e, r] = await Promise.all([tgFetch("/api/config"), tgFetch("/api/config/repos")]);
-    CFG.env = e; CFG.repos = r; CFG.list = r.repos.map((x) => ({...x}));
-    renderCfgRepos(); renderCfgEnv();
+    const [e, pj] = await Promise.all([tgFetch("/api/config"), tgFetch("/api/config/projects")]);
+    CFG.env = e; CFG.pj = pj; CFG.plist = pj.projects.map((p) => ({...p, deploy: {...(p.deploy || {})}, _orig: p.key}));
+    if (!CFG.proj || !pj.projects.some((p) => p.key === CFG.proj)) CFG.proj = (pj.projects[0] || {}).key || "";
+    renderCfgProjects(); renderCfgEnv();
+    await loadCfgRepos();
   } catch (err) { $("cfgEnv").innerHTML = `<div class="empty">Không tải được: ${esc(err.message)}</div>`; }
+}
+async function loadCfgRepos() {
+  const r = await tgFetch("/api/config/repos?project=" + encodeURIComponent(CFG.proj || ""));
+  CFG.repos = r; CFG.list = r.repos.map((x) => ({...x}));
+  renderCfgRepos();
+}
+// ---- Dự án: mỗi dự án OpenProject có repo, server test, quy ước riêng (config.json → projects) ----
+const CFG_PROJ = [["name", "Tên", "hiện trong prompt / trang, vd SOAR"], ["prefix", "Tiền tố mã ticket", "SOAR → SOAR-123; tự đọc từ OpenProject"],
+  ["min_ticket_number", "Chỉ tự sửa từ số", "0 = mọi ticket; vd 2780 = bỏ qua ticket cũ hơn"],
+  ["title_template", "Mẫu tiêu đề task", "AI soạn task lỗi theo mẫu này"],
+  ["context", "Bối cảnh dự án", "nghiệp vụ, thuật ngữ, màn hình chính, tài khoản test… — thêm vào prompt Claude khi sửa ticket của dự án", true]];
+const CFG_PROJ_DEPLOY = [["host", "Server test (host)", "IP / tên máy server test của dự án"], ["user", "SSH user", ""], ["password", "SSH mật khẩu", "lưu trong config.json (quyền 600), không hiện lại"],
+  ["base", "Thư mục trên server", "{base} trong lệnh deploy"], ["fe_url", "URL giao diện", "vd https://10.0.0.5:4443 — QA tự động / ui_check"], ["api_url", "URL API", "QA tự động gọi API"],
+  ["app_user", "Tài khoản đăng nhập app", "QA tự động / ui_check dùng"], ["app_password", "Mật khẩu app", ""],
+  ["qa_user_id", "Id người QA (OpenProject)", "QA đạt → giao ticket cho người này"], ["qa_user_name", "Tên người QA", ""], ["qa_review_status_ids", "Trạng thái chờ QA", "id trạng thái, cách nhau dấu phẩy"]];
+function renderCfgProjects(msg) {
+  const list = CFG.plist || [], pj = CFG.pj || {};
+  $("cfgProjSum").textContent = `${list.length} dự án${pj.declared ? "" : " · dựng từ cấu hình cũ"}`;
+  $("cfgProjs").innerHTML = (pj.declared ? "" : `<div class="muted cfg-msg">Đang dùng một dự án dựng từ cấu hình cũ (OP_PROJECT / OP_TICKET_PREFIX / danh sách repo / deploy.json). Thêm dự án khác rồi bấm <b>Lưu dự án</b> — repo hiện tại chuyển vào dự án này, mọi thứ chạy như trước.</div>`)
+    + (msg ? `<div class="cfg-msg">${msg}</div>` : "")
+    + list.map((x, i) => {
+      const fieldP = ([k, l, h, multi]) => `<label for="cp${i}_${k}">${esc(l)}</label>${multi
+        ? `<textarea id="cp${i}_${k}" data-pi="${i}" data-pk="${k}" rows="3" placeholder="${esc(h)}" title="${esc(h)}">${esc(x[k] ?? "")}</textarea>`
+        : `<input type="text" id="cp${i}_${k}" data-pi="${i}" data-pk="${k}" value="${esc(x[k] ?? "")}" placeholder="${esc(h)}" title="${esc(h)}">`}`;
+      const d = x.deploy || {}, dv = (k) => Array.isArray(d[k]) ? d[k].join(", ") : (d[k] ?? "");
+      const fieldD = ([k, l, h]) => `<label for="cpd${i}_${k}">${esc(l)}</label><input type="${/password/.test(k) ? "password" : "text"}" id="cpd${i}_${k}" data-pi="${i}" data-dk="${k}" value="${esc(dv(k))}" placeholder="${esc(x.deploy_inherit || x._legacy ? "trống = theo deploy.json / .env" : h)}" title="${esc(h)}" autocomplete="off">`;
+      return `<div class="cfg-repo"><div class="hd"><b>${esc(x.name || x.key)}</b><span class="muted">· OP #${esc(x.op_project)} · mã ${esc(x.prefix)}-… · ${(x.repo_labels || []).length ? "repo: " + esc(x.repo_labels.join(", ")) : "chưa có repo"}${i === 0 ? " · mặc định" : ""}</span>
+          <span style="margin-left:auto;display:flex;gap:6px"><button class="link" data-prepo="${i}" title="Sửa danh sách repo của dự án này">Repo ↓</button>${list.length > 1 ? `<button class="link" data-pdel="${i}" title="Bỏ dự án">✕</button>` : ""}</span></div>
+        <div class="cfg-grid">
+          <label for="cp${i}_key">Mã</label><input type="text" id="cp${i}_key" data-pi="${i}" data-pk="key" value="${esc(x.key)}" ${x._orig ? "readonly title=\"mã đã dùng cho cấu hình, không đổi\"" : ""}>
+          ${CFG_PROJ.map(fieldP).join("")}
+          <label>Tự động</label><div style="display:flex;gap:14px;flex-wrap:wrap">
+            <label style="color:var(--text)"><input type="checkbox" data-pi="${i}" data-pk="enabled" ${x.enabled !== false ? "checked" : ""} style="width:auto"> tự sửa ticket mới / reopen</label>
+            <label style="color:var(--text)"><input type="checkbox" data-pi="${i}" data-pk="qa" ${x.qa ? "checked" : ""} style="width:auto"> QA tự động trên server test sau deploy</label></div>
+        </div>
+        <details><summary>Server test${x.deploy_inherit || x._legacy ? " — đang dùng deploy.json / .env (DEPLOY_*), điền để ghi đè" : " — deploy (lệnh “command”: {host} {user} {base}, $SSHPASS) + QA tự động"}</summary>
+          <div class="cfg-grid" style="margin-top:8px">${CFG_PROJ_DEPLOY.map(fieldD).join("")}</div>
+          <div class="muted cfg-msg">QA tự động dùng soar_api / ui_check (đăng nhập kiểu SOAR). Dự án khác cách đăng nhập: tắt QA tự động, vẫn dùng autofix + Gemini review + merge + deploy.</div></details></div>`; }).join("")
+    + `<div id="cfgProjAdd" class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <select id="cfgOpProj" style="width:auto;min-width:260px"><option value="">— chọn dự án OpenProject để thêm —</option></select>
+        <button id="cfgProjAddBtn">+ Thêm dự án</button><button class="primary" id="cfgProjSave">Lưu dự án</button><span class="muted" id="cfgProjSt"></span></div>
+      <div class="muted cfg-msg">Mỗi dự án: op-watch theo dõi ticket giao cho bạn, autofix dùng repo + bối cảnh của dự án (nhận theo tiền tố mã ticket), merge / deploy / QA theo server của dự án, Telegram / Tạo task chọn được dự án. Lưu xong bấm <b>⟳ Áp dụng</b>.</div>`;
+  const sync = () => {
+    document.querySelectorAll("#cfgProjs [data-pk]").forEach((el) => { const x = list[+el.dataset.pi]; x[el.dataset.pk] = el.type === "checkbox" ? el.checked : el.value; });
+    document.querySelectorAll("#cfgProjs [data-dk]").forEach((el) => { const x = list[+el.dataset.pi]; x.deploy = x.deploy || {}; x.deploy[el.dataset.dk] = el.value.trim(); });
+  };
+  CFG.syncProj = sync;
+  document.querySelectorAll("[data-pdel]").forEach((b) => b.onclick = () => { sync(); const x = list[+b.dataset.pdel];
+    if (confirm(`Bỏ dự án ${x.name}?${(x.repo_labels || []).length ? "\nDanh sách repo của dự án (" + x.repo_labels.join(", ") + ") cũng bị bỏ khi lưu." : ""}`)) { list.splice(+b.dataset.pdel, 1); renderCfgProjects(); } });
+  document.querySelectorAll("[data-prepo]").forEach((b) => b.onclick = async () => { sync(); const x = list[+b.dataset.prepo];
+    if (!x._orig) { toast("Lưu dự án trước rồi mới thêm repo", true); return; }
+    CFG.proj = x.key; await loadCfgRepos(); $("cfgRepoBox").scrollIntoView({behavior: "smooth"}); });
+  $("cfgOpProj").onfocus = async () => {
+    if (CFG.opProjects) return;
+    $("cfgProjSt").textContent = "Đang đọc dự án trên OpenProject…";
+    try { CFG.opProjects = (await tgFetch("/api/config/op_projects")).items; $("cfgProjSt").textContent = ""; }
+    catch (err) { $("cfgProjSt").textContent = "Không đọc được: " + err.message; return; }
+    const have = new Set(list.map((p) => String(p.op_project)));
+    $("cfgOpProj").innerHTML = `<option value="">— chọn dự án OpenProject để thêm —</option>` + CFG.opProjects.map((p) =>
+      `<option value="${esc(p.id)}" ${have.has(p.id) ? "disabled" : ""}>${esc(p.name)} (${esc(p.identifier)}, #${esc(p.id)})${have.has(p.id) ? " — đã thêm" : ""}</option>`).join("");
+  };
+  $("cfgProjAddBtn").onclick = async () => {
+    sync(); const id = $("cfgOpProj").value;
+    if (!id) { $("cfgOpProj").focus(); toast("Chọn dự án OpenProject", true); return; }
+    const r = await post({action: "config_project_detect", op_project: id}, $("cfgProjAddBtn"));
+    if (!r) return;
+    list.push({key: r.key, name: r.name, op_project: r.op_project, prefix: r.prefix, enabled: true, qa: false, min_ticket_number: 0,
+      title_template: "", context: "", deploy: {}, repo_labels: []});
+    CFG.opProjects = null;
+    renderCfgProjects(`Đã thêm <b>${esc(r.name)}</b>${r.prefix_from_wp ? "" : " — <b>chưa có ticket nào để đọc tiền tố mã, kiểm tra ô Tiền tố</b>"}. Xem lại rồi bấm <b>Lưu dự án</b>, sau đó thêm repo cho dự án.`);
+  };
+  $("cfgProjSave").onclick = async () => {
+    sync();
+    if (!confirm(`Lưu ${list.length} dự án?`)) return;
+    const r = await post({action: "config_projects", projects: list}, $("cfgProjSave"));
+    if (!r) return;
+    CFG.applied = [...new Set(CFG.applied.concat(["projects"]))]; $("cfgApply").hidden = false;
+    const pj = await tgFetch("/api/config/projects");
+    CFG.pj = pj; CFG.plist = pj.projects.map((p) => ({...p, deploy: {...(p.deploy || {})}, _orig: p.key}));
+    renderCfgProjects(esc(r.message)); await loadCfgRepos();
+  };
 }
 function cfgVal(x, k) { const v = x[k]; return Array.isArray(v) ? v.join("\n") : (v ?? ""); }
 function renderCfgRepos(msg) {
   const R = CFG.repos, list = CFG.list, pre = R.presets || {};
-  $("cfgRepoSum").textContent = `${list.length} repo${R.declared ? "" : " · đang dùng FE/BE mặc định từ .env"}`;
-  $("cfgRepos").innerHTML = (R.declared ? "" : `<div class="muted cfg-msg">Chưa khai báo danh sách repo — đang dùng 2 repo FE / BE từ các biến FE_* / BE_*. Bấm <b>Lưu danh sách repo</b> để chuyển sang khai báo tại đây (thêm được repo khác).</div>`)
+  const projs = (CFG.pj && CFG.pj.projects) || [], curP = projs.find((p) => p.key === CFG.proj);
+  $("cfgRepoSum").textContent = `${curP ? curP.name + " · " : ""}${list.length} repo${R.declared ? "" : " · đang dùng FE/BE mặc định từ .env"}`;
+  $("cfgRepos").innerHTML = (projs.length > 1 ? `<div class="tm-row" style="display:flex;gap:8px;align-items:center"><label for="cfgRepoProj" style="margin:0">Dự án</label>
+      <select id="cfgRepoProj" style="width:auto">${projs.map((p) => `<option value="${esc(p.key)}" ${p.key === CFG.proj ? "selected" : ""}>${esc(p.name)} (${esc(p.prefix)})</option>`).join("")}</select>
+      <span class="muted">mã repo (Key) không trùng giữa các dự án</span></div>` : "")
+    + (R.declared ? "" : `<div class="muted cfg-msg">Chưa khai báo danh sách repo — đang dùng 2 repo FE / BE từ các biến FE_* / BE_*. Bấm <b>Lưu danh sách repo</b> để chuyển sang khai báo tại đây (thêm được repo khác).</div>`)
     + (msg ? `<div class="cfg-msg">${msg}</div>` : "")
     + list.map((x, i) => { const p = pre[x.preset] || {};
       const ph = (k, d) => esc(cfgVal(p, k) || d || "");
@@ -2667,7 +2796,9 @@ function renderCfgRepos(msg) {
     renderCfgRepos(`<b>🤖 ${esc(x.label || x.key || "")}: AI đã viết ${r.deploy_cmd.length} lệnh deploy</b> — xem lại rồi bấm <b>Lưu danh sách repo</b>.${r.notes ? `<div class="muted">AI lưu ý: ${esc(r.notes)}</div>` : ""}`);
     const el = $(`cr${i}_deploy_cmd`); if (el) el.scrollIntoView({block: "center"});
   });
-  const send = async (action) => { sync(); const r = await post({action, repos: list}); if (r) { if (action === "config_repos") { CFG.repos.declared = true; }
+  if ($("cfgRepoProj")) $("cfgRepoProj").onchange = async () => { CFG.proj = $("cfgRepoProj").value; await loadCfgRepos(); };
+  const send = async (action) => { sync(); const r = await post({action, repos: list, project: CFG.proj}); if (r) { if (action === "config_repos") { CFG.repos.declared = true;
+      tgFetch("/api/config/projects").then((pj) => { CFG.pj = pj; const keep = CFG.plist; CFG.plist = pj.projects.map((p) => ({...(keep.find((k) => k._orig === p.key) || p), repo_labels: p.repo_labels, _orig: p.key})); renderCfgProjects(); }).catch(() => {}); }
     renderCfgRepos(esc(r.message)); } };
   $("cfgRepoCheck").onclick = () => send("config_repos_check");
   $("cfgRepoSave").onclick = () => confirm("Lưu danh sách repo? Lượt autofix / merge / deploy kế tiếp sẽ dùng danh sách này.") && send("config_repos");

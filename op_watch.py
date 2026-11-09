@@ -195,25 +195,44 @@ def emit(cfg, event, info, detail=""):
     if cfg.get("on_change"):
         env = dict(os.environ, OP_EVENT=event, OP_WP_ID=str(info["id"]), OP_DISPLAY_ID=info["display_id"],
                    OP_SUBJECT=info["subject"], OP_STATUS=info["status"], OP_LINK=info["link"],
-                   OP_DETAIL=detail)
+                   OP_DETAIL=detail, OP_PROJECT_KEY=(cfg.get("_project") or {}).get("key") or "")
         try:
             subprocess.Popen(cfg["on_change"], shell=True, env=env)
         except OSError as ex:
             log("on_change lỗi: %s" % ex)
 
 
+def watched_work_packages(cfg, api):
+    """[(cfg theo dự án, work package)] của mọi dự án khai báo (projects.py) + tên các dự án không đọc được."""
+    import projects as P
+    out, failed = [], []
+    items = P.projects(cfg)
+    for proj in items:
+        pc, _ = P.scope(cfg, None, proj)
+        try:
+            out += [(pc, wp) for wp in api.my_work_packages(pc["project"], pc["statuses"].keys())]
+        except (urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+            if len(items) == 1:
+                raise
+            log("dự án %s: lỗi khi gọi OpenProject (%s)" % (proj["name"], ex))
+            failed.append(proj["key"])
+    return out, failed
+
+
 def poll(cfg, api, me_id, state, notify_existing):
-    watched = api.my_work_packages(cfg["project"], cfg["statuses"].keys())
+    watched, failed = watched_work_packages(cfg, api)
     first_run = state is None
     old = (state or {}).get("items", {})
-    items = {}
+    # Dự án lỗi lượt này: giữ nguyên mục cũ của nó (không thì lượt sau báo NEW nhầm cả loạt)
+    items = {k: v for k, v in old.items() if v.get("project") in failed}
 
-    for wp in watched:
+    for pcfg, wp in watched:
+        cfg = pcfg
         info = wp_info(cfg, wp)
         key = str(info["id"])
         prev = old.get(key)
         entry = {"status_id": info["status_id"], "updated_at": info["updated_at"],
-                 "comment_id": prev.get("comment_id", 0) if prev else 0}
+                 "comment_id": prev.get("comment_id", 0) if prev else 0, "project": cfg["_project"]["key"]}
 
         if prev is None:
             # Việc mới vào danh sách: ghi mốc comment hiện có để chỉ báo comment sau thời điểm này.
@@ -266,8 +285,8 @@ def main():
     api = OpenProject(cfg["url"], cfg["api_key"])
 
     if args.list:
-        for wp in api.my_work_packages(cfg["project"], cfg["statuses"].keys()):
-            info = wp_info(cfg, wp)
+        for pcfg, wp in watched_work_packages(cfg, api)[0]:
+            info = wp_info(pcfg, wp)
             print("%-10s %-9s %-8s %s\n           %s" % (
                 info["display_id"], info["status"], info["priority"], info["subject"], info["link"]))
         return
@@ -285,7 +304,9 @@ def main():
                 raise
             log("Chưa gọi được OpenProject (%s), thử lại sau %ss" % (ex, wait))
             time.sleep(wait)
-    log("op-watch: %s (id %s), dự án %s, %ss/lượt" % (me.get("name"), me["id"], cfg["project"], cfg["interval"]))
+    import projects as P
+    log("op-watch: %s (id %s), dự án %s, %ss/lượt" % (me.get("name"), me["id"], ", ".join(
+        "%s (OP %s)" % (p["name"], p["op_project"]) for p in P.projects(cfg)), cfg["interval"]))
 
     def handle_signal(signum, frame):
         global stop

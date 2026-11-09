@@ -118,6 +118,9 @@ def repos(acfg):
     """Danh sách repo đã chuẩn hoá (thứ tự = thứ tự khai báo; repo đầu là thư mục làm việc của Claude)."""
     raw = acfg.get("repos")
     if not raw:
+        proj = acfg.get("_project")
+        if proj and not proj.get("_legacy"):  # dự án khai báo mà chưa có repo: KHÔNG lấy FE / BE mặc định (repo SOAR)
+            return []
         return legacy(acfg)
     out, seen = [], set()
     for x in raw:

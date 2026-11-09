@@ -298,9 +298,12 @@ def run(dry=False, only=None):
     cfg = op_watch.load_config(argparse.Namespace(config=None, interval=None, on_change=None, no_notify=True))
     acfg = dict(af.AUTOFIX_DEFAULTS)
     acfg.update(cfg.get("autofix") or {})
-    dcfg = envconf.deploy_config()
-    qa_user = dcfg.get("qa_user_id")
-    if not qa_user:
+    import projects as P
+    acfg = P.all_repos(acfg, cfg)  # lượt chạy của mọi dự án
+
+    def qa_user_of(ticket):  # người QA theo dự án của ticket
+        return envconf.deploy_config(P.by_ticket(cfg, ticket)["key"] if cfg.get("projects") else None).get("qa_user_id")
+    if not any(qa_user_of(p["prefix"] + "-1") for p in P.projects(cfg)):
         sys.exit("Chưa cấu hình qa_user_id (deploy.json / QA_USER_ID) — không biết ai là người QA")
     root = os.path.expanduser(acfg["root"])
     report_dir = os.path.expanduser(acfg.get("report_dir") or "")
@@ -312,6 +315,9 @@ def run(dry=False, only=None):
     done, freed = [], 0
     for display_id, runs in sorted(local_tickets(root).items()):
         if only and display_id not in only:
+            continue
+        qa_user = qa_user_of(display_id)
+        if not qa_user:
             continue
         ok, status = handed_over(api, display_id, qa_user)
         if not ok:

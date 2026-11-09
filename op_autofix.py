@@ -38,6 +38,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envconf  # noqa: E402
 import repos as R  # noqa: E402  danh sách repo (cấu hình động; mặc định FE + BE như trước)  (nạp .env)
 import op_watch  # noqa: E402  (dùng chung cấu hình + client OpenProject)
+import projects as P  # noqa: E402  nhiều dự án: mỗi ticket dùng repo / quy ước của dự án mình (theo tiền tố mã)
+
+_CFG = {}  # cấu hình op-watch đầy đủ của tiến trình (main ghi) — để tra dự án của một ticket
+
+
+def for_ticket(cfg, acfg, ticket, wp=None):
+    """(cfg, acfg) chỉ còn repo / quy ước của dự án chứa ticket (SOAR-123 hoặc tên thư mục lượt chạy)."""
+    cfg, acfg = P.for_ticket(cfg or _CFG, acfg, ticket, wp)
+    os.environ["OP_PROJECT_KEY"] = acfg["_project"]["key"]  # soar_api / ui_check / deploy_config dùng server của dự án
+    return cfg, acfg
+
+
+def ticket_acfg(acfg, ticket):
+    return P.scope_acfg(acfg, P.by_ticket(_CFG, ticket)) if _CFG else acfg
 
 # systemd có thể khởi động service trước khi PATH người dùng có ~/.local/bin (claude, agy): thêm vào đầu PATH.
 for _bin in reversed(envconf.extra_path()):
@@ -819,10 +833,11 @@ def resolve_conflicts(acfg, work, what):
                 cmd += ["--model", acfg["model"]]
             log("%s: xung đột %s → Claude gỡ (gói %s, %s)" % (what, ", ".join(rest), prof["name"], report_dir))
             notify("[GỠ XUNG ĐỘT]", "%s: %s → Claude đang gỡ" % (what, ", ".join(rest)))
-            with open(os.path.join(report_dir, "claude.jsonl"), "w", encoding="utf-8") as out, \
-                    open(os.path.join(report_dir, "claude.err"), "w", encoding="utf-8") as err:
-                subprocess.run(cmd, cwd=work, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
-                               env=build_env(sub), timeout=3600)
+            try:  # gói bị vô hiệu → tự chạy lại bằng gói khác
+                claude_oneshot(sub, cmd, os.path.join(report_dir, "claude.jsonl"), os.path.join(report_dir, "claude.err"),
+                               prefer=prof["name"], cwd=work, timeout=3600)
+            except RuntimeError as ex:
+                log("%s: %s" % (what, ex))
             first = ""
             if os.path.exists(report):
                 with open(report, encoding="utf-8") as fh:
@@ -1430,7 +1445,6 @@ hình / thao tác / kết quả nhìn thấy; KHÔNG tên file, class, hàm, bi�
 KHÔNG ĐẠT chỉ khi có ít nhất một kết quả mong đợi của ticket chưa đạt (hoặc luồng của ticket bị hỏng rõ ràng). Không
 xác nhận được từ code (cần dữ liệu / môi trường thật) thì CẦN XEM. Còn lại ĐẠT.
 """
-GEMINI_PROMPT = GEMINI_PROMPT.replace("@@P@@", envconf.PROJECT_NAME)
 
 
 def worktree_snapshot(dirs):
@@ -1445,7 +1459,7 @@ def worktree_snapshot(dirs):
 
 def gemini_review(acfg, run_dir, items, note=""):
     """Gemini xem lại bản sửa (chỉ đọc). Trả (kết luận, nội dung); kết luận rỗng nếu Gemini không chạy được."""
-    parts = [GEMINI_PROMPT.format(run_dir=run_dir) + note]
+    parts = [GEMINI_PROMPT.replace("@@P@@", P.name(acfg)).format(run_dir=run_dir) + note]
     for title, path in (("TICKET", "ticket/ticket.md"), ("BÁO CÁO CỦA CLAUDE", "report.md"),
                         ("KẾT QUẢ BUILD / TEST TỰ ĐỘNG", "verify.log")):
         full = os.path.join(run_dir, path)
@@ -1607,10 +1621,19 @@ def claude_cmd(acfg, prompt, run_dir, be_dir=None):
 def run_claude(acfg, prompt, run_dir, fe_dir=None, be_dir=None, append=False):
     """Chạy Claude headless; thao tác ghi vào claude.jsonl (append cho lượt xem lại, --follow vẫn đọc được)."""
     mode = "a" if append else "w"
-    with open(os.path.join(run_dir, "claude.jsonl"), mode, encoding="utf-8") as out, \
-            open(os.path.join(run_dir, "claude.err"), mode, encoding="utf-8") as err:
-        return subprocess.run(claude_cmd(acfg, prompt, run_dir), cwd=R.trees(acfg, run_dir)[0][1], stdout=out, stderr=err,
+    paths = [os.path.join(run_dir, "claude.jsonl"), os.path.join(run_dir, "claude.err")]
+    starts = [os.path.getsize(x) if append and os.path.exists(x) else 0 for x in paths]
+    with open(paths[0], mode, encoding="utf-8") as out, open(paths[1], mode, encoding="utf-8") as err:
+        code = subprocess.run(claude_cmd(acfg, prompt, run_dir), cwd=R.trees(acfg, run_dir)[0][1], stdout=out, stderr=err,
                               stdin=subprocess.DEVNULL, env=build_env(acfg)).returncode
+    if code:  # lỗi: gói bị vô hiệu thì đánh dấu (vòng đổi gói của lượt chạy dùng gói khác)
+        text = ""
+        for x, st in zip(paths, starts):
+            with open(x, encoding="utf-8", errors="replace") as f:
+                f.seek(st)
+                text += f.read()[-20000:] + "\n"
+        note_disabled(acfg, text)
+    return code
 
 
 def claude_followup(acfg, display_id, wp, run_dir, fe_dir, be_dir, gemini_verdict, items):
@@ -1925,6 +1948,7 @@ def write_summary_report(acfg, display_id, run_name, wp, verdict, commits, run_d
 
 def clean(acfg, run_name):
     root = os.path.expanduser(acfg["root"])
+    acfg = ticket_acfg(acfg, run_name)
     run_dir = os.path.join(root, run_name)
     for r in R.repos(acfg):
         repo, path = r["path"], os.path.join(run_dir, r["key"])
@@ -2163,6 +2187,9 @@ def profile_block(root, acfg, prof):
     """Lý do không dùng được gói (chuỗi rỗng = dùng được)."""
     if not prof["logged_in"]:
         return "%s chưa %s" % (prof["name"], "có token" if prof.get("kind") == "token" else "đăng nhập")
+    why = disabled_block(root, prof)
+    if why:
+        return why
     info, _ = profile_usage(root, acfg, prof["name"])
     if not info:
         return ""
@@ -2276,6 +2303,125 @@ def choose_profile(root, acfg, prefer=None, exclude=()):
     return None, "; ".join(reasons) or "không có gói nào"
 
 
+# ---- Gói bị vô hiệu (tổ chức tắt quyền dùng Claude Code bằng gói, token hết hạn / bị thu hồi…) -----------------------
+# Phát hiện từ kết quả lỗi của Claude → đánh dấu gói ở <root>/.profile-disabled.json → choose_profile bỏ qua, tự dùng gói
+# khác. Bỏ đánh dấu khi: đăng nhập / đặt token lại (file đăng nhập mới hơn lúc đánh dấu), kiểm tra hạn mức (--probe) chạy
+# được, hoặc sau PROFILE_DISABLED_RECHECK_HOURS giờ (mặc định 6) — lượt sau thử lại, còn lỗi thì đánh dấu lại.
+DISABLED_RX = re.compile(
+    r"disabled Claude subscription access|organization has been disabled|organization (?:is|was) disabled"
+    r"|account (?:has been |is |was )?(?:disabled|suspended|banned)|subscription (?:access )?(?:has been |is )?disabled"
+    r"|OAuth token (?:has )?(?:expired|been revoked)|token (?:has been )?revoked|Invalid API key|invalid x-api-key"
+    r"|authentication_error|Please run /login|Credit balance is too low", re.I)
+
+
+def disabled_reason(text):
+    """Lý do gói không dùng được trong kết quả lỗi của Claude (stream-json / json / stderr); "" = không phải lỗi gói."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        msg = line
+        if line.startswith("{"):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if not (e.get("type") == "result" and e.get("is_error")) and e.get("type") != "error":
+                continue
+            msg = str(e.get("result") or e.get("error") or e.get("message") or "")
+        elif len(line) > 600:
+            continue
+        m = DISABLED_RX.search(msg)
+        if m:
+            return re.sub(r"\s+", " ", msg).strip()[:200]
+    return ""
+
+
+def _disabled_path(root):
+    return os.path.join(root, ".profile-disabled.json")
+
+
+def disabled_profiles(root):
+    try:
+        with open(_disabled_path(root), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_disabled(root, data):
+    path = _disabled_path(root)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(path + ".tmp", path)
+
+
+def mark_disabled(root, name, reason):
+    data = disabled_profiles(root)
+    first = name not in data
+    data[name] = {"reason": reason, "at": time.time()}
+    _save_disabled(root, data)
+    if first:
+        log("gói %s bị vô hiệu: %s — tự dùng gói khác" % (name, reason))
+        notify("[GÓI CLAUDE BỊ VÔ HIỆU] %s" % name, "%s — tự chuyển sang gói khác" % reason)
+
+
+def clear_disabled(root, name):
+    data = disabled_profiles(root)
+    if data.pop(name, None) is not None:
+        _save_disabled(root, data)
+
+
+def disabled_block(root, prof):
+    """Lý do gói đang bị đánh dấu vô hiệu ("" = không)."""
+    entry = disabled_profiles(root).get(prof["name"])
+    if not entry:
+        return ""
+    cred = prof.get("token_file") or os.path.join(prof["config_dir"], ".credentials.json")
+    try:
+        relogin = os.path.getmtime(cred) > entry["at"]
+    except OSError:
+        relogin = False
+    recheck = float(envconf.get("PROFILE_DISABLED_RECHECK_HOURS", "6") or 6) * 3600
+    if relogin or time.time() - entry["at"] > recheck:
+        clear_disabled(root, prof["name"])
+        return ""
+    return "%s bị vô hiệu từ %s: %s" % (prof["name"], datetime.fromtimestamp(entry["at"]).strftime("%d/%m %H:%M"),
+                                       entry.get("reason") or "")
+
+
+def note_disabled(acfg, text):
+    """Kết quả Claude báo gói bị vô hiệu → đánh dấu gói đang dùng. Trả lý do ("" = không)."""
+    reason = disabled_reason(text)
+    if reason and acfg.get("_profile"):
+        mark_disabled(os.path.expanduser(acfg["root"]), acfg["_profile"], reason)
+    return reason
+
+
+def claude_oneshot(acfg, cmd, out_path=None, err_path=None, prefer=None, **kw):
+    """Một lệnh Claude ngắn (soạn task, lọc tin, phân tích repo…): chọn gói, chạy; gói bị vô hiệu thì đánh dấu và chạy
+    lại bằng gói khác. out_path / err_path: ghi stdout / stderr ra file (không thì trả qua res.stdout). Trả (res, gói)."""
+    root = os.path.expanduser(acfg["root"])
+    tried = []
+    while True:
+        prof, why = choose_profile(root, acfg, prefer, exclude=tried)
+        if prof is None:
+            raise RuntimeError("không có gói Claude dùng được (%s)" % why)
+        use_profile(acfg, prof)
+        if out_path:
+            with open(out_path, "w", encoding="utf-8") as so, open(err_path or os.devnull, "w", encoding="utf-8") as se:
+                res = subprocess.run(cmd, stdout=so, stderr=se, stdin=subprocess.DEVNULL, env=build_env(acfg), **kw)
+            text = "".join(open(x, encoding="utf-8", errors="replace").read()[-20000:]
+                           for x in (out_path, err_path) if x and os.path.exists(x))
+        else:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                 universal_newlines=True, env=build_env(acfg), **kw)
+            text = (res.stdout or "")[-20000:] + "\n" + (res.stderr or "")[-5000:]
+        if not note_disabled(acfg, text):
+            return res, prof
+        tried.append(prof["name"])
+
+
 def hit_limit(path):
     """Phiên Claude bị dừng vì hết hạn mức gói (rate_limit_event rejected / kết quả lỗi nói về limit)?"""
     for e in read_events(path):
@@ -2293,11 +2439,19 @@ def probe_profile(acfg, prof):
     os.makedirs(os.path.join(root, ".usage"), exist_ok=True)
     sub = dict(acfg)
     use_profile(sub, prof)
-    with open(os.path.join(root, ".usage", prof["name"] + ".jsonl"), "w", encoding="utf-8") as out:
-        return subprocess.run([acfg["claude"], "-p", "Trả lời đúng một chữ: ok", "--output-format", "stream-json",
+    path = os.path.join(root, ".usage", prof["name"] + ".jsonl")
+    with open(path, "w", encoding="utf-8") as out:
+        code = subprocess.run([acfg["claude"], "-p", "Trả lời đúng một chữ: ok", "--output-format", "stream-json",
                                "--verbose", "--tools", ""],
-                              cwd=root, stdout=out, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                              cwd=root, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                               env=build_env(sub), timeout=180).returncode
+    with open(path, encoding="utf-8", errors="replace") as f:
+        reason = disabled_reason(f.read()[-20000:])
+    if reason:
+        mark_disabled(root, prof["name"], reason)
+    elif code == 0:
+        clear_disabled(root, prof["name"])  # gói dùng lại được
+    return code
 
 
 def usage_line(info):
@@ -2345,7 +2499,7 @@ def show_status(root, acfg, last=8):
         print("           %d thao tác — gần nhất:" % tools)
         for line in actions[-last:]:
             print("             · " + line)
-        for r, path in R.trees(acfg, s["run_dir"]):
+        for r, path in R.trees(ticket_acfg(acfg, s["display_id"]), s["run_dir"]):
             sub = r["key"]
             if os.path.isdir(path):
                 res = subprocess.run(["git", "diff", "--shortstat", "HEAD"], cwd=path, stdout=subprocess.PIPE,
@@ -2399,6 +2553,7 @@ def review_ticket(api, cfg, acfg, ref, profile=None, gemini_from=None):
     root = os.path.expanduser(acfg["root"])
     wp = api.get("/api/v3/work_packages/%s" % ref)
     wp_id, display_id = wp["id"], wp.get("displayId") or "WP-%s" % wp["id"]
+    cfg, acfg = for_ticket(cfg, acfg, display_id, wp)
     # QA trên server đang chạy (deploy_qa) thì ưu tiên nó: chờ xong mới test lại ticket cũ.
     qa_flag = os.path.join(root, ".qa-active")
     if os.path.exists(qa_flag):
@@ -2468,6 +2623,7 @@ def ship_run(cfg, acfg, run_name, profile=None):
     if not m or not os.path.isdir(run_dir):
         sys.exit("không có lượt chạy %s" % run_name)
     display_id = m.group(1)
+    cfg, acfg = for_ticket(cfg, acfg, display_id)
     report_path = os.path.join(run_dir, "report.md")
     report_text = open(report_path, encoding="utf-8").read() if os.path.exists(report_path) else ""
     kind = next((k for k in ("ĐÃ SỬA", "KHÔNG SỬA ĐƯỢC") if report_text.lstrip().startswith("KẾT QUẢ: " + k)), None)
@@ -2708,6 +2864,7 @@ def assist_run(cfg, acfg, run_name, note="", profile=None):
     if not m or not os.path.isfile(os.path.join(run_dir, "prompt.md")):
         sys.exit("không có lượt chạy %s" % run_name)
     display_id = m.group(1)
+    cfg, acfg = for_ticket(cfg, acfg, display_id)
     missing = [(r, d) for r, d in R.trees(acfg, run_dir) if not os.path.isdir(d)]
     if missing:
         # Worktree đã bị dọn (cleanup sau khi giao QA): tạo lại từ code mới nhất của nhánh dev, nhánh auto mới.
@@ -2863,8 +3020,10 @@ def process_pending(api, cfg, acfg, force=None):
         fcntl.flock(tick_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return
+    base_cfg, base_acfg = cfg, acfg
     for item in pending:
         display_id = item["display_id"]
+        cfg, acfg = for_ticket(base_cfg, base_acfg, display_id)
         st = next((s for s in load_statuses(root) if s["display_id"] == display_id), {})
         # Ticket đã có lượt sửa mới hơn (reopen, chạy lại) thì nhận xét Gemini cũ không còn đúng.
         if st.get("started_at", "") > item["queued_at"] and st.get("event") in ("NEW", "REOPENED", "MANUAL", "QA_FAIL") \
@@ -2970,6 +3129,7 @@ def recover_plan(api, root, acfg, s):
     Việc cần làm cho một lượt bị ngắt: (tham số op_autofix, mô tả) hoặc (None, kết luận ghi vào trạng thái).
     """
     display_id, state, event = s["display_id"], s.get("state"), s.get("event") or "MANUAL"
+    acfg = ticket_acfg(acfg, display_id)
     run_dir = s.get("run_dir") or ""
     run_name = s.get("run_name") or os.path.basename(run_dir)
     fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
@@ -3111,6 +3271,7 @@ def main():
     cfg = op_watch.load_config(argparse.Namespace(config=args.config, interval=None, on_change=None, no_notify=False))
     acfg = dict(AUTOFIX_DEFAULTS)
     acfg.update(cfg.get("autofix") or {})
+    _CFG.update(cfg)
     root = os.path.expanduser(acfg["root"])
     if args.ignore_limits:
         acfg["_ignore_limits"] = True
@@ -3181,10 +3342,19 @@ def main():
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
     wp = api.get("/api/v3/work_packages/%s" % wp_id)
     display_id = wp.get("displayId") or "WP-%s" % wp_id
+    cfg, acfg = for_ticket(cfg, acfg, display_id, wp)
+    proj = P.current(acfg)
     os.makedirs(root, exist_ok=True)
+    if event not in ("MANUAL", "QA_FAIL") and not proj["enabled"]:
+        log("%s (%s): bỏ qua — dự án %s đang tắt tự sửa" % (display_id, event, proj["name"]))
+        return
+    if not R.repos(acfg):
+        log("%s (%s): bỏ qua — dự án %s chưa khai báo repo (Cấu hình → Dự án)" % (display_id, event, proj["name"]))
+        return
     num = re.search(r"(\d+)$", display_id)
     if event != "MANUAL" and acfg.get("min_ticket_number") and num and int(num.group(1)) < acfg["min_ticket_number"]:
-        log("%s (%s): bỏ qua — chỉ tự sửa ticket từ SOAR-%d trở lên" % (display_id, event, acfg["min_ticket_number"]))
+        log("%s (%s): bỏ qua — chỉ tự sửa ticket từ %s-%d trở lên" % (
+            display_id, event, proj["prefix"], acfg["min_ticket_number"]))
         return
 
     # Ticket này đang được xử lý (op-watch có thể báo lại khi có comment / reopen) thì bỏ qua.
@@ -3269,10 +3439,12 @@ def main():
                 for n in notes)
 
             prompt = PROMPT.format(
-                project_name=envconf.PROJECT_NAME, assignee=assignee_name(api),
+                project_name=P.name(acfg), assignee=assignee_name(api),
                 bash_rules=BASH_RULES.format(run_dir=run_dir), decider_rules=DECIDER_RULES,
                 display_id=display_id, wp_id=wp_id, status=wp["_links"]["status"].get("title"), event=event,
                 subject=wp.get("subject", ""), run_dir=run_dir, merge_note=merge_note, **R.prompt_kwargs(acfg, run_dir, branch))
+            if proj.get("context"):
+                prompt += "\n\n## Bối cảnh dự án %s (do dev khai báo)\n%s\n" % (proj["name"], proj["context"])
             if args.qa_report and os.path.exists(args.qa_report):
                 qa_copy = os.path.join(run_dir, "qa-server.md")
                 shutil.copy(args.qa_report, qa_copy)
@@ -3321,13 +3493,21 @@ def main():
             code = run_claude(acfg, prompt + (INTERRUPTED_NOTE if resume_dir else ""), run_dir, fe_dir, be_dir)
         # Hết hạn mức giữa chừng: chạy tiếp trên cùng worktree bằng gói khác (mỗi gói tối đa một lần).
         tried = [acfg["_profile"]]
-        while not os.path.exists(report) and hit_limit(os.path.join(run_dir, "claude.jsonl")):
+
+        def blocked_now():  # gói vừa dùng: hết hạn mức / bị vô hiệu
+            if hit_limit(os.path.join(run_dir, "claude.jsonl")):
+                return "hết hạn mức giữa chừng"
+            if acfg["_profile"] in disabled_profiles(root):
+                return "bị vô hiệu (%s)" % disabled_profiles(root)[acfg["_profile"]].get("reason", "")[:120]
+            return ""
+        while not os.path.exists(report) and blocked_now():
+            what = blocked_now()
             nxt, why = choose_profile(root, acfg, exclude=tried)
             if nxt is None:
-                inbox(cfg, "**AUTOFIX HẾT HẠN MỨC** %s — %s dừng giữa chừng, không còn gói khác (%s)" % (
-                    display_id, acfg["_profile"], why))
+                inbox(cfg, "**AUTOFIX %s** %s — %s %s, không còn gói khác (%s)" % (
+                    "HẾT HẠN MỨC" if what.startswith("hết") else "GÓI BỊ VÔ HIỆU", display_id, acfg["_profile"], what, why))
                 break
-            msg = "%s hết hạn mức giữa chừng → chạy tiếp bằng %s" % (acfg["_profile"], nxt["name"])
+            msg = "%s %s → chạy tiếp bằng %s" % (acfg["_profile"], what, nxt["name"])
             log("%s: %s" % (display_id, msg))
             inbox(cfg, "**AUTOFIX ĐỔI GÓI** %s — %s" % (display_id, msg))
             notify("[AUTOFIX ĐỔI GÓI] %s" % display_id, msg)

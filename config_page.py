@@ -4,7 +4,8 @@ config_page: trang Cấu hình trên trang theo dõi — sửa .env + danh sách
 - Biến cấu hình lấy TỰ ĐỘNG từ .env.example: nhóm theo dòng tiêu đề (# ===== X ===== / # ---- X ----), ghi chú ngay
   trên mỗi KEY= là hướng dẫn. Thêm biến mới vào .env.example là trang tự hiện — không phải sửa giao diện.
 - Ghi vào .env giữ nguyên các dòng / ghi chú khác, sao lưu .env trước mỗi lần lưu. Biến bí mật không trả về trang.
-- Danh sách repo (repos.py) ghi vào config.json → autofix.repos.
+- Dự án (projects.py) ghi vào config.json → projects; mỗi dự án có danh sách repo riêng (repos.py). Chưa khai báo dự án
+  thì repo ghi vào autofix.repos như cũ; lưu dự án lần đầu thì chuyển autofix.repos vào dự án đầu tiên.
 - Áp dụng: khởi động lại dịch vụ đọc .env lúc chạy; đổi lịch → cài lại timer.
 """
 import json
@@ -18,6 +19,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envconf  # noqa: E402
 import repos as R  # noqa: E402
+import projects as P  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE = os.path.join(HERE, ".env.example")
@@ -185,8 +187,9 @@ REPO_FIELDS = ("key", "label", "name", "preset", "path", "branch", "upstream", "
 def repos_get(acfg):
     """Danh sách repo như đang khai báo (config.json) — chưa khai báo thì 2 repo FE / BE từ khoá cũ, dạng preset."""
     raw = acfg.get("repos")
-    if raw:
-        items = [{k: v for k, v in x.items() if k in REPO_FIELDS} for x in raw]
+    proj = acfg.get("_project")
+    if raw or (proj and not proj.get("_legacy")):
+        items = [{k: v for k, v in x.items() if k in REPO_FIELDS} for x in raw or []]
         declared = True
     else:
         items = []
@@ -281,11 +284,18 @@ def apply(changed_keys=()):
     return "; ".join(notes)
 
 
-def http_get(path, acfg):
+def http_get(path, acfg, q=None):
+    q = q or {}
     if path == "/api/config":
         return schema()
     if path == "/api/config/repos":
-        return repos_get(acfg)
+        cfg = _cfg()
+        proj = (P.get(cfg, q["project"]) if q.get("project") else None) or P.default(cfg)
+        return dict(repos_get(P.scope_acfg(acfg, proj) if cfg.get("projects") else acfg), project=proj["key"])
+    if path == "/api/config/projects":
+        return projects_get()
+    if path == "/api/config/op_projects":
+        return {"items": op_projects()}
     return None
 
 
@@ -295,7 +305,7 @@ def http_get_q(path, q, acfg):
         if q.get("repos") == "1":
             out["git_repos"] = [x.replace(HOME, "~", 1) for x in find_git_repos()]
         return out
-    return http_get(path, acfg)
+    return http_get(path, acfg, q)
 
 
 def action(body, save_autofix):
@@ -306,7 +316,11 @@ def action(body, save_autofix):
                 if done else "Không có gì thay đổi", "changed": done}
     if kind == "config_repos":
         clean, warn = repos_check(body.get("repos"))
-        save_autofix(repos=clean)
+        if body.get("project") and (_cfg().get("projects") or len(P.projects(_cfg())) > 1
+                                    or body["project"] != P.default(_cfg())["key"]):
+            save_project_repos(body["project"], clean)
+        else:
+            save_autofix(repos=clean)
         return {"message": "Đã lưu %d repo%s" % (len(clean), (" — lưu ý: " + "; ".join(warn)) if warn else ""),
                 "warnings": warn}
     if kind == "config_repos_check":
@@ -318,6 +332,12 @@ def action(body, save_autofix):
     if kind == "config_deploy_suggest":
         r = suggest_deploy(body.get("repo") or {}, body.get("desc"))
         return dict(r, message="AI đã viết %d lệnh deploy" % len(r["deploy_cmd"]))
+    if kind == "config_projects":
+        items, warn = projects_save(body.get("projects") or [])
+        return {"message": "Đã lưu %d dự án%s — bấm Áp dụng để các dịch vụ đọc lại" % (
+            len(items), (" — lưu ý: " + "; ".join(warn)) if warn else ""), "warnings": warn}
+    if kind == "config_project_detect":
+        return dict(detect_project(body.get("op_project")), message="Đã đọc dự án trên OpenProject")
     if kind == "config_apply":
         return apply(body.get("changed") or [])
     raise ValueError("thao tác không hợp lệ")
@@ -500,17 +520,12 @@ def _claude_json(prompt, p):
     import task_create
     _, acfg, _ = task_create.load()
     acfg = dict(af.AUTOFIX_DEFAULTS, **acfg)
-    prof, why = af.choose_profile(os.path.expanduser(acfg["root"]), acfg)
-    if prof is None:
-        raise RuntimeError("không có gói Claude dùng được (%s)" % why)
-    af.use_profile(acfg, prof)
     scope = "//" + p.lstrip("/") + "/**"
     cmd = [acfg["claude"], "-p", prompt, "--permission-mode", "dontAsk", "--max-budget-usd", "0.8",
            "--output-format", "json", "--add-dir", p, "--allowedTools", "Read(%s)" % scope, "Glob", "Grep",
            "--disallowedTools", "Bash", "Write", "Edit", "WebFetch", "WebSearch",
            "--model", envconf.get("TG_AI_MODEL") or "sonnet"]
-    res = subprocess.run(cmd, cwd=p, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                         universal_newlines=True, env=af.build_env(acfg), timeout=300)
+    res, _ = af.claude_oneshot(acfg, cmd, cwd=p, timeout=300)  # gói bị vô hiệu → tự dùng gói khác
     text = (json.loads(res.stdout).get("result") or "") if res.stdout.strip().startswith("{") else ""
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
@@ -599,3 +614,153 @@ def analyze_repo(path, existing=()):
     if repo["key"] in used:
         repo["key"] = guess["key"]
     return {"repo": repo, "source": "ai", "notes": str(out.get("notes") or "")[:600], "git": g}
+
+
+# ---------------------------------------------------------------- dự án (projects.py)
+
+def _cfg_path():
+    return envconf.CONFIG_PATH
+
+
+def _cfg():
+    """config.json như trên đĩa + biến môi trường (để dựng dự án cũ khi chưa khai báo)."""
+    import argparse
+    import op_watch
+    try:
+        return op_watch.load_config(argparse.Namespace(config=None, interval=None, on_change=None, no_notify=True))
+    except SystemExit:
+        return envconf._read_json(_cfg_path())
+
+
+def _write_cfg(data):
+    path = _cfg_path()
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".bak-" + time.strftime("%m%d-%H%M"))
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.chmod(path + ".tmp", 0o600)
+    os.replace(path + ".tmp", path)
+
+
+def _api():
+    import op_watch
+    cfg = _cfg()
+    return op_watch.OpenProject(cfg["url"], cfg["api_key"])
+
+
+def projects_get():
+    cfg = _cfg()
+    items = P.projects(cfg)
+    out = []
+    for p in items:
+        q = P.public(p)
+        try:
+            q["repo_labels"] = [r["label"] for r in R.repos(P.scope_acfg(cfg.get("autofix") or {}, p))] \
+                if (p["repos"] or p["_legacy"]) else []
+        except ValueError:
+            q["repo_labels"] = []
+        out.append(q)
+    return {"projects": out, "declared": bool(cfg.get("projects")), "deploy_fields": list(P.DEPLOY_FIELDS),
+            "secret_deploy": list(P.SECRET_DEPLOY), "statuses": cfg.get("statuses") or {}}
+
+
+def op_projects():
+    """Dự án trên OpenProject mà API key đọc được (để chọn khi thêm dự án)."""
+    data = _api().get("/api/v3/projects", {"pageSize": 500})
+    return sorted(({"id": str(e["id"]), "identifier": e.get("identifier") or "", "name": e.get("name") or ""}
+                   for e in data.get("_embedded", {}).get("elements", [])), key=lambda x: x["name"].lower())
+
+
+def detect_project(op_project):
+    """Tên + tiền tố mã ticket của một dự án OP (tiền tố học từ một work package của dự án)."""
+    op_project = str(op_project or "").strip()
+    if not op_project:
+        raise ValueError("chọn dự án OpenProject")
+    api = _api()
+    pj = api.get("/api/v3/projects/%s" % op_project)
+    prefix = ""
+    try:
+        d = api.get("/api/v3/projects/%s/work_packages" % pj["id"], {"pageSize": 1})
+        el = (d.get("_embedded") or {}).get("elements") or []
+        m = re.match(r"([A-Za-z][A-Za-z0-9_]*)-\d+$", (el[0].get("displayId") or "") if el else "")
+        prefix = m.group(1).upper() if m else ""
+    except Exception:  # noqa: BLE001 — chưa có work package: để người dùng tự nhập
+        pass
+    ident = pj.get("identifier") or ""
+    return {"op_project": str(pj["id"]), "name": pj.get("name") or ident, "identifier": ident,
+            "prefix": prefix or re.sub(r"[^A-Z0-9_]", "", ident.upper())[:20],
+            "key": re.sub(r"[^a-z0-9_-]", "-", (prefix or ident).lower()).strip("-")[:30] or "p%s" % pj["id"],
+            "prefix_from_wp": bool(prefix)}
+
+
+def _materialize(data, cfg):
+    """config.json chưa có "projects": dựng dự án đầu từ cấu hình cũ (repo trong autofix.repos chuyển vào dự án)."""
+    if data.get("projects"):
+        return data["projects"]
+    p = P.legacy(cfg)
+    p.pop("_legacy", None)
+    p["repos"] = (data.get("autofix") or {}).get("repos") or []
+    if not p["repos"]:  # repo FE / BE dựng từ khoá cũ (fe_repo …) → ghi thành preset để dự án tự đủ
+        p["repos"] = [{"preset": r["key"], "key": r["key"], "path": r["path"], "branch": r["branch"],
+                       "upstream": r["upstream"], "subdir": r.get("subdir") or "", "deploy": r["deploy"], "merge": True}
+                      for r in R.legacy(cfg.get("autofix") or {})]
+    return [p]
+
+
+def projects_save(items):
+    """Lưu danh sách dự án (không gồm repo — repo lưu riêng theo dự án). Trả (danh sách, cảnh báo)."""
+    data = envconf._read_json(_cfg_path())
+    cfg = _cfg()
+    old = {p["key"]: p for p in _materialize(data, cfg)}
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        y = {k: x.get(k) for k in P.FIELDS if k in x and k != "repos"}
+        prev = old.get(str(x.get("_orig") or x.get("key") or "").strip().lower()) or {}
+        y["repos"] = prev.get("repos") or []
+        dep = {k: v for k, v in (x.get("deploy") or {}).items() if k in P.DEPLOY_FIELDS}
+        for k in P.SECRET_DEPLOY:  # "••••••" = giữ mật khẩu cũ
+            if str(dep.get(k) or "").startswith("•"):
+                dep[k] = (prev.get("deploy") or {}).get(k, "")
+        for k in ("qa_user_id",):
+            if dep.get(k) not in (None, ""):
+                try:
+                    dep[k] = int(dep[k])
+                except (TypeError, ValueError):
+                    raise ValueError("%s: qa_user_id phải là số" % y.get("key"))
+        for k in ("qa_review_status_ids", "qa_ticket_accounts"):
+            if isinstance(dep.get(k), str):
+                dep[k] = [s_.strip() for s_ in dep[k].split(",") if s_.strip()]
+        y["deploy"] = {k: v for k, v in dep.items() if v not in (None, "", [])}
+        if "statuses" in y and isinstance(y["statuses"], str):
+            y["statuses"] = envconf._status_map(y["statuses"])
+        if prev.get("deploy_inherit") and "deploy_inherit" not in x:
+            y["deploy_inherit"] = True
+        out.append(y)
+    norm = P.validate(out)
+    warn = []
+    for p in norm:
+        if not p["repos"]:
+            warn.append("%s: chưa có repo — autofix bỏ qua ticket của dự án này tới khi thêm repo" % p["name"])
+        if p["qa"] and not (p["deploy_inherit"] or (p["deploy"].get("fe_url") and p["deploy"].get("api_url"))):
+            warn.append("%s: bật QA tự động nhưng chưa có fe_url / api_url" % p["name"])
+    data["projects"] = out
+    if (data.get("autofix") or {}).get("repos"):
+        data["autofix"]["repos_before_projects"] = data["autofix"].pop("repos")  # đã chuyển vào dự án
+    _write_cfg(data)
+    return out, warn
+
+
+def save_project_repos(key, repos):
+    data = envconf._read_json(_cfg_path())
+    items = _materialize(data, _cfg())
+    proj = next((p for p in items if p.get("key") == key), None)
+    if not proj:
+        raise ValueError("không có dự án %s" % key)
+    proj["repos"] = repos
+    P.validate(items)  # mã repo không trùng giữa các dự án
+    data["projects"] = items
+    if (data.get("autofix") or {}).get("repos"):
+        data["autofix"]["repos_before_projects"] = data["autofix"].pop("repos")
+    _write_cfg(data)

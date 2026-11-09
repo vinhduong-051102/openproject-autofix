@@ -212,12 +212,21 @@ def main():
     parser = argparse.ArgumentParser(description="Merge nhánh cá nhân vào nhánh dev chung qua PR Gitea.")
     parser.add_argument("--dry-run", action="store_true", help="merge + build thử, không push / không tạo PR")
     parser.add_argument("--only", metavar="REPO", help="chỉ một repo (nhãn hoặc key, vd FE / be)")
+    parser.add_argument("--project", help="chỉ repo của dự án này (mã hoặc tiền tố)")
     parser.add_argument("--no-deploy", action="store_true", help="không deploy + QA lên server 86 sau khi merge")
     args = parser.parse_args()
 
     cfg = op_watch.load_config(argparse.Namespace(config=None, interval=None, on_change=None, no_notify=False))
     acfg = dict(af.AUTOFIX_DEFAULTS)
     acfg.update(cfg.get("autofix") or {})
+    import projects as P
+    if args.project:  # chỉ một dự án
+        proj = P.get(cfg, args.project)
+        if not proj:
+            sys.exit("không có dự án %s" % args.project)
+        cfg, acfg = P.scope(cfg, acfg, proj)
+    else:  # repo của mọi dự án
+        acfg = P.all_repos(acfg, cfg)
     os.makedirs(os.path.expanduser(acfg["root"]), exist_ok=True)
 
     why = skipped_today(os.path.expanduser(acfg["root"]))
@@ -260,7 +269,7 @@ def main():
     if not args.dry_run and not args.no_deploy:
         import deploy_qa
         try:
-            deploy_qa.run_all()
+            deploy_qa.run_all(project=args.project)
         except Exception as ex:  # noqa: BLE001
             log("deploy + QA lỗi: %s" % ex)
             af.inbox(cfg, "**DEPLOY 86 LỖI** %s" % str(ex).splitlines()[0][:300])

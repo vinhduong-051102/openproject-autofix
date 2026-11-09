@@ -208,7 +208,25 @@ DASHBOARD_PORT = int(get("DASHBOARD_PORT", "8765"))
 # ---- Dự án (đổi để dùng tool cho dự án khác) ----------------------------------------------------------------------
 # Tiền tố mã ticket trên OpenProject (SOAR → SOAR-123), cũng là tag commit [SOAR-123] và tên thư mục lượt chạy.
 TICKET_PREFIX = (get("OP_TICKET_PREFIX", "SOAR") or "SOAR").strip()
-TICKET_RX = r"%s-\d+" % re.escape(TICKET_PREFIX)  # regex một mã ticket (không có nhóm)
+
+
+def _project_prefixes():
+    """Tiền tố mã ticket của các dự án khai báo trong config.json → "projects" (projects.py)."""
+    try:
+        import json
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            items = json.load(f).get("projects") or []
+        return [str(p.get("prefix") or "").strip().upper() for p in items if isinstance(p, dict) and p.get("prefix")]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+_PREFIXES = _project_prefixes()
+if _PREFIXES and TICKET_PREFIX not in _PREFIXES and not get("OP_TICKET_PREFIX"):
+    TICKET_PREFIX = _PREFIXES[0]  # đã khai báo dự án: dự án đầu là mặc định
+TICKET_PREFIXES = list(dict.fromkeys([TICKET_PREFIX] + _PREFIXES))
+# regex một mã ticket của BẤT KỲ dự án nào (không có nhóm bắt)
+TICKET_RX = r"(?:%s)-\d+" % "|".join(re.escape(p) for p in sorted(TICKET_PREFIXES, key=len, reverse=True))
 # Tên dự án dùng trong prompt; tên người được giao (trống = tên tài khoản API trên OpenProject).
 PROJECT_NAME = get("OP_PROJECT_NAME", TICKET_PREFIX)
 ASSIGNEE_NAME = get("OP_ASSIGNEE_NAME", "")
@@ -230,10 +248,19 @@ def _read_json(p):
         return {}
 
 
-def deploy_config():
-    """deploy.json + biến DEPLOY_* / QA_* (chưa gộp mặc định của deploy_qa)."""
-    data = _read_json(DEPLOY_CONFIG)
-    return overlay(data, DEPLOY_ENV, managed=DEPLOY_MANAGED)
+def deploy_config(project=None):
+    """deploy.json + biến DEPLOY_* / QA_* (chưa gộp mặc định của deploy_qa), ghi đè bởi server test của dự án
+    `project` (mặc định biến OP_PROJECT_KEY — op_autofix / deploy_qa đặt cho tiến trình con như soar_api, ui_check)."""
+    data = overlay(_read_json(DEPLOY_CONFIG), DEPLOY_ENV, managed=DEPLOY_MANAGED)
+    key = project or os.environ.get("OP_PROJECT_KEY")
+    if key:
+        cfg = _read_json(CONFIG_PATH)
+        if cfg.get("projects"):
+            import projects as P
+            proj = P.get(cfg, key)
+            if proj:
+                data = P.deploy_cfg(proj, data)
+    return data
 
 
 def gitea_config():

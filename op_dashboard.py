@@ -48,7 +48,18 @@ def load():
                                                   no_notify=False))
     acfg = dict(af.AUTOFIX_DEFAULTS)
     acfg.update(cfg.get("autofix") or {})
+    af._CFG.clear()
+    af._CFG.update(cfg)  # af.ticket_acfg / af.clean: repo theo dự án của ticket
     return cfg, acfg, os.path.expanduser(acfg["root"])
+
+
+def projects_brief(cfg):
+    """[{key, name, prefix, op_project, enabled, qa}] cho trang (lọc / nhãn dự án theo tiền tố mã ticket)."""
+    import projects as P
+    try:
+        return [{k: p[k] for k in ("key", "name", "prefix", "op_project", "enabled", "qa")} for p in P.projects(cfg)]
+    except ValueError:
+        return []
 
 
 def inbox_wp_ids(cfg):
@@ -127,6 +138,7 @@ def state():
         **jobs(),
         "gemini": gemini_usage(), "parallel": parallel_settings(acfg), "review_queue": review_queue(),
         "running_now": sum(1 for r in runs if r["state"] in ("preparing", "running", "shipping")),
+        "projects": projects_brief(cfg),
     }
 
 
@@ -237,7 +249,8 @@ def qa_runs(root, cfg, merge_running, n=15):
                 m = re.search(r"\*\*QA SERVER\*\* (%s) — (.*?) · (\S+/qa\.md)" % envconf.TICKET_RX, ln)
                 if m:
                     final[os.path.dirname(m.group(3))] = m.group(2)
-    dirs = sorted(glob.glob(os.path.join(root, "%s-*-qa-*" % envconf.TICKET_PREFIX)), key=os.path.getmtime, reverse=True)[:n]
+    dirs = sorted((d for pre in envconf.TICKET_PREFIXES for d in glob.glob(os.path.join(root, "%s-*-qa-*" % pre))),
+                  key=os.path.getmtime, reverse=True)[:n]
     out = []
     alive = merge_running or qa_procs_alive()
     for i, d in enumerate(dirs):
@@ -499,7 +512,7 @@ def run_events(display_id, start):
     if s.get("state") in ACTIVE_STATES:
         import repos as R
         _, acfg_, _ = load()
-        for r, path in R.trees(acfg_, s["run_dir"]):
+        for r, path in R.trees(af.ticket_acfg(acfg_, s.get("display_id") or ""), s["run_dir"]):
             if os.path.isdir(path):
                 res = subprocess.run(["git", "diff", "--shortstat", "HEAD"], cwd=path, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, universal_newlines=True)
@@ -973,7 +986,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"text": job_log(q.get("key", ""))})
             if url.path == "/api/op":
                 return self.send(200, op_work_packages(q.get("scope", "mine"), q.get("status", "open"), q.get("q", ""),
-                                                       q.get("page", "1") or 1, q.get("refresh") == "1"))
+                                                       q.get("page", "1") or 1, q.get("refresh") == "1",
+                                                       q.get("project", "")))
             if url.path == "/api/op/statuses":
                 try:
                     return self.send(200, op_allowed_statuses(q.get("id", "")))
@@ -1112,35 +1126,25 @@ def op_changed():
 _OP_LOCK = threading.Lock()
 
 
-_OP_PREFIX = {}
-
-
-def _op_prefix(api, cfg):
-    """Tiền tố mã hiển thị của project (SOAR trong SOAR-2598), học từ một work package bất kỳ, nhớ lại."""
-    key = cfg.get("project")
-    if key not in _OP_PREFIX:
-        try:
-            d = api.get("/api/v3/projects/%s/work_packages" % key, {"pageSize": 1})
-            el = (d.get("_embedded") or {}).get("elements") or []
-            m = re.match(r"([A-Za-z]+)-\d+$", (el[0].get("displayId") or "") if el else "")
-            _OP_PREFIX[key] = m.group(1) if m else ""
-        except Exception:  # noqa: BLE001
-            return ""
-    return _OP_PREFIX[key]
-
-
-def op_work_packages(scope="mine", status="open", q="", page=1, refresh=False):
+def op_work_packages(scope="mine", status="open", q="", page=1, refresh=False, project=""):
     """Work package OpenProject cho tab OpenProject (đọc qua API token trong config, cache 60s).
     scope: mine (giao cho tôi) | all (cả project); status: open | all; q: tìm theo tiêu đề / nội dung / SOAR-xxx."""
     scope = "all" if scope == "all" else "mine"
     status = "all" if status == "all" else "open"
     q, page = (q or "").strip()[:100], max(1, min(int(page or 1), 200))
-    key = (scope, status, q, page)
+    key = (scope, status, q, page, project or "")
     with _OP_LOCK:
         hit = _OP_CACHE.get(key)
         if hit and not refresh and time.time() - hit[0] < 60:
             return hit[1]
+    import projects as P
     cfg = load()[0]
+    items_p = P.projects(cfg)
+    if project == "all" and len(items_p) > 1:
+        chosen = items_p
+    else:
+        chosen = [(P.get(cfg, project) if project else None) or items_p[0]]
+    cfg = P.scope(cfg, None, chosen[0])[0]
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
     filters = []
     if scope == "mine":
@@ -1150,8 +1154,7 @@ def op_work_packages(scope="mine", status="open", q="", page=1, refresh=False):
     if q and re.fullmatch(r"#?\d{1,7}", q):
         # Gõ số (2598 / #2598): mã hiển thị <tiền tố>-2598 (vd SOAR-2598), không có thì id nội bộ 2598
         n = q.lstrip("#")
-        prefix = _op_prefix(api, cfg)
-        tries = (["%s-%s" % (prefix, n)] if prefix else []) + [n]
+        tries = ["%s-%s" % (p["prefix"], n) for p in chosen] + [n]
     elif q and re.fullmatch(r"[A-Za-z]+-\d+", q):
         tries = [q.upper()]
     else:
@@ -1171,9 +1174,16 @@ def op_work_packages(scope="mine", status="open", q="", page=1, refresh=False):
         filters.append({"search": {"operator": "**", "values": [q]}})
     size = 50
     try:
-        data = data if filters is None else api.get("/api/v3/projects/%s/work_packages" % cfg["project"], {
-            "filters": json.dumps(filters), "pageSize": size, "offset": page,
-            "sortBy": json.dumps([["updatedAt", "desc"]])})
+        if filters is None:
+            pass
+        elif len(chosen) > 1:  # tất cả dự án: một truy vấn chung lọc theo danh sách dự án
+            data = api.get("/api/v3/work_packages", {
+                "filters": json.dumps(filters + [{"project": {"operator": "=", "values": [p["op_project"] for p in chosen]}}]),
+                "pageSize": size, "offset": page, "sortBy": json.dumps([["updatedAt", "desc"]])})
+        else:
+            data = api.get("/api/v3/projects/%s/work_packages" % cfg["project"], {
+                "filters": json.dumps(filters), "pageSize": size, "offset": page,
+                "sortBy": json.dumps([["updatedAt", "desc"]])})
     except Exception as ex:  # noqa: BLE001
         return {"error": "Không gọi được OpenProject: %s" % str(ex)[:200], "items": [], "total": 0}
     base = cfg["url"].rstrip("/")
@@ -1184,6 +1194,7 @@ def op_work_packages(scope="mine", status="open", q="", page=1, refresh=False):
         items.append({"id": e.get("id"), "display_id": e.get("displayId") or "#%s" % e.get("id"),
                       "subject": e.get("subject") or "", "status": t("status"), "type": t("type"),
                       "priority": t("priority"), "assignee": t("assignee"), "updated": e.get("updatedAt") or "",
+                      "project": t("project"),
                       "url": "%s/work_packages/%s" % (base, e.get("id"))})
     out = {"items": items, "total": data.get("total", len(items)), "page": page, "page_size": size,
            "fetched": datetime.now().strftime("%H:%M:%S"), "op_url": base}

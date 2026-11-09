@@ -42,6 +42,25 @@ import op_autofix as af  # noqa: E402
 import op_watch  # noqa: E402
 
 import envconf  # noqa: E402
+import projects as P  # noqa: E402
+
+_PROJ = {}  # dự án đang deploy / QA (load ghi) — để ghi tên dự án vào thông báo khi có nhiều dự án
+
+
+def _label(text):
+    """"**DEPLOY 86** msg" → "**DEPLOY 86** [Dự án] msg" khi khai báo nhiều dự án (tag giữ nguyên cho trang theo dõi)."""
+    if not _PROJ.get("multi") or not _PROJ.get("name"):
+        return text
+    m = re.match(r"^(\*\*[^*]+\*\*|\[[^\]]+\]) ?", text)
+    return ("%s [%s] %s" % (m.group(1), _PROJ["name"], text[m.end():])) if m else "[%s] %s" % (_PROJ["name"], text)
+
+
+def inbox(cfg, text):
+    af.inbox(cfg, _label(text))
+
+
+def notify(title, body):
+    af.notify(_label(title), body)
 
 DEPLOY_CONFIG = envconf.DEPLOY_CONFIG
 SOAR_API = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soar_api.py")
@@ -640,14 +659,53 @@ def log(msg):
     print("[%s] [deploy-qa] %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg), flush=True)
 
 
-def load():
+def load_all():
     cfg = op_watch.load_config(argparse.Namespace(config=None, interval=None, on_change=None, no_notify=False))
+    return cfg, P.projects(cfg)
+
+
+def load(proj=None):
+    """(cfg, acfg, dcfg) theo dự án `proj` (mặc định dự án đầu): repo, server test, tài khoản QA của dự án đó."""
+    cfg, items = load_all()
+    if isinstance(proj, str):
+        proj = P.get(cfg, proj)
+    proj = proj or items[0]
     acfg = dict(af.AUTOFIX_DEFAULTS)
     acfg.update(cfg.get("autofix") or {})
+    cfg, acfg = P.scope(cfg, acfg, proj)
+    os.environ["OP_PROJECT_KEY"] = proj["key"]  # soar_api / ui_check (tiến trình con) dùng server của dự án
+    _PROJ.update(name=proj["name"], key=proj["key"], multi=len(items) > 1)
     deploy_repos(acfg)
     dcfg = dict(DEFAULTS)
-    dcfg.update(envconf.overlay(envconf.deploy_config(), ROLLOUT_ENV))
+    dcfg.update(envconf.overlay(envconf.deploy_config(proj["key"]), ROLLOUT_ENV))
     return cfg, acfg, dcfg
+
+
+def deploy_targets(only_tickets=None, project=None):
+    """Dự án tham gia deploy / QA: có repo deploy khác "none" hoặc bật QA. only_tickets → chỉ dự án của các ticket đó.
+    Trả [(dự án, [ticket của dự án] hoặc None)]."""
+    cfg, items = load_all()
+    if project:
+        items = [p for p in items if project in (p["key"], p["prefix"])]
+        if not items:
+            raise SystemExit("không có dự án %s" % project)
+    if only_tickets:
+        groups = {}
+        for t in only_tickets:
+            groups.setdefault(P.by_ticket(cfg, t)["key"], []).append(t)
+        return [(p, groups[p["key"]]) for p in items if p["key"] in groups]
+    import repos as R
+    out = []
+    for p in items:
+        rs = R.repos(P.scope_acfg(cfg.get("autofix") or {}, p)) if (p["repos"] or p["_legacy"]) else []
+        if p["qa"] or any(r["deploy"] != "none" for r in rs):
+            out.append((p, None))
+    return out
+
+
+def qa_enabled(acfg, dcfg):
+    """Dự án có QA tự động trên server test không (bật qa + có fe_url / api_url)."""
+    return bool(P.current(acfg) and P.current(acfg)["qa"] and dcfg.get("fe_url") and dcfg.get("api_url"))
 
 
 def deploy_repos(acfg):
@@ -1708,7 +1766,7 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
             for h in hashes:
                 f.write("# %s %s\n\n```diff\n%s\n```\n\n" % (label, h[:8], af.run(["git", "show", h], cwd=repo,
                                                                                    check=False)[:40000]))
-    af.notify("[QA SERVER] %s" % display_id, "Đang test trên server 86 (%s): %s" % (
+    notify("[QA SERVER] %s" % display_id, "Đang test trên server 86 (%s): %s" % (
         dcfg["qa_engine"], wp.get("subject", "")))
     if dcfg["qa_engine"] == "gemini":
         gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard)
@@ -1726,9 +1784,11 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
               ["--disallowedTools"] + af.DISALLOWED_TOOLS
         if acfg.get("model"):
             cmd += ["--model", acfg["model"]]
-        with open(os.path.join(qa_dir, "claude.jsonl"), "w", encoding="utf-8") as out:
-            subprocess.run(cmd, cwd=qa_dir, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                           env=af.build_env(acfg))
+        try:  # gói bị vô hiệu → tự chạy lại bằng gói khác
+            af.claude_oneshot(acfg, cmd, os.path.join(qa_dir, "claude.jsonl"), os.path.join(qa_dir, "claude.err"),
+                              prefer=acfg.get("_profile"), cwd=qa_dir)
+        except RuntimeError as ex:
+            log("%s: %s" % (display_id, ex))
     path = os.path.join(qa_dir, "qa.md")
     text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
     m = re.search(r"QA:\s*(KHÔNG RÕ YÊU CẦU|KHÔNG ĐẠT|ĐẠT|KHÔNG TỰ TEST ĐƯỢC)", text[:200])
@@ -1776,8 +1836,8 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
     if report_dir:
         os.makedirs(report_dir, exist_ok=True)
         shutil.copy(path, os.path.join(report_dir, os.path.basename(qa_dir) + ".md")) if text else None
-    af.inbox(cfg, "**QA SERVER** %s — %s · %s" % (display_id, verdict, path))
-    af.notify("[QA SERVER] %s: %s" % (display_id, verdict), wp.get("subject", ""))
+    inbox(cfg, "**QA SERVER** %s — %s · %s" % (display_id, verdict, path))
+    notify("[QA SERVER] %s: %s" % (display_id, verdict), wp.get("subject", ""))
     return verdict, path
 
 
@@ -1821,12 +1881,27 @@ def qa_history(display_id=None, build=None, verdict=None):
 
 
 def review_queue(api=None):
+    """Hàng QA của mọi dự án bật QA (gộp)."""
+    out = {"items": [], "build": "", "server_up": False, "at": time.time()}
+    for proj, _ in deploy_targets():
+        if not proj["qa"]:
+            continue
+        r = _review_queue(api, proj)
+        for it in r["items"]:
+            it["project"] = proj["key"]
+        out["items"] += r["items"]
+        out["build"] = out["build"] or r["build"]
+        out["server_up"] = out["server_up"] or r["server_up"]
+    return out
+
+
+def _review_queue(api=None, proj=None):
     """
     Ticket giao cho mình ở trạng thái qa_review_status_ids (vd Review) + hàng chờ QA: tình trạng từng ticket cho trang
     theo dõi. Mỗi mục: display_id, wp_id, subject, status, state (waiting | no_commit | not_deployed | done), note,
     last (kết quả QA gần nhất), build (bản đang chạy).
     """
-    cfg, acfg, dcfg = load()
+    cfg, acfg, dcfg = load(proj)
     api = api or op_watch.OpenProject(cfg["url"], cfg["api_key"])
     review_ids = [str(x) for x in dcfg.get("qa_review_status_ids") or []]
     wps = api.my_work_packages(cfg["project"], review_ids) if review_ids else []
@@ -1862,13 +1937,22 @@ def review_queue(api=None):
 
 
 def review_watch():
+    for proj, _ in deploy_targets():
+        if proj["qa"]:
+            try:
+                _review_watch(proj)
+            except Exception as ex:  # noqa: BLE001 — dự án này lỗi không chặn dự án khác
+                log("review-watch %s lỗi: %s" % (proj["name"], ex))
+
+
+def _review_watch(proj):
     """
     op-watch gọi định kỳ (on_tick): ticket giao cho mình vừa chuyển sang trạng thái qa_review_status_ids (vd Review) mà
     chưa QA trên bản đang chạy → QA ngay (không deploy). Đang có merge / QA khác, hoặc server không trả lời → bỏ qua lượt
     này, không báo lỗi (lượt sau / đợt merge theo lịch sẽ làm).
     """
-    cfg, acfg, dcfg = load()
-    if not dcfg.get("qa_review_status_ids"):
+    cfg, acfg, dcfg = load(proj)
+    if not dcfg.get("qa_review_status_ids") or not qa_enabled(acfg, dcfg):
         return
     root = os.path.expanduser(acfg["root"])
     os.makedirs(root, exist_ok=True)
@@ -1906,7 +1990,7 @@ def review_watch():
                              and tool_errors(t, build) < QA_TOOL_RETRY_MAX})
     if cands:
         log("ticket Review / hàng chờ cần QA trên bản đang chạy: %s" % ", ".join(cands))
-        run_all(only=cands, auto_only=True, review=review)
+        run_one(proj, only=cands, auto_only=True, review=review)
 
 
 def _autofix_busy(status_dir, display_id):
@@ -1935,8 +2019,59 @@ def entered_status_after(api, wp, at_local):
     return False
 
 
-def run_all(dry_run=False, only=None, auto_only=False, force=False, review=None):
-    cfg, acfg, dcfg = load()
+def deploy_only(cfg, acfg, dcfg, dry_run=False, qa_requested=False):
+    """Dự án không QA tự động: chỉ deploy các repo có commit mới (deploy "command" / fe-bundle / be-image)."""
+    if qa_requested:
+        log("dự án %s chưa bật QA tự động (Cấu hình → Dự án) — bỏ qua QA" % P.current(acfg)["name"])
+        return
+    root = os.path.expanduser(acfg["root"])
+    os.makedirs(root, exist_ok=True)
+    commits = pending(acfg, dcfg)
+    log("chưa deploy: %s" % (", ".join("%s %d commit" % (k, len(v)) for k, v in commits.items()) or "không có repo deploy"))
+    if dry_run or not any(commits.values()):
+        return
+    logf = open(os.path.join(root, "deploy-%s-%s.log" % (P.current(acfg)["key"], datetime.now().strftime("%m%d-%H%M"))),
+                "w", encoding="utf-8")
+    parts = []
+    try:
+        changes = []
+        if commits.get("FE"):
+            parts.append("FE %s" % deploy_fe(acfg, dcfg, root, logf, changes))
+        if commits.get("BE"):
+            parts.append("BE %s:%s" % (dcfg["be_image"], deploy_be(acfg, dcfg, root, logf, changes)))
+        if changes:
+            rollout(dcfg, changes, logf)
+        for r in acfg.get("custom_deploy") or []:
+            if commits.get(r["label"]):
+                parts.append("%s %s" % (r["label"], deploy_custom(acfg, dcfg, r, root, logf)))
+    except Exception as ex:  # noqa: BLE001
+        msg = "deploy lỗi: %s (log %s)" % (str(ex).splitlines()[0][:300], logf.name)
+        log(msg)
+        inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
+        notify("[DEPLOY 86 LỖI]", msg)
+        return
+    msg = "đã deploy %s (dự án không QA tự động)" % ", ".join(parts)
+    log(msg)
+    inbox(cfg, "**DEPLOY 86** " + msg)
+    notify("[DEPLOY 86]", msg)
+
+
+def run_all(dry_run=False, only=None, auto_only=False, force=False, review=None, project=None):
+    """Deploy + QA lần lượt từng dự án (merge_to_dev gọi sau merge; --qa chỉ các dự án của ticket được chọn)."""
+    for proj, tickets in deploy_targets(only, project):
+        try:
+            run_one(proj, dry_run, tickets if only else None, auto_only, force, review)
+        except Exception as ex:  # noqa: BLE001 — dự án này lỗi vẫn deploy dự án khác
+            log("dự án %s: deploy / QA lỗi: %s" % (proj["name"], ex))
+            inbox(load(proj)[0], "**DEPLOY 86 LỖI** %s" % str(ex).splitlines()[0][:300])
+
+
+def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review=None):
+    cfg, acfg, dcfg = load(proj)
+    if len(load_all()[1]) > 1:
+        log("— dự án %s (OP %s)" % (proj["name"], proj["op_project"]))
+    if not qa_enabled(acfg, dcfg):
+        return deploy_only(cfg, acfg, dcfg, dry_run, bool(only))
     root = os.path.expanduser(acfg["root"])
     os.makedirs(root, exist_ok=True)
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
@@ -1963,7 +2098,7 @@ def run_all(dry_run=False, only=None, auto_only=False, force=False, review=None)
     fe_version = None
     if not only and any(commits.values()):
         logf = open(os.path.join(root, "deploy-%s.log" % datetime.now().strftime("%m%d-%H%M")), "w", encoding="utf-8")
-        af.notify("[DEPLOY 86]", "Bắt đầu deploy: " + ", ".join("%s %d commit" % (k, len(v)) for k, v in commits.items() if v))
+        notify("[DEPLOY 86]", "Bắt đầu deploy: " + ", ".join("%s %d commit" % (k, len(v)) for k, v in commits.items() if v))
         try:
             changes = []
             if commits["FE"]:
@@ -1980,33 +2115,33 @@ def run_all(dry_run=False, only=None, auto_only=False, force=False, review=None)
             msg = "deploy lỗi: %s (log %s)" % (str(ex).splitlines()[0][:300], logf.name)
             log(msg)
             save_pending(tickets, "deploy lỗi")
-            af.inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
-            af.notify("[DEPLOY 86 LỖI]", msg)
+            inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
+            notify("[DEPLOY 86 LỖI]", msg)
             return
         if not wait_up(dcfg, fe_version):
             msg = "server chưa lên sau %d phút (%s) — chưa QA" % (dcfg["wait_minutes"], ", ".join(deployed_parts))
             save_pending(tickets, "server chưa lên sau deploy")
-            af.inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
-            af.notify("[DEPLOY 86 LỖI]", msg)
+            inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
+            notify("[DEPLOY 86 LỖI]", msg)
             return
         msg = "đã deploy %s · QA %d ticket" % (", ".join(deployed_parts), len(tickets))
         log(msg)
-        af.inbox(cfg, "**DEPLOY 86** " + msg)
-        af.notify("[DEPLOY 86]", msg)
+        inbox(cfg, "**DEPLOY 86** " + msg)
+        notify("[DEPLOY 86]", msg)
 
     if not deployed_parts and not wait_up(dcfg, None, minutes=dcfg.get("alive_wait_minutes", 5)):
         msg = "server không trả lời (FE %s / API %s) — chưa QA, giữ hàng chờ" % (dcfg["fe_url"], dcfg["api_url"])
         log(msg)
         save_pending(tickets, "server không sống")
-        af.inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
-        af.notify("[DEPLOY 86 LỖI]", msg)
+        inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
+        notify("[DEPLOY 86 LỖI]", msg)
         return
     baseline = fingerprint(dcfg)
     if not baseline.get("fe"):
         msg = "không đọc được version FE trên %s — chưa QA, giữ hàng chờ" % dcfg["fe_url"]
         log(msg)
         save_pending(tickets, "không đọc được version FE")
-        af.inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
+        inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
         return
     deployed = ", ".join(deployed_parts) or "bản đang chạy: FE %s, BE %s" % (baseline["fe"], baseline["be"])
     log("dấu server: %s" % baseline)
@@ -2108,7 +2243,7 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
                     log("%s: lỗi công cụ QA lần %d/%d — giữ hàng chờ, QA lại lượt kiểm tra sau"
                         % (display_id, n, QA_TOOL_RETRY_MAX))
                 else:
-                    af.inbox(cfg, "**QA SERVER LỖI CÔNG CỤ** %s — %d lần trên bản %s, ngừng thử (QA lại ở đợt deploy sau"
+                    inbox(cfg, "**QA SERVER LỖI CÔNG CỤ** %s — %d lần trên bản %s, ngừng thử (QA lại ở đợt deploy sau"
                                   " hoặc bấm QA trên server)" % (display_id, n, build))
         except ServerChanged as ex:
             with mu:
@@ -2117,7 +2252,7 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             return
         except Exception as ex:  # noqa: BLE001
             log("%s: QA lỗi %s" % (display_id, ex))
-            af.inbox(cfg, "**QA SERVER LỖI** %s — %s" % (display_id, str(ex).splitlines()[0][:300]))
+            inbox(cfg, "**QA SERVER LỖI** %s — %s" % (display_id, str(ex).splitlines()[0][:300]))
         finally:
             if slot:
                 fcntl.flock(slot, fcntl.LOCK_UN)
@@ -2156,8 +2291,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             stop["msg"], len(remaining), ", ".join(remaining))
         log(msg)
         save_pending(_merged_pending(waiting, done, remaining, retry), stop["msg"])
-        af.inbox(cfg, "**QA SERVER TẠM DỪNG** " + msg)
-        af.notify("[QA SERVER] tạm dừng", "Server 86 vừa bị cập nhật / restart — QA tiếp ở lần chạy sau")
+        inbox(cfg, "**QA SERVER TẠM DỪNG** " + msg)
+        notify("[QA SERVER] tạm dừng", "Server 86 vừa bị cập nhật / restart — QA tiếp ở lần chạy sau")
         return
     save_pending(_merged_pending(waiting, done, remaining, retry), "lỗi công cụ QA — thử lại" if retry else "")
 
@@ -2198,6 +2333,7 @@ def main():
                         help="chỉ IN các lệnh rollout (bluegreen / service / recreate) sẽ chạy trên server cho FE/BE "
                              "(mặc định cả hai) với image giả định — không ssh, không build, không đổi gì")
     parser.add_argument("--strategy", choices=STRATEGIES, help="cùng --rollout-plan: thử cách khác DEPLOY_STRATEGY")
+    parser.add_argument("--project", help="chỉ deploy / QA dự án này (mã hoặc tiền tố, xem Cấu hình → Dự án)")
     parser.add_argument("--destructive", action="store_true",
                         help="cùng --rollout-plan: giả định BE có migration phá cấu trúc")
     args = parser.parse_args()
@@ -2207,7 +2343,7 @@ def main():
     if args.review_watch:
         review_watch()
         return
-    run_all(dry_run=args.dry_run, only=args.qa, force=bool(args.force and args.qa))
+    run_all(dry_run=args.dry_run, only=args.qa, force=bool(args.force and args.qa), project=args.project)
 
 
 if __name__ == "__main__":

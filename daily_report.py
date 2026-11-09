@@ -76,9 +76,22 @@ def previous_today_section(day):
     return items
 
 
+def _project_ids():
+    """Dự án OP của mọi dự án khai báo (Cấu hình → Dự án); chưa khai báo thì dự án cũ."""
+    cfg = envconf._read_json(envconf.CONFIG_PATH)
+    ids = [str(p.get("op_project")) for p in cfg.get("projects") or [] if isinstance(p, dict) and p.get("op_project")]
+    return ids or [PROJECT]
+
+
 def query(api, filters, sort, size):
-    data = api.get("/api/v3/projects/%s/work_packages" % PROJECT, {
-        "filters": json.dumps(filters), "sortBy": json.dumps(sort), "pageSize": size})
+    ids = _project_ids()
+    if len(ids) == 1:
+        data = api.get("/api/v3/projects/%s/work_packages" % ids[0], {
+            "filters": json.dumps(filters), "sortBy": json.dumps(sort), "pageSize": size})
+    else:  # nhiều dự án: một truy vấn chung, lọc theo danh sách dự án
+        data = api.get("/api/v3/work_packages", {
+            "filters": json.dumps(filters + [{"project": {"operator": "=", "values": ids}}]),
+            "sortBy": json.dumps(sort), "pageSize": size})
     return data.get("_embedded", {}).get("elements", [])
 
 
