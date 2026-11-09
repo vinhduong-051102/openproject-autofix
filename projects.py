@@ -17,8 +17,9 @@ Mỗi dự án:
   repos           danh sách repo (xem repos.py). Mã repo (key) không trùng giữa các dự án.
   deploy          server test riêng: host, user, password, base, fe_url, api_url, qa_user_id, qa_user_name…
                   (ghi đè deploy.json). Dự án dựng từ cấu hình cũ dùng luôn deploy.json (deploy_inherit).
-  qa              true = QA tự động trên server test sau deploy (cần fe_url / api_url + tài khoản đăng nhập kiểu
-                  soar_api); false = chỉ deploy, không QA tự động
+                  deploy.auth: cách đăng nhập app (soar_api / ui_check): kind soar | json | static | none — xem soar_api.py
+  qa              true = QA tự động trên server test sau deploy (cần fe_url / api_url + cách đăng nhập); false = chỉ
+                  deploy, không QA tự động
 """
 import copy
 import os
@@ -34,7 +35,7 @@ FIELDS = ("key", "name", "op_project", "prefix", "enabled", "statuses", "min_tic
           "context", "repos", "deploy", "deploy_inherit", "qa")
 # Khoá server test ghi đè được theo dự án (còn lại — thông số rollout FE/BE kiểu SOAR — lấy từ deploy.json).
 DEPLOY_FIELDS = ("host", "user", "password", "base", "fe_url", "api_url", "app_user", "app_password", "app_otp",
-                 "default_account", "qa_user_id", "qa_user_name", "qa_review_status_ids", "qa_ticket_accounts")
+                 "default_account", "qa_user_id", "qa_user_name", "qa_review_status_ids", "qa_ticket_accounts", "auth", "ping_path")
 SECRET_DEPLOY = ("password", "app_password", "app_otp")
 # Dự án không kế thừa deploy.json thì KHÔNG mang các khoá này của dự án khác sang (tránh deploy / QA nhầm server).
 SERVER_FIELDS = DEPLOY_FIELDS + ("accounts",)
@@ -213,6 +214,7 @@ def deploy_cfg(proj, base):
         d = {k: v for k, v in base.items() if k not in SERVER_FIELDS}
     d.update(proj.get("deploy") or {})
     d["_project"] = proj["key"]
+    d["_inherit"] = bool(proj.get("deploy_inherit") or proj.get("_legacy"))  # server kiểu SOAR (deploy.json)
     return d
 
 
@@ -220,4 +222,6 @@ def public(proj):
     """Dự án để hiện trên trang (ẩn mật khẩu server)."""
     p = {k: copy.deepcopy(v) for k, v in proj.items() if k in FIELDS or k == "_legacy"}
     p["deploy"] = {k: ("••••••" if k in SECRET_DEPLOY and v else v) for k, v in (p.get("deploy") or {}).items()}
+    if isinstance(p["deploy"].get("auth"), dict) and p["deploy"]["auth"].get("token"):
+        p["deploy"]["auth"] = dict(p["deploy"]["auth"], token="••••••")
     return p

@@ -80,6 +80,17 @@ ticket) → điền bối cảnh, server test → **Lưu dự án** → bấm **
 
 Ràng buộc: mã dự án, tiền tố mã ticket, dự án OP và **mã repo (key)** không trùng giữa các dự án.
 
+**AI đọc source điền cấu hình**: nút trên thẻ dự án — Claude (chỉ đọc) đọc các repo của dự án, điền bối cảnh dự án
+(nghiệp vụ, màn hình chính ↔ thư mục code, thuật ngữ, quy ước), cách đăng nhập app và đường dẫn kiểm tra server; xem
+lại rồi Lưu dự án.
+
+**Đăng nhập app theo dự án** (mục *Đăng nhập app*, dùng cho QA tự động, Claude hỗ trợ gọi API, `ui_check`):
+`soar` (login + OTP như SOAR) · `json` (POST đường dẫn + mẫu body `{user}` `{password}` `{otp}`, bước OTP tuỳ chọn,
+token theo `token_path` hoặc tự tìm, không có token thì dùng cookie phiên; gửi JSON hoặc form) · `static` (token / API key
+cố định, header + tiền tố tuỳ chỉnh, `-` = không tiền tố) · `none`. Trang đăng nhập + selector ô tài khoản / mật khẩu /
+nút cho `ui_check`. Nút **Thử đăng nhập** kiểm tra bằng cấu hình đã lưu (gọi thêm *API thử token* nếu có). Server không
+phải kiểu SOAR: kiểm tra sống qua *Đường dẫn kiểm tra sống* (mặc định gốc API), dấu bản đang chạy = băm trang FE.
+
 ## Dùng
 
 ```bash

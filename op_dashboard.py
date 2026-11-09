@@ -57,7 +57,9 @@ def projects_brief(cfg):
     """[{key, name, prefix, op_project, enabled, qa}] cho trang (lọc / nhãn dự án theo tiền tố mã ticket)."""
     import projects as P
     try:
-        return [{k: p[k] for k in ("key", "name", "prefix", "op_project", "enabled", "qa")} for p in P.projects(cfg)]
+        return [dict({k: p[k] for k in ("key", "name", "prefix", "op_project", "enabled", "qa")},
+                     repos=len(p["repos"]) if (p["repos"] or not p["_legacy"]) else -1)  # -1: repo từ cấu hình cũ
+                for p in P.projects(cfg)]
     except ValueError:
         return []
 

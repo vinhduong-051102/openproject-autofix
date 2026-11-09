@@ -1533,13 +1533,24 @@ def revive_be(dcfg, logf=None):
         return False
 
 
+def soar_server(dcfg):
+    """Server kiểu SOAR (deploy.json: ping /api/v1/ping, version FE trong meta, container BE qua ssh)?"""
+    return dcfg.get("_inherit", True)
+
+
+def ping_url(dcfg):
+    """URL kiểm tra API sống: ping_path của dự án, kiểu SOAR /api/v1/ping, còn lại gốc API (trả < 500 là sống)."""
+    path = dcfg.get("ping_path") or ("/api/v1/ping" if soar_server(dcfg) else "/")
+    return dcfg["api_url"].rstrip("/") + "/" + path.lstrip("/")
+
+
 def wait_up(dcfg, fe_version, minutes=None, revive=True):
     """Chờ FE trả đúng version (nếu deploy FE) và API trả lời (401 khi chưa đăng nhập = đã sống).
     BE thoát giữa chừng thì start lại (tối đa be_restart_tries lần)."""
     deadline = time.time() + (dcfg["wait_minutes"] if minutes is None else minutes) * 60
     tries, last_check = int(dcfg.get("be_restart_tries", 3)), 0
     while time.time() < deadline:
-        if revive and tries > 0 and time.time() - last_check >= 30:
+        if revive and soar_server(dcfg) and tries > 0 and time.time() - last_check >= 30:
             last_check = time.time()
             if revive_be(dcfg):
                 tries -= 1
@@ -1549,13 +1560,7 @@ def wait_up(dcfg, fe_version, minutes=None, revive=True):
             ok_fe = not fe_version or ('content="%s"' % fe_version) in html
         except OSError:
             pass
-        try:
-            urllib.request.urlopen(dcfg["api_url"] + "/api/v1/ping", timeout=15)
-            ok_api = True
-        except urllib.error.HTTPError as ex:
-            ok_api = ex.code < 500
-        except OSError:
-            pass
+        ok_api = api_alive(dcfg)
         if ok_fe and ok_api:
             return True
         time.sleep(15)
@@ -1568,9 +1573,12 @@ def fingerprint(dcfg):
     try:
         html = urllib.request.urlopen(dcfg["fe_url"] + "/", timeout=20).read().decode("utf-8", "replace")
         m = re.search(r'<meta name="version" content="([^"]*)"', html)
-        fp["fe"] = m.group(1) if m else None
+        # không có meta version (app khác SOAR): dấu = băm nội dung trang (đổi khi deploy bản build mới)
+        fp["fe"] = m.group(1) if m else (None if soar_server(dcfg) else "html-" + hashlib.sha1(html.encode()).hexdigest()[:10])
     except OSError:
         pass
+    if not soar_server(dcfg) or not dcfg.get("host"):
+        return fp
     try:
         out = remote(dcfg, "docker inspect -f '{{.Config.Image}}|{{.State.StartedAt}}' %s" % dcfg["be_container"],
                      timeout=60).strip()
@@ -1593,7 +1601,7 @@ def describe_change(old, new):
 
 def api_alive(dcfg):
     try:
-        urllib.request.urlopen(dcfg["api_url"] + "/api/v1/ping", timeout=15)
+        urllib.request.urlopen(ping_url(dcfg), timeout=15)
         return True
     except urllib.error.HTTPError as ex:
         return ex.code < 500

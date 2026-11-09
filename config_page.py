@@ -338,6 +338,11 @@ def action(body, save_autofix):
             len(items), (" — lưu ý: " + "; ".join(warn)) if warn else ""), "warnings": warn}
     if kind == "config_project_detect":
         return dict(detect_project(body.get("op_project")), message="Đã đọc dự án trên OpenProject")
+    if kind == "config_project_suggest":
+        r = suggest_project(body.get("project"))
+        return dict(r, message="AI đã đọc source và điền cấu hình — xem lại rồi bấm Lưu dự án")
+    if kind == "config_auth_test":
+        return {"message": test_auth(body.get("project"))}
     if kind == "config_apply":
         return apply(body.get("changed") or [])
     raise ValueError("thao tác không hợp lệ")
@@ -514,18 +519,19 @@ CONTRIBUTING, cấu trúc thư mục. Xác định:
 """
 
 
-def _claude_json(prompt, p):
-    """Gọi Claude chỉ đọc trong repo p (Read / Glob / Grep, không Bash / ghi / mạng) → khối JSON trong kết quả."""
+def _claude_json(prompt, p, extra=(), budget="0.8"):
+    """Gọi Claude chỉ đọc trong repo p (+ các repo extra) (Read / Glob / Grep, không Bash / ghi / mạng) → khối JSON."""
     import op_autofix as af
     import task_create
     _, acfg, _ = task_create.load()
     acfg = dict(af.AUTOFIX_DEFAULTS, **acfg)
-    scope = "//" + p.lstrip("/") + "/**"
-    cmd = [acfg["claude"], "-p", prompt, "--permission-mode", "dontAsk", "--max-budget-usd", "0.8",
-           "--output-format", "json", "--add-dir", p, "--allowedTools", "Read(%s)" % scope, "Glob", "Grep",
+    dirs = [p] + [x for x in extra if x and x != p]
+    reads = ["Read(%s)" % ("//" + d.lstrip("/") + "/**") for d in dirs]
+    cmd = [acfg["claude"], "-p", prompt, "--permission-mode", "dontAsk", "--max-budget-usd", budget,
+           "--output-format", "json", "--add-dir"] + dirs + ["--allowedTools"] + reads + ["Glob", "Grep",
            "--disallowedTools", "Bash", "Write", "Edit", "WebFetch", "WebSearch",
            "--model", envconf.get("TG_AI_MODEL") or "sonnet"]
-    res, _ = af.claude_oneshot(acfg, cmd, cwd=p, timeout=300)  # gói bị vô hiệu → tự dùng gói khác
+    res, _ = af.claude_oneshot(acfg, cmd, cwd=p, timeout=900 if float(budget) > 1 else 300)  # gói bị vô hiệu → tự dùng gói khác
     text = (json.loads(res.stdout).get("result") or "") if res.stdout.strip().startswith("{") else ""
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
@@ -723,6 +729,21 @@ def projects_save(items):
         for k in P.SECRET_DEPLOY:  # "••••••" = giữ mật khẩu cũ
             if str(dep.get(k) or "").startswith("•"):
                 dep[k] = (prev.get("deploy") or {}).get(k, "")
+        if isinstance(dep.get("auth"), dict):  # cách đăng nhập app; "••••••" = giữ token cũ
+            au = {k: v for k, v in dep["auth"].items() if k in AUTH_FIELDS and v not in (None, "")}
+            if str(au.get("token") or "").startswith("•"):
+                au["token"] = ((prev.get("deploy") or {}).get("auth") or {}).get("token", "")
+            if "form" in au:
+                au["form"] = au["form"] in (True, "1", "true", "on")
+            if au.get("kind") not in AUTH_KINDS:
+                au = {}
+            for k in ("login_body", "otp_body"):
+                if au.get(k):
+                    try:
+                        json.loads(au[k].replace("{user}", "u").replace("{password}", "p").replace("{otp}", "1"))
+                    except ValueError:
+                        raise ValueError("%s: mẫu %s không phải JSON hợp lệ" % (x.get("name") or x.get("key"), k))
+            dep["auth"] = au
         for k in ("qa_user_id",):
             if dep.get(k) not in (None, ""):
                 try:
@@ -764,3 +785,106 @@ def save_project_repos(key, repos):
     if (data.get("autofix") or {}).get("repos"):
         data["autofix"]["repos_before_projects"] = data["autofix"].pop("repos")
     _write_cfg(data)
+
+
+# ---------------------------------------------------------------- cách đăng nhập app của dự án (soar_api / ui_check)
+
+AUTH_KINDS = ("soar", "json", "static", "none")
+AUTH_FIELDS = ("kind", "login_path", "login_body", "otp_path", "otp_body", "token_path", "header", "scheme", "token",
+               "form", "check_path", "ui_login_path", "ui_user", "ui_password", "ui_submit")
+
+AUTH_PROMPT = """Bạn đọc source code của một dự án để ĐIỀN CẤU HÌNH cho công cụ tự sửa bug + test tự động (autofix):
+bối cảnh dự án cho AI sửa bug, cách đăng nhập app (gọi API + mở giao diện), đường dẫn kiểm tra server.
+CHỈ ĐỌC code (Read / Glob / Grep), không sửa, không chạy lệnh. Đọc README / docs / cấu trúc thư mục / route / controller
+/ menu / i18n trước, đừng đọc tràn lan.
+
+Dự án: {name} (mã ticket {prefix}-…). Các repo:
+{repos}
+
+## 1. Bối cảnh dự án ("context", tiếng Việt, tối đa ~1500 ký tự, gạch đầu dòng)
+Ứng dụng làm gì; các phân hệ / màn hình chính (tên menu như người dùng thấy) và repo / thư mục code tương ứng; thuật
+ngữ nghiệp vụ hay gặp; vai trò người dùng / phân quyền; quy ước quan trọng khi sửa (i18n, API chung, migration…). Viết
+để một AI khác đọc ticket lỗi là biết tìm code ở đâu.
+
+## 2. Đăng nhập + kiểm tra server
+Tìm trong code backend (controller / route đăng nhập, cấu hình security / JWT / session) và frontend (trang login, chỗ
+gọi API đăng nhập, header gửi token):
+- API đăng nhập: method + đường dẫn (so với API URL gốc: {api_url}), body gửi lên (tên trường username / email,
+  password), có bước OTP / 2FA không (đường dẫn + body), token trả về nằm ở đâu trong JSON (vd data.access_token), hay
+  server đặt cookie phiên; header gửi token (Authorization: Bearer … / X-Auth-Token / …); body dạng JSON hay form.
+- Giao diện đăng nhập: đường dẫn trang login trên FE, selector ô tài khoản, ô mật khẩu, nút đăng nhập (CSS selector ổn
+  định: name / type / id / data-testid).
+- Một API GET nhẹ cần đăng nhập để thử token (vd /api/users/me) → check_path.
+- Endpoint kiểm tra server sống không cần đăng nhập (health / ping / actuator) → ping_path.
+
+Kết quả: một khối JSON DUY NHẤT (không giải thích ngoài JSON):
+{{"context": "- ...\\n- ...", "ping_path": "/api/health",
+  "kind": "json" | "soar" | "static" | "none",
+  "login_path": "/api/...", "login_body": "{{\\"username\\": \\"{{user}}\\", \\"password\\": \\"{{password}}\\"}}",
+  "otp_path": "" , "otp_body": "", "token_path": "data.access_token", "header": "Authorization", "scheme": "Bearer",
+  "form": false, "check_path": "/api/...",
+  "ui_login_path": "/login", "ui_user": "input[name=username]", "ui_password": "input[type=password]",
+  "ui_submit": "button[type=submit]",
+  "notes": "căn cứ (file:dòng), điểm chưa chắc"}}
+login_body / otp_body là CHUỖI mẫu JSON, dùng {{user}} {{password}} {{otp}} làm chỗ điền. "soar" chỉ khi đúng luồng
+POST /api/v2/auth/login rồi /api/v2/auth/validate-otp. Không chắc trường nào thì để "" và ghi trong notes.
+"""
+
+
+def _project_and_repos(key):
+    cfg = _cfg()
+    proj = P.get(cfg, key or "")
+    if not proj:
+        raise ValueError("không có dự án %s (lưu dự án trước)" % key)
+    rs = R.repos(P.scope_acfg(cfg.get("autofix") or {}, proj)) if (proj["repos"] or proj["_legacy"]) else []
+    return proj, [r for r in rs if os.path.isdir(r["path"])]
+
+
+def suggest_project(key):
+    """AI đọc source các repo của dự án → bối cảnh dự án + cách đăng nhập + ping_path (chưa lưu — trang hiện để người
+    dùng xem lại rồi Lưu dự án)."""
+    proj, rs = _project_and_repos(key)
+    if not rs:
+        raise ValueError("dự án %s chưa có repo — thêm repo trước để AI đọc source" % proj["name"])
+    d = envconf.deploy_config(proj["key"])
+    repos = "\n".join("- %s (%s): %s" % (r["label"], r.get("tech") or "?", r["path"]) for r in rs)
+    out = _claude_json(AUTH_PROMPT.format(name=proj["name"], prefix=proj["prefix"], repos=repos,
+                                          api_url=d.get("api_url") or "(chưa đặt)"),
+                       rs[0]["path"], [r["path"] for r in rs[1:]], budget="2")
+    auth = {k: out[k] for k in AUTH_FIELDS if k in out and out[k] not in (None, "") and k != "token"}
+    if auth.get("kind") not in AUTH_KINDS:
+        auth["kind"] = "json"
+    for k in ("login_body", "otp_body"):
+        if isinstance(auth.get(k), dict):
+            auth[k] = json.dumps(auth[k], ensure_ascii=False)
+    ctx = out.get("context")
+    ctx = "\n".join(ctx) if isinstance(ctx, list) else str(ctx or "")
+    return {"auth": auth, "context": ctx.strip()[:3000], "ping_path": str(out.get("ping_path") or "").strip(),
+            "notes": str(out.get("notes") or "")[:1000]}
+
+
+def test_auth(key):
+    """Thử đăng nhập bằng cấu hình đã LƯU của dự án: lấy token, gọi check_path nếu có. Trả mô tả."""
+    import soar_api
+    proj = P.get(_cfg(), key or "")
+    if not proj:
+        raise ValueError("không có dự án %s" % key)
+    cfg = envconf.deploy_config(proj["key"])
+    if not cfg.get("api_url"):
+        raise ValueError("%s: chưa có URL API (Server test)" % proj["name"])
+    a = soar_api.auth_cfg(cfg)
+    try:
+        if a["kind"] in ("static", "none"):
+            user, token = "", soar_api.login(cfg, "", "")
+        else:
+            user, pw = soar_api.credentials(cfg, None)
+            token = soar_api.login(cfg, user, pw)
+    except SystemExit as ex:
+        raise ValueError(str(ex))
+    msg = "Đăng nhập %s được (%s)" % (("bằng " + user) if user else "", "cookie phiên" if token.startswith("cookie:")
+                                    else ("token …%s" % token[-6:]) if token else "không cần token")
+    if a.get("check_path"):
+        code, _, body = soar_api.send("GET", cfg["api_url"].rstrip("/") + "/" + a["check_path"].lstrip("/"), None,
+                                      soar_api.auth_headers(cfg, token))
+        msg += " · GET %s → HTTP %s%s" % (a["check_path"], code, "" if code < 400 else " " + body[:150].decode("utf-8", "replace"))
+    return msg

@@ -79,7 +79,7 @@ details.menu[open] > summary { border-color: var(--accent); color: var(--accent)
 .menu-box { position: absolute; right: 0; top: calc(100% + 6px); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 12px 30px rgba(0,0,0,.35); padding: 10px; display: grid; gap: 10px; min-width: 250px; z-index: 5; }
 .menu-box label { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-2); font-size: 13px; }
 /* Dịch vụ (trang Hệ thống) */
-.svc { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; padding: 14px 16px; }
+.svc { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; padding: 14px 16px; }
 .svc .chip { border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px; font-size: 13px; color: var(--text); }
 .svc .chip small { margin-left: 0; display: block; }
 .svc .chip.bad { border-color: var(--crit-fill); }
@@ -92,6 +92,8 @@ details.menu[open] > summary { border-color: var(--accent); color: var(--accent)
 .todo-item .t { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
 .todo-item .t .id { font: 600 13px var(--mono); }
 .todo-item .s { grid-column: 1; color: var(--text-2); font-size: 12.5px; overflow-wrap: anywhere; }
+.todo-item .a .link { color: var(--text-2); }
+.todo-item .ids { font: 600 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
 .todo-item .a { grid-row: 1 / 3; grid-column: 2; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .todo-empty { padding: 40px 16px; text-align: center; color: var(--text-3); }
 .todo-empty b { display: block; font-size: 18px; color: var(--ok); margin-bottom: 6px; }
@@ -110,6 +112,8 @@ details.menu[open] > summary { border-color: var(--accent); color: var(--accent)
 section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 20px; }
 section > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-2); margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
 section > h2 .right { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+section > h2 { white-space: nowrap; min-width: 0; }
+section > h2 > .sum, section > h2 > .right:not(.switch) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .profile { padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .profile:last-of-type { border-bottom: 0; }
 .profile.active { background: var(--accent-soft); }
@@ -427,7 +431,7 @@ header { flex-wrap: wrap; min-width: 0; }
 .tg-tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; cursor: pointer; text-align: left; }
 .tg-tile .l { font-size: 12px; color: var(--text-2); } .tg-tile .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--text); }
 .tg-tile.on { border-color: var(--accent); }
-.tg-chart { padding: 6px 16px 0; } .tg-chart svg { width: 100%; height: auto; display: block; }
+.tg-chart { padding: 6px 16px 0; } .tg-chart svg { width: 100%; height: 130px; display: block; }
 .tg-chart .grid { stroke: var(--border); stroke-width: 1; } .tg-chart .base { stroke: var(--text-3); stroke-width: 1; }
 .tg-chart .tk { fill: var(--text-3); font-size: 10px; } .tg-chart .bar { fill: var(--accent); }
 .tg-chart .hit { fill: transparent; } .tg-chart .tip { opacity: 0; pointer-events: none; }
@@ -563,7 +567,10 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
   .act .sub, .op-row .subj, .run .verdict { white-space: normal; overflow: visible; text-overflow: clip; }
   .act .title { flex-wrap: wrap; }
   .acts { max-height: none; }
-  .op-row { grid-template-columns: 84px minmax(0, 1fr); }
+  .op-row { grid-template-columns: minmax(0, 1fr) auto; }  /* điện thoại: mã + thời gian một dòng, tiêu đề rộng hết dòng */
+  .op-row .id { grid-row: 1; grid-column: 1; } .op-row .when { grid-row: 1; grid-column: 2; }
+  .op-row .subj { grid-column: 1 / 3; } .op-row .tags { grid-column: 1 / 3; }
+  .op-bar input { flex-basis: 0; } .op-bar #opProj { flex: 1 1 100%; }
   .op-row .when { grid-column: 2; text-align: left; }
   .tabs { padding: 0 6px; }
   .detail-head h3 { font-size: 16px; }
@@ -634,7 +641,7 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
       <h2>OpenProject <span class="sum" id="opSum"></span>
         <span class="right"><a class="ext" id="opExt" href="#" target="_blank" rel="noopener">Mở OpenProject ↗</a></span></h2>
       <div class="op-bar">
-        <div class="seg" id="opScope"><button data-v="mine" class="on">Của tôi</button><button data-v="all">Cả project</button></div>
+        <div class="seg" id="opScope"><button data-v="mine" class="on">Của tôi</button><button data-v="all">Cả dự án</button></div>
         <div class="seg" id="opStatus"><button data-v="open" class="on">Đang mở</button><button data-v="all">Tất cả</button></div>
         <select id="opProj" hidden title="Dự án OpenProject"></select>
         <input id="opQ" type="search" placeholder="Tìm tiêu đề / nội dung / mã ticket…">
@@ -2081,7 +2088,8 @@ const tgTime = (s) => s ? new Date(s).toLocaleString("vi-VN", {day: "2-digit", m
 const tgMedia = (p) => "/api/tg/media?path=" + encodeURIComponent(p);
 async function tgFetch(url) { const r = await fetch(url); const d = await r.json(); if (!r.ok) throw new Error(d.error || r.status); return d; }
 function tgChartSvg(days) {
-  const W = 640, H = 150, L = 26, B = 22, T = 10, ph = H - B - T, slot = (W - L) / days.length, bw = Math.min(24, slot - 6);
+  // vẽ đúng bề rộng khung (chữ không bị phóng to trên màn rộng / thu nhỏ trên điện thoại), cao cố định
+  const W = Math.max(300, ($("tgChart").clientWidth || 640) - 32), H = 130, L = 26, B = 22, T = 10, ph = H - B - T, slot = (W - L) / days.length, bw = Math.min(24, slot - 6);
   const vmax = Math.max(1, ...days.map((d) => d.n)), step = Math.max(1, Math.ceil(vmax / 3)), ymax = step * Math.ceil(vmax / step);
   let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Số yêu cầu mới mỗi ngày, 14 ngày gần nhất">`;
   for (let v = 0; v <= ymax; v += step) {
@@ -2569,7 +2577,7 @@ document.addEventListener("click", (e) => { const m = $("menu"); if (m.open && !
 // ---- Cần xử lý: gom mọi việc đang chờ chính bạn (ticket chờ quyết, câu hỏi tester, yêu cầu Telegram, lỗi) ----
 const TODO = {tg: null, asks: null};
 const todoHidden = () => { try { return JSON.parse(localStorage.getItem("todoHidden") || "{}"); } catch (e) { return {}; } };
-function todoHide(key) { const h = todoHidden(); h[key] = Date.now(); try { localStorage.setItem("todoHidden", JSON.stringify(h)); } catch (e) {} renderTodo(); }
+function todoHide(key) { const h = todoHidden(); key.split("|").forEach((k) => { h[k] = Date.now(); }); try { localStorage.setItem("todoHidden", JSON.stringify(h)); } catch (e) {} renderTodo(); }
 async function loadTodoExtra() {
   try { TODO.tg = await tgFetch("/api/tg/overview?status=open"); } catch (e) { TODO.tg = null; }
   try { TODO.asks = await tgFetch("/api/tg/asks"); } catch (e) { TODO.asks = null; }
@@ -2606,9 +2614,29 @@ function renderTodo() {
   // 3. Lượt autofix lỗi / bị ngắt (7 ngày gần nhất)
   const week = Date.now() / 1000 - 7 * 86400;
   const bad = (S.runs || []).filter((r) => ["error", "stale"].includes(r.state) && ts(r.updated_at || r.started_at) > week);
-  groups.push({title: "Lượt autofix lỗi / bị ngắt", items: bad.map((r) => { const k = "run-" + r.display_id + "-" + (r.updated_at || ""); return item(k,
-    `<span class="id">${esc(r.display_id)}</span><span class="badge crit">${esc((STATE_LABEL[r.state] || [r.state])[0])}</span><span class="muted">${esc(when(ts(r.updated_at || r.started_at)))}</span>`,
-    esc(r.verdict || ""), btn("Xem", {trun: r.display_id}, "primary") + btn("Chạy lại", {trerun: r.display_id}) + hideBtn(k)); }).filter(Boolean)});
+  // Nhiều lượt cùng một lỗi (vd lỗi công cụ làm hỏng cả loạt) → gộp một dòng, chạy lại / ẩn cả nhóm
+  const runKey = (r) => "run-" + r.display_id + "-" + (r.updated_at || "");
+  const byErr = new Map();
+  bad.filter((r) => !hidden[runKey(r)]).forEach((r) => { const v = r.verdict || r.state; byErr.set(v, (byErr.get(v) || []).concat([r])); });
+  const runItems = [];
+  byErr.forEach((rs, v) => {
+    if (rs.length < 3) {
+      rs.forEach((r) => runItems.push(item(runKey(r),
+        `<span class="id">${esc(r.display_id)}</span><span class="badge crit">${esc((STATE_LABEL[r.state] || [r.state])[0])}</span><span class="muted">${esc(when(ts(r.updated_at || r.started_at)))}</span>`,
+        esc(r.verdict || ""), btn("Xem", {trun: r.display_id}, "primary") + btn("Chạy lại", {trerun: r.display_id}) + hideBtn(runKey(r)))));
+      return;
+    }
+    const keys = rs.map(runKey).join("|"), ids = rs.map((r) => r.display_id);
+    runItems.push({key: keys, t: `<span class="badge crit">${rs.length} lượt cùng lỗi</span><span class="muted">${esc(when(ts(rs[0].updated_at || rs[0].started_at)))}</span>`,
+      sub: `<div class="ids">${esc(ids.join(", "))}</div>${esc(v)}`,
+      acts: btn("Xem", {trun: ids[0]}, "primary") + btn(`Chạy lại cả ${rs.length}`, {trerunall: ids.join(",")}) + hideBtn(keys)});
+  });
+  groups.push({title: "Lượt autofix lỗi / bị ngắt", items: runItems.filter(Boolean)});
+  // Dự án chưa có repo: autofix bỏ qua ticket của dự án
+  const noRepo = projList().filter((p) => p.repos === 0);
+  groups.push({title: "Cấu hình dự án", items: noRepo.map((p) => item("proj-norepo-" + p.key,
+    `<b>${esc(p.name)}</b><span class="badge warn">Chưa có repo</span>`, "Autofix đang bỏ qua ticket " + esc(p.prefix) + "-… của dự án này cho tới khi thêm repo.",
+    btn("Thêm repo", {tproj: p.key}, "primary") + hideBtn("proj-norepo-" + p.key))).filter(Boolean)});
   // 4. Dịch vụ / job lỗi + gỡ xung đột thất bại trong 24 giờ
   const jobsBad = (S.jobs || []).filter((j) => j.key !== "dashboard" && !jobState(j).ok);
   const day = Date.now() / 1000 - 86400;
@@ -2638,6 +2666,13 @@ function renderTodo() {
   $$("[data-ttg]", (b) => tgOpen(+b.dataset.ttg));
   $$("[data-trun]", (b) => { select(b.dataset.trun); showView("autofix"); });
   $$("[data-trerun]", (b) => confirm(`Chạy lại autofix cho ${b.dataset.trerun}?`) && post({action: "rerun", display_id: b.dataset.trerun, profile: (S.profiles.find((p) => p.active) || {}).name}));
+  $$("[data-trerunall]", async (b) => { const ids = b.dataset.trerunall.split(",");
+    if (!confirm(`Chạy lại autofix cho ${ids.length} ticket?\n${ids.join(", ")}`)) return;
+    const prof = (S.profiles.find((p) => p.active) || {}).name;
+    for (const id of ids) await post({action: "rerun", display_id: id, profile: prof});
+    toast(`Đã xếp hàng ${ids.length} lượt chạy lại`); });
+  $$("[data-tproj]", async (b) => { showView("config"); await loadConfig(); CFG.proj = b.dataset.tproj; await loadCfgRepos();
+    $("cfgRepoBox").scrollIntoView({behavior: "smooth"}); });
   $$("[data-tjob]", (b) => { selectOther("job", b.dataset.tjob); showView("autofix"); });
   $$("[data-tconf]", (b) => { selectOther("conf", b.dataset.tconf); showView("autofix"); });
   if ($("todoUnhide")) $("todoUnhide").onclick = () => { try { localStorage.removeItem("todoHidden"); } catch (e) {} renderTodo(); };
@@ -2678,9 +2713,20 @@ const CFG_PROJ = [["name", "Tên", "hiện trong prompt / trang, vd SOAR"], ["pr
   ["title_template", "Mẫu tiêu đề task", "AI soạn task lỗi theo mẫu này"],
   ["context", "Bối cảnh dự án", "nghiệp vụ, thuật ngữ, màn hình chính, tài khoản test… — thêm vào prompt Claude khi sửa ticket của dự án", true]];
 const CFG_PROJ_DEPLOY = [["host", "Server test (host)", "IP / tên máy server test của dự án"], ["user", "SSH user", ""], ["password", "SSH mật khẩu", "lưu trong config.json (quyền 600), không hiện lại"],
-  ["base", "Thư mục trên server", "{base} trong lệnh deploy"], ["fe_url", "URL giao diện", "vd https://10.0.0.5:4443 — QA tự động / ui_check"], ["api_url", "URL API", "QA tự động gọi API"],
-  ["app_user", "Tài khoản đăng nhập app", "QA tự động / ui_check dùng"], ["app_password", "Mật khẩu app", ""],
+  ["base", "Thư mục trên server", "{base} trong lệnh deploy"], ["fe_url", "URL giao diện", "vd https://10.0.0.5:4443 — QA tự động / ui_check"], ["api_url", "URL API", "QA tự động gọi API"], ["ping_path", "Đường dẫn kiểm tra sống", "GET không cần đăng nhập, vd /actuator/health; trống = gốc API"],
+  ["app_user", "Tài khoản đăng nhập app", "QA tự động / ui_check dùng"], ["app_password", "Mật khẩu app", ""], ["app_otp", "OTP cố định (nếu có)", "app test bật OTP cố định cho tài khoản QA"],
   ["qa_user_id", "Id người QA (OpenProject)", "QA đạt → giao ticket cho người này"], ["qa_user_name", "Tên người QA", ""], ["qa_review_status_ids", "Trạng thái chờ QA", "id trạng thái, cách nhau dấu phẩy"]];
+const CFG_AUTH_KINDS = {soar: "Kiểu SOAR (login + OTP, /api/v2/auth)", json: "Đăng nhập JSON (đường dẫn + body → token / cookie)",
+  static: "Token cố định / API key", none: "Không cần đăng nhập"};
+const CFG_AUTH = {
+  json: [["login_path", "Đường dẫn đăng nhập", "POST, vd /api/auth/login"], ["login_body", "Body đăng nhập", 'mẫu JSON, vd {"username": "{user}", "password": "{password}"}', true],
+    ["otp_path", "Bước OTP (nếu có)", "POST, trống = không có"], ["otp_body", "Body OTP", 'vd {"username": "{user}", "otp": "{otp}"}', true],
+    ["token_path", "Vị trí token", "vd data.access_token; trống = tự tìm (access_token / token / jwt…), không có thì dùng cookie"],
+    ["header", "Header gửi token", "mặc định Authorization"], ["scheme", "Tiền tố token", "mặc định Bearer; ghi - để gửi nguyên token"]],
+  static: [["token", "Token / API key", "lưu trong config.json (quyền 600), không hiện lại"], ["header", "Header gửi token", "mặc định Authorization"],
+    ["scheme", "Tiền tố token", "mặc định Bearer; ghi - để gửi nguyên token"]],
+  ui: [["ui_login_path", "Trang đăng nhập (FE)", "mặc định /login"], ["ui_user", "Ô tài khoản", 'CSS selector, mặc định input[name="username"] / email'],
+    ["ui_password", "Ô mật khẩu", 'mặc định input[type="password"]'], ["ui_submit", "Nút đăng nhập", 'mặc định button[type="submit"]']]};
 function renderCfgProjects(msg) {
   const list = CFG.plist || [], pj = CFG.pj || {};
   $("cfgProjSum").textContent = `${list.length} dự án${pj.declared ? "" : " · dựng từ cấu hình cũ"}`;
@@ -2691,9 +2737,9 @@ function renderCfgProjects(msg) {
         ? `<textarea id="cp${i}_${k}" data-pi="${i}" data-pk="${k}" rows="3" placeholder="${esc(h)}" title="${esc(h)}">${esc(x[k] ?? "")}</textarea>`
         : `<input type="text" id="cp${i}_${k}" data-pi="${i}" data-pk="${k}" value="${esc(x[k] ?? "")}" placeholder="${esc(h)}" title="${esc(h)}">`}`;
       const d = x.deploy || {}, dv = (k) => Array.isArray(d[k]) ? d[k].join(", ") : (d[k] ?? "");
-      const fieldD = ([k, l, h]) => `<label for="cpd${i}_${k}">${esc(l)}</label><input type="${/password/.test(k) ? "password" : "text"}" id="cpd${i}_${k}" data-pi="${i}" data-dk="${k}" value="${esc(dv(k))}" placeholder="${esc(x.deploy_inherit || x._legacy ? "trống = theo deploy.json / .env" : h)}" title="${esc(h)}" autocomplete="off">`;
+      const fieldD = ([k, l, h]) => `<label for="cpd${i}_${k}">${esc(l)}</label><input type="${/password|otp/.test(k) ? "password" : "text"}" id="cpd${i}_${k}" data-pi="${i}" data-dk="${k}" value="${esc(dv(k))}" placeholder="${esc(x.deploy_inherit || x._legacy ? "trống = theo deploy.json / .env" : h)}" title="${esc(h)}" autocomplete="off">`;
       return `<div class="cfg-repo"><div class="hd"><b>${esc(x.name || x.key)}</b><span class="muted">· OP #${esc(x.op_project)} · mã ${esc(x.prefix)}-… · ${(x.repo_labels || []).length ? "repo: " + esc(x.repo_labels.join(", ")) : "chưa có repo"}${i === 0 ? " · mặc định" : ""}</span>
-          <span style="margin-left:auto;display:flex;gap:6px"><button class="link" data-prepo="${i}" title="Sửa danh sách repo của dự án này">Repo ↓</button>${list.length > 1 ? `<button class="link" data-pdel="${i}" title="Bỏ dự án">✕</button>` : ""}</span></div>
+          <span style="margin-left:auto;display:flex;gap:6px"><button class="link" data-pai="${i}" title="AI đọc source các repo của dự án → điền bối cảnh dự án, cách đăng nhập, đường dẫn kiểm tra server (bạn xem lại rồi Lưu)">🤖 AI đọc source điền cấu hình</button><button class="link" data-prepo="${i}" title="Sửa danh sách repo của dự án này">Repo ↓</button>${list.length > 1 ? `<button class="link" data-pdel="${i}" title="Bỏ dự án">✕</button>` : ""}</span></div>
         <div class="cfg-grid">
           <label for="cp${i}_key">Mã</label><input type="text" id="cp${i}_key" data-pi="${i}" data-pk="key" value="${esc(x.key)}" ${x._orig ? "readonly title=\"mã đã dùng cho cấu hình, không đổi\"" : ""}>
           ${CFG_PROJ.map(fieldP).join("")}
@@ -2702,8 +2748,23 @@ function renderCfgProjects(msg) {
             <label style="color:var(--text)"><input type="checkbox" data-pi="${i}" data-pk="qa" ${x.qa ? "checked" : ""} style="width:auto"> QA tự động trên server test sau deploy</label></div>
         </div>
         <details><summary>Server test${x.deploy_inherit || x._legacy ? " — đang dùng deploy.json / .env (DEPLOY_*), điền để ghi đè" : " — deploy (lệnh “command”: {host} {user} {base}, $SSHPASS) + QA tự động"}</summary>
-          <div class="cfg-grid" style="margin-top:8px">${CFG_PROJ_DEPLOY.map(fieldD).join("")}</div>
-          <div class="muted cfg-msg">QA tự động dùng soar_api / ui_check (đăng nhập kiểu SOAR). Dự án khác cách đăng nhập: tắt QA tự động, vẫn dùng autofix + Gemini review + merge + deploy.</div></details></div>`; }).join("")
+          <div class="cfg-grid" style="margin-top:8px">${CFG_PROJ_DEPLOY.map(fieldD).join("")}</div></details>
+        ${(() => { const au = (x.deploy || {}).auth || {}, kind = au.kind || "soar";
+          const fa = ([k, l, h, multi]) => { const v = au[k] ?? "";
+            return `<label for="cpa${i}_${k}">${esc(l)}</label>${multi ? `<textarea id="cpa${i}_${k}" data-pi="${i}" data-ak="${k}" rows="2" placeholder="${esc(h)}" title="${esc(h)}">${esc(v)}</textarea>`
+              : `<input type="${k === "token" ? "password" : "text"}" id="cpa${i}_${k}" data-pi="${i}" data-ak="${k}" value="${esc(v)}" placeholder="${esc(h)}" title="${esc(h)}" autocomplete="off">`}`; };
+          return `<details ${au.kind && au.kind !== "soar" ? "open" : ""}><summary>Đăng nhập app — ${esc(CFG_AUTH_KINDS[kind] || kind)} (QA tự động, Claude hỗ trợ gọi API, test giao diện)</summary>
+          <div class="cfg-grid" style="margin-top:8px">
+            <label for="cpa${i}_kind">Cách đăng nhập</label><select id="cpa${i}_kind" data-pi="${i}" data-ak="kind">${Object.entries(CFG_AUTH_KINDS).map(([k, l]) => `<option value="${k}" ${kind === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+            ${(CFG_AUTH[kind] || []).map(fa).join("")}
+            ${kind === "json" ? `<label>Gửi dạng form</label><label style="color:var(--text)"><input type="checkbox" data-pi="${i}" data-ak="form" ${au.form ? "checked" : ""} style="width:auto"> application/x-www-form-urlencoded thay vì JSON</label>` : ""}
+            ${kind !== "none" ? fa(["check_path", "API thử token", "GET cần đăng nhập, vd /api/users/me — dùng cho nút Thử đăng nhập"]) : ""}
+            ${kind !== "none" ? CFG_AUTH.ui.map(fa).join("") : ""}
+          </div>
+          <div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+            <button data-pauthtest="${i}" ${x._orig ? "" : "disabled"}>Thử đăng nhập</button>
+            <span class="muted" id="cpaSt${i}">${x._orig ? "Thử đăng nhập dùng cấu hình đã lưu — sửa xong bấm Lưu dự án trước" : "Lưu dự án trước"}</span></div>
+          <div class="muted cfg-msg">Tài khoản lấy từ ô <b>Tài khoản / Mật khẩu đăng nhập app</b> trong Server test; OTP cố định (nếu có) đặt ở biến app_otp.</div></details>`; })()}</div>`; }).join("")
     + `<div id="cfgProjAdd" class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <select id="cfgOpProj" style="width:auto;min-width:260px"><option value="">— chọn dự án OpenProject để thêm —</option></select>
         <button id="cfgProjAddBtn">+ Thêm dự án</button><button class="primary" id="cfgProjSave">Lưu dự án</button><span class="muted" id="cfgProjSt"></span></div>
@@ -2711,7 +2772,29 @@ function renderCfgProjects(msg) {
   const sync = () => {
     document.querySelectorAll("#cfgProjs [data-pk]").forEach((el) => { const x = list[+el.dataset.pi]; x[el.dataset.pk] = el.type === "checkbox" ? el.checked : el.value; });
     document.querySelectorAll("#cfgProjs [data-dk]").forEach((el) => { const x = list[+el.dataset.pi]; x.deploy = x.deploy || {}; x.deploy[el.dataset.dk] = el.value.trim(); });
+    document.querySelectorAll("#cfgProjs [data-ak]").forEach((el) => { const x = list[+el.dataset.pi]; x.deploy = x.deploy || {};
+      const au = x.deploy.auth = x.deploy.auth || {}, k = el.dataset.ak;
+      au[k] = el.type === "checkbox" ? el.checked : el.value.trim(); });
   };
+  document.querySelectorAll("#cfgProjs [data-ak=kind]").forEach((el) => el.onchange = () => { sync(); renderCfgProjects(); });
+  document.querySelectorAll("[data-pai]").forEach((b) => b.onclick = async () => { sync(); const i = +b.dataset.pai, x = list[i];
+    if (!x._orig) { toast("Lưu dự án trước", true); return; }
+    if (!(x.repo_labels || []).length) { toast(`Dự án ${x.name} chưa có repo — thêm repo trước`, true); return; }
+    toast("🤖 AI đang đọc source của " + x.name + " (vài phút)…");
+    b.disabled = true; b.textContent = "🤖 AI đang đọc source…";
+    const r = await post({action: "config_project_suggest", project: x._orig}, b);
+    b.disabled = false;
+    if (!r) { renderCfgProjects(); return; }
+    const filled = [];
+    if (r.context) { x.context = r.context; filled.push("bối cảnh dự án"); }
+    x.deploy = x.deploy || {};
+    if (r.auth && r.auth.kind) { x.deploy.auth = {...(x.deploy.auth || {}), ...r.auth}; filled.push("cách đăng nhập"); }
+    if (r.ping_path && !x.deploy.ping_path) { x.deploy.ping_path = r.ping_path; filled.push("đường dẫn kiểm tra sống"); }
+    renderCfgProjects(`<b>🤖 ${esc(x.name)}: AI đã đọc source và điền ${esc(filled.join(", ") || "(không có gì)")}</b> — xem lại (mở các mục Server test / Đăng nhập app), bấm <b>Lưu dự án</b> rồi <b>Thử đăng nhập</b>.${r.notes ? `<div class="muted">AI lưu ý: ${esc(r.notes)}</div>` : ""}`); });
+  document.querySelectorAll("[data-pauthtest]").forEach((b) => b.onclick = async () => { const i = +b.dataset.pauthtest;
+    $("cpaSt" + i).textContent = "Đang thử…";
+    const r = await post({action: "config_auth_test", project: list[i]._orig}, b);
+    $("cpaSt" + i).textContent = r ? r.message : "Không đăng nhập được — xem thông báo lỗi"; });
   CFG.syncProj = sync;
   document.querySelectorAll("[data-pdel]").forEach((b) => b.onclick = () => { sync(); const x = list[+b.dataset.pdel];
     if (confirm(`Bỏ dự án ${x.name}?${(x.repo_labels || []).length ? "\nDanh sách repo của dự án (" + x.repo_labels.join(", ") + ") cũng bị bỏ khi lưu." : ""}`)) { list.splice(+b.dataset.pdel, 1); renderCfgProjects(); } });

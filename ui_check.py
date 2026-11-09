@@ -90,20 +90,38 @@ def fe_base(link=""):
     return fe
 
 
+def ui_auth():
+    """Trang / ô đăng nhập trên giao diện của dự án (Cấu hình → Dự án → Đăng nhập; trống = mặc định kiểu SOAR, hợp
+    với đa số app: ô name=username / email, ô mật khẩu, nút submit)."""
+    a = (envconf.deploy_config().get("auth") or {})
+    return {"path": a.get("ui_login_path") or "/login",
+            "user": a.get("ui_user") or 'input[name="username"], input[name="email"], input[type="email"]',
+            "password": a.get("ui_password") or 'input[type="password"]',
+            "submit": a.get("ui_submit") or 'button[type="submit"]',
+            "none": a.get("kind") == "none"}
+
+
+def on_login(url):
+    return ui_auth()["path"].rstrip("/") in url
+
+
 def state_path(user):
     os.makedirs(envconf.CACHE_DIR, exist_ok=True)
-    return os.path.join(envconf.CACHE_DIR, "ui-%s.json" % re.sub(r"[^\w.-]", "_", user))
+    proj = os.environ.get("OP_PROJECT_KEY") or ""
+    scope = "" if not proj or (envconf.deploy_config().get("auth") or {}).get("kind", "soar") == "soar" else proj + "-"
+    return os.path.join(envconf.CACHE_DIR, "ui-%s%s.json" % (scope, re.sub(r"[^\w.-]", "_", user)))
 
 
 def login(page, fe, user, password, otp):
-    page.goto(fe + "/login", wait_until="networkidle", timeout=60000)
-    page.fill('input[name="username"]', user)
-    page.fill('input[name="password"]', password)
-    page.click('button[type="submit"]')
+    ua = ui_auth()
+    page.goto(fe + ua["path"], wait_until="networkidle", timeout=60000)
+    page.locator(ua["user"]).first.fill(user)
+    page.locator(ua["password"]).first.fill(password)
+    page.locator(ua["submit"]).first.click()
     deadline = time.time() + 30
     while time.time() < deadline:
         page.wait_for_timeout(500)
-        if "/login" not in page.url:
+        if not on_login(page.url):
             return "đăng nhập %s xong" % user
         otp_box = page.query_selector('input[autocomplete="one-time-code"], input[data-input-otp]')
         if otp_box and otp_box.is_visible():
@@ -112,7 +130,7 @@ def login(page, fe, user, password, otp):
             otp_box.click()
             page.keyboard.type(otp, delay=60)
             page.wait_for_timeout(2500)
-            if "/login" not in page.url:
+            if not on_login(page.url):
                 return "đăng nhập %s (OTP) xong" % user
     err = page.query_selector("[role=alert], .text-destructive, [data-sonner-toast], li[role=status]")
     raise RuntimeError("đăng nhập %s không thành công%s" % (user, (": " + err.inner_text()[:200]) if err else ""))
@@ -152,7 +170,7 @@ def same_host(url, fe):
     return urlparse(url).netloc == urlparse(fe).netloc
 
 
-def run_steps(page, fe, steps, out):
+def run_steps(page, fe, steps, out, relogin=None):
     results = []
     t0 = time.time()
     scope = page  # trang chính hoặc iframe (bước "frame")
@@ -171,6 +189,10 @@ def run_steps(page, fe, steps, out):
                 if not same_host(url, fe):
                     raise ValueError("chỉ mở trang trên %s" % fe)
                 page.goto(url, wait_until="networkidle", timeout=60000)
+                if relogin and on_login(page.url) and not on_login(url):
+                    # phiên đã lưu hết hạn (server đổi bản / đăng nhập nơi khác): đăng nhập lại rồi mở lại trang
+                    relogin()
+                    page.goto(url, wait_until="networkidle", timeout=60000)
                 msg = "mở %s → %s" % (url, page.url)
             elif kind == "click":
                 el = scope.locator(str(arg)).first
@@ -278,6 +300,8 @@ def main():
     do_login = True
     if isinstance(steps, dict):
         do_login = steps.get("login", True) is not False
+    if ui_auth()["none"]:  # app không cần đăng nhập (Cấu hình → Dự án → Đăng nhập: không đăng nhập)
+        do_login = False
         steps = steps.get("steps") or []
     ticket = args.ticket
     if not ticket:
@@ -330,8 +354,9 @@ def main():
 
             page.route("**/*", guard)
             page.goto(fe + "/", wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(1500)  # app SPA kiểm tra token rồi mới chuyển về trang đăng nhập
             try:
-                if do_login and "/login" in page.url:
+                if do_login and on_login(page.url):
                     print(login(page, fe, user, password, otp))
                     ctx.storage_state(path=sp)
                     os.chmod(sp, 0o600)
@@ -344,6 +369,7 @@ def main():
                 raise
             return ctx, page, sp, lock
 
+        cred = [user, password, otp]
         try:
             ctx, page, sp, lock = session(user, password, otp)
         except RuntimeError as ex:
@@ -354,10 +380,17 @@ def main():
             dcfg = envconf.deploy_config()
             qa_user, qa_pass = soar_api.credentials(dcfg, None)
             print("%s → thử bằng tài khoản QA %s" % (ex, qa_user))
-            ctx, page, sp, lock = session(qa_user, qa_pass, str(dcfg.get("app_otp") or otp or ""))
-        for line in run_steps(page, fe, steps, out):
+            cred = [qa_user, qa_pass, str(dcfg.get("app_otp") or otp or "")]
+            ctx, page, sp, lock = session(*cred)
+
+        def relogin():
+            print("phiên đã lưu hết hạn → " + login(page, fe, *cred))
+            if sp:
+                ctx.storage_state(path=sp)
+                os.chmod(sp, 0o600)
+        for line in run_steps(page, fe, steps, out, relogin if do_login else None):
             print(line)
-        if sp and "/login" not in page.url:
+        if sp and not on_login(page.url):
             ctx.storage_state(path=sp)
         browser.close()
     print("Ảnh: %s (xem bằng Read)" % out)
