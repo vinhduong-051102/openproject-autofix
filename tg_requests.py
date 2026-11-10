@@ -1481,7 +1481,7 @@ def triage(rid):
 
 
 def _project_text(t):
-    """Tên dự án / tiền tố mã ticket trong prompt lấy từ cấu hình (Cấu hình → Dự án; nhiều dự án thì ghi đủ)."""
+    """Tên dự án / tiền tố mã ticket trong prompt lấy từ cấu hình (tab Dự án; nhiều dự án thì ghi đủ)."""
     try:
         import projects as P
         import op_watch

@@ -77,7 +77,7 @@ def previous_today_section(day):
 
 
 def _project_ids():
-    """Dự án OP của mọi dự án khai báo (Cấu hình → Dự án); chưa khai báo thì dự án cũ."""
+    """Dự án OP của mọi dự án khai báo (tab Dự án); chưa khai báo thì dự án cũ."""
     cfg = envconf._read_json(envconf.CONFIG_PATH)
     ids = [str(p.get("op_project")) for p in cfg.get("projects") or [] if isinstance(p, dict) and p.get("op_project")]
     return ids or [PROJECT]

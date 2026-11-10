@@ -1,7 +1,7 @@
 """
 projects: tool làm việc cho NHIỀU dự án OpenProject — mỗi dự án có repo, server test, quy ước riêng.
 
-Khai báo trong config.json → "projects": [...] (trang theo dõi → Cấu hình → Dự án). Chưa khai báo thì dựng MỘT dự án từ
+Khai báo trong config.json → "projects": [...] (trang theo dõi → tab Dự án). Chưa khai báo thì dựng MỘT dự án từ
 cấu hình cũ (project / OP_TICKET_PREFIX / OP_PROJECT_NAME / autofix.repos / deploy.json) — hành vi như trước.
 
 Mỗi dự án:

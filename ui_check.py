@@ -91,7 +91,7 @@ def fe_base(link=""):
 
 
 def ui_auth():
-    """Trang / ô đăng nhập trên giao diện của dự án (Cấu hình → Dự án → Đăng nhập; trống = mặc định kiểu SOAR, hợp
+    """Trang / ô đăng nhập trên giao diện của dự án (tab Dự án → Đăng nhập; trống = mặc định kiểu SOAR, hợp
     với đa số app: ô name=username / email, ô mật khẩu, nút submit)."""
     a = (envconf.deploy_config().get("auth") or {})
     return {"path": a.get("ui_login_path") or "/login",
@@ -300,7 +300,7 @@ def main():
     do_login = True
     if isinstance(steps, dict):
         do_login = steps.get("login", True) is not False
-    if ui_auth()["none"]:  # app không cần đăng nhập (Cấu hình → Dự án → Đăng nhập: không đăng nhập)
+    if ui_auth()["none"]:  # app không cần đăng nhập (tab Dự án → Đăng nhập: không đăng nhập)
         do_login = False
         steps = steps.get("steps") or []
     ticket = args.ticket

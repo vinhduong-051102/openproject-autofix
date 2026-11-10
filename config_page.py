@@ -343,6 +343,18 @@ def action(body, save_autofix):
         return dict(r, message="AI đã đọc source và điền cấu hình — xem lại rồi bấm Lưu dự án")
     if kind == "config_auth_test":
         return {"message": test_auth(body.get("project"))}
+    if kind == "config_project_remove_plan":
+        import project_remove
+        pl = project_remove.plan(body.get("project"))
+        for x in pl["runs"] + pl["files"]:
+            x["path"] = project_remove._short(x["path"])
+        return dict(pl, message="Xem trước gỡ dự án %s" % pl["name"])
+    if kind == "config_project_remove":
+        import project_remove
+        if (body.get("confirm") or "").strip() != str(body.get("project") or ""):
+            raise ValueError("gõ đúng mã dự án để xác nhận")
+        msg, info = project_remove.remove(body.get("project"), bool(body.get("drop_unpushed")))
+        return dict(info, message=msg + " — bấm Áp dụng để các dịch vụ đọc lại")
     if kind == "config_apply":
         return apply(body.get("changed") or [])
     raise ValueError("thao tác không hợp lệ")

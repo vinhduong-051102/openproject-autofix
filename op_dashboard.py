@@ -107,6 +107,7 @@ def state():
         profs.append({
             "name": p["name"], "config_dir": p["config_dir"], "logged_in": p["logged_in"], "kind": p["kind"],
             "token_tail": af.read_token(p.get("token_file"))[-4:] if p["kind"] == "token" else "",
+            "kv_key": p.get("kv_key") or "",
             "active": p["name"] == active["name"], "block": af.profile_block(root, acfg, p),
             "remaining": af.profile_remaining(root, acfg, p),
             "five_hour": window(info, "five_hour"), "seven_day": window(info, "seven_day"),
@@ -133,7 +134,7 @@ def state():
         "auto_switch": prefs.get("auto_switch", acfg.get("auto_switch", True)), "order_mode": order_mode,
         "limits": {"five_hour": acfg.get("pause_above_utilization"), "seven_day": acfg.get("switch_above_7d"),
                    "followup_7d": acfg.get("followup_skip_above_7d")},
-        "profiles": profs, "runs": active_runs + others[:40], "inbox": inbox_tail(cfg),
+        "profiles": profs, "keyvault": kv_brief(), "runs": active_runs + others[:40], "inbox": inbox_tail(cfg),
         "pending": af.load_pending(root),
         # Lý do hàng chờ chưa chạy được (rỗng = đã có gói còn hạn mức).
         "pending_ready": followup_block(root, acfg),
@@ -537,6 +538,128 @@ def run_file(display_id, label):
     return text[-60000:] if name.endswith(".log") else text[:200000]
 
 
+def _proc_tree(pid):
+    """pid + mọi tiến trình con cháu (đọc /proc: claude, agy, npm, mvn… do lượt chạy mở)."""
+    kids = {}
+    for d in os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                with open("/proc/%s/stat" % d) as f:
+                    ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+                kids.setdefault(ppid, []).append(int(d))
+            except (OSError, ValueError, IndexError):
+                pass
+    out, todo = [], [int(pid)]
+    while todo:
+        p = todo.pop()
+        out.append(p)
+        todo.extend(kids.get(p, []))
+    return out
+
+
+def _running(pid):
+    """Tiến trình còn chạy (zombie — đã chết, chờ cha thu dọn — tính là đã dừng)."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def cancel_run(root, display_id):
+    """Huỷ lượt autofix đang chạy: SIGTERM cả cây tiến trình (con trước), sau 8 giây còn sống thì SIGKILL; đánh dấu
+    trạng thái "cancelled" (không nằm trong ACTIVE_STATES nên --recover không chạy lại). Worktree / commit giữ nguyên —
+    "Chạy lại autofix" để làm lại. Không đụng OpenProject."""
+    s = find_run(root, display_id) or {}
+    if s.get("state") not in ACTIVE_STATES:
+        raise ValueError("%s không có lượt đang chạy" % display_id)
+    if not af.status_alive(s):  # tiến trình đã chết (bị ngắt) — chỉ cần đánh dấu
+        af.set_status(root, display_id, state="cancelled", pid=None, cancelled_from=s.get("state"),
+                      verdict="Đã huỷ (tiến trình đã dừng trước đó) · %s" % (s.get("verdict") or s.get("state")))
+        return "Đã huỷ %s (tiến trình đã dừng trước đó)" % display_id
+    procs = _proc_tree(s["pid"])
+    for p in reversed(procs):  # con cháu trước: Claude / build không bị bỏ lại khi tiến trình cha chết
+        try:
+            os.kill(p, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.time() + 8
+    while time.time() < deadline and any(_running(p) for p in procs):
+        time.sleep(0.3)
+    killed = 0
+    for p in procs:
+        if _running(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+                killed += 1
+            except OSError:
+                pass
+    was = {"queued": "đang xếp hàng", "preparing": "đang chuẩn bị", "running": "đang chạy",
+           "shipping": "đang kiểm tra / push"}.get(s.get("state"), s.get("state"))
+    if s.get("run_dir") and os.path.isdir(s["run_dir"]):  # dọn dẹp giữ lượt này vài ngày (cleanup.recently_cancelled)
+        with open(os.path.join(s["run_dir"], ".cancelled"), "w") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), s.get("state")))
+    af.set_status(root, display_id, state="cancelled", pid=None, cancelled_from=s.get("state"),
+                  verdict="Đã huỷ từ trang theo dõi khi %s%s" % (was, " — có thể đã push một phần, kiểm tra nhánh"
+                                                                  if s.get("state") == "shipping" else ""))
+    af.inbox(load()[0], "**AUTOFIX HUỶ** %s — huỷ từ trang theo dõi khi %s (worktree giữ nguyên: %s)" % (
+        display_id, was, s.get("run_dir") or "?"))
+    return "Đã huỷ %s (%d tiến trình%s)" % (display_id, len(procs), ", %d phải buộc dừng" % killed if killed else "")
+
+
+def run_wip(root, acfg, display_id):
+    """Tóm tắt phần sửa dở của lượt mới nhất (cho lượt đã huỷ / bị ngắt): mỗi repo — file đổi chưa commit, file mới,
+    commit chưa push; có báo cáo chưa. Dùng để chọn "Làm tiếp" hay "Chạy lại"."""
+    import repos as R
+    s = find_run(root, display_id) or {}
+    run_dir = s.get("run_dir") or ""
+    if not run_dir or not os.path.isdir(run_dir):
+        return {"exists": False, "repos": [], "message": "không còn thư mục lượt chạy"}
+    sacfg = af.ticket_acfg(acfg, display_id)
+    out = []
+    for r, d in R.trees(sacfg, run_dir):
+        if not os.path.isdir(d):
+            continue
+        st = subprocess.run(["git", "-C", d, "status", "--porcelain"], stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, universal_newlines=True).stdout.splitlines()
+        log = subprocess.run(["git", "-C", d, "log", "--no-merges", "--format=%h %s", "HEAD", "--not", "--remotes"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True).stdout.splitlines()
+        stat = subprocess.run(["git", "-C", d, "diff", "--shortstat", "HEAD"], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, universal_newlines=True).stdout.strip()
+        out.append({"repo": r["label"], "changed": [l[3:] for l in st if not l.startswith("??")][:30],
+                    "new": [l[3:] for l in st if l.startswith("??")][:30], "commits": log[:10], "stat": stat})
+    report = os.path.join(run_dir, "report.md")
+    done = af.report_done(report) if os.path.exists(report) else False
+    can_resume = os.path.exists(os.path.join(run_dir, "prompt.md")) and bool(out)
+    return {"exists": True, "run_name": os.path.basename(run_dir), "repos": out, "report_done": done,
+            "can_resume": can_resume, "cancelled_from": s.get("cancelled_from") or "",
+            "dirty": any(x["changed"] or x["new"] for x in out), "unpushed": any(x["commits"] for x in out)}
+
+
+def resume_run(root, acfg, display_id, profile_args, force):
+    """Làm tiếp lượt đã huỷ / bị ngắt trên đúng worktree cũ (--resume): Claude xem git status / log rồi làm tiếp."""
+    s = find_run(root, display_id) or {}
+    if s.get("state") in ACTIVE_STATES and af.status_alive(s):
+        raise ValueError("%s đang chạy" % display_id)
+    if s.get("state") not in ("cancelled", "stale") and not (s.get("state") in ACTIVE_STATES):
+        raise ValueError("chỉ làm tiếp được lượt đã huỷ / bị ngắt")
+    run_name = s.get("run_name") or os.path.basename(s.get("run_dir") or "")
+    if s.get("event") == "ASSIST":
+        argv, what = ["--assist", run_name], "Claude hỗ trợ tiếp"
+    else:
+        plan_s = dict(s, state=s.get("cancelled_from") or "running")
+        argv, what = af.recover_plan(op_api()[0], root, af.ticket_acfg(acfg, display_id), plan_s)
+    if not argv:
+        raise ValueError("không làm tiếp được: %s" % what)
+    if "--resume" not in argv and argv[:1] == ["--wp"]:
+        raise ValueError("không làm tiếp được (thiếu worktree / prompt của lượt cũ) — dùng Chạy lại autofix")
+    spawn(argv + profile_args + force, display_id)
+    mark = os.path.join(s.get("run_dir") or "", ".cancelled")
+    if os.path.exists(mark):
+        os.remove(mark)  # đang làm tiếp: không cần giữ riêng nữa (dọn dẹp theo luật thường)
+    return "Đang làm tiếp %s — %s" % (display_id, what)
+
+
 def spawn(args, tag):
     _, _, root = load()
     log_path = os.path.join(root, ".dashboard-%s.log" % tag)
@@ -570,8 +693,180 @@ def profile_entries(acfg, drop=None):
     out = []
     for p in (acfg.get("profiles") or af.AUTOFIX_DEFAULTS["profiles"]):
         if p["name"] != drop:
-            out.append({k: v for k, v in p.items() if k in ("name", "config_dir", "token_file", "limits")})
+            out.append({k: v for k, v in p.items() if k in ("name", "config_dir", "token_file", "limits", "kv_key")})
     return out
+
+
+def kv_fetch_profile(name, key_id, otp, new=False, test=True):
+    """Lấy token Claude từ KeyVault (key_id + OTP) → ghi token cho gói `name` (new=True: thêm gói mới). Nhớ key_id
+    của gói để lần sau chỉ cần nhập OTP. Token không trả về trang."""
+    import keyvault
+    _, acfg, _ = load()
+    prof = next((p for p in af.profiles(acfg) if p["name"] == name), None)
+    name = (name or "").strip()
+    if new:
+        if not name or prof:
+            raise ValueError("cần tên gói mới (chưa dùng)")
+    elif not prof:
+        raise ValueError("không có gói %s" % name)
+    key_id = (key_id or (prof or {}).get("kv_key") or "").strip()
+    try:
+        token = keyvault.fetch_text(key_id, otp)
+    except keyvault.KVError as ex:
+        raise ValueError(str(ex))
+    if not re.match(r"^sk-ant-[A-Za-z0-9_-]{20,}$", token):
+        raise ValueError("key này không phải token Claude (sk-ant-…) — không ghi vào gói")
+    if test:  # thử trước: key hỏng thì giữ nguyên gói cũ
+        ok, usage, detail = probe_token(token)
+        if not ok:
+            raise ValueError("token lấy từ KeyVault KHÔNG dùng được (%s) — giữ nguyên gói %s" % (str(detail)[:200], name))
+    path = write_token(name, token)
+    entries = profile_entries(acfg)
+    if new:
+        entries.append({"name": name, "token_file": path, "kv_key": key_id})
+    else:
+        for e in entries:
+            if e["name"] == name:  # gói thư mục đăng nhập → gói token KeyVault (thư mục đăng nhập để nguyên)
+                e.pop("config_dir", None)
+                e.update(token_file=path, kv_key=key_id)
+    save_profiles(entries)
+    return "Đã lấy token từ KeyVault cho %s (…%s)%s" % (name, token[-4:], " — dùng được · " + usage if test and usage else "")
+
+
+def kv_drop_others():
+    """Bỏ mọi gói không lấy token từ KeyVault. Token cũ do trang lưu → chuyển vào tokens/.backup-<giờ>/ (không xoá
+    hẳn); thư mục đăng nhập (~/.claude…) để nguyên."""
+    _, acfg, _ = load()
+    profs = af.profiles(acfg)
+    keep = [p for p in profs if p.get("kv_key")]
+    gone = [p for p in profs if not p.get("kv_key")]
+    if not keep:
+        raise ValueError("chưa có gói nào lấy từ KeyVault — lấy token cho ít nhất một gói trước")
+    if not gone:
+        return "Mọi gói đều đã lấy từ KeyVault"
+    keep_names = {p["name"] for p in keep}
+    save_profiles([e for e in profile_entries(acfg) if e["name"] in keep_names])
+    backup = os.path.join(TOKEN_DIR, ".backup-" + time.strftime("%y%m%d-%H%M"))
+    moved = 0
+    for p in gone:
+        tf = p.get("token_file") or ""
+        if tf.startswith(TOKEN_DIR + os.sep) and os.path.exists(tf) and not any(k.get("token_file") == tf for k in keep):
+            os.makedirs(backup, mode=0o700, exist_ok=True)
+            os.replace(tf, os.path.join(backup, os.path.basename(tf)))
+            moved += 1
+    return "Đã bỏ %s%s" % (", ".join(p["name"] for p in gone),
+                           " · token cũ chuyển vào %s" % backup.replace(os.path.expanduser("~"), "~") if moved else "")
+
+
+def kv_test_key(key_id, otp):
+    """Lấy key từ KeyVault (OTP), thử gọi Claude một câu ngắn bằng token đó — KHÔNG ghi vào gói nào. Báo: dùng được
+    không, hạn mức, và trùng token của gói nào đang có."""
+    import shutil
+    import tempfile
+    import keyvault
+    _, acfg, root = load()
+    try:
+        token = keyvault.fetch_text(key_id, otp)
+    except keyvault.KVError as ex:
+        raise ValueError(str(ex))
+    name = next((k["name"] for k in keyvault.load_state().get("keys") or [] if k.get("id") == key_id), key_id)
+    same = [p["name"] for p in af.profiles(acfg) if p["kind"] == "token" and af.read_token(p.get("token_file")) == token]
+    res = {"key_id": key_id, "key_name": name, "tail": token[-4:], "same_as": same, "ok": False}
+    if not re.match(r"^sk-ant-[A-Za-z0-9_-]{20,}$", token):
+        res["message"] = "%s: không phải token Claude (sk-ant-…)" % name
+        return res
+    ok, usage, detail = probe_token(token)
+    res.update(ok=ok, usage=usage)
+    res["message"] = "%s (…%s): %s%s%s" % (
+        name, token[-4:], "DÙNG ĐƯỢC" if ok else "KHÔNG dùng được — " + str(detail)[:300],
+        " · " + usage if usage else "", " · trùng token gói " + ", ".join(same) if same else "")
+    return res
+
+
+def probe_token(token):
+    """Gọi Claude một câu ngắn bằng token (file tạm, xoá ngay). Trả (dùng được, dòng hạn mức, lý do lỗi)."""
+    import shutil
+    import tempfile
+    _, acfg, _ = load()
+    tmp = tempfile.mkdtemp(prefix="kvtest-")
+    try:
+        tf = os.path.join(tmp, "token")
+        fd = os.open(tf, os.O_WRONLY | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+        sub = dict(acfg)
+        af.use_profile(sub, {"name": "kvtest", "config_dir": os.path.expanduser("~/.claude"), "token_file": tf})
+        out = os.path.join(tmp, "out.jsonl")
+        with open(out, "w", encoding="utf-8") as o:
+            code = subprocess.run([acfg["claude"], "-p", "Trả lời đúng một chữ: ok", "--output-format", "stream-json",
+                                   "--verbose", "--tools", ""], cwd=tmp, stdout=o, stderr=subprocess.STDOUT,
+                                  stdin=subprocess.DEVNULL, env=af.build_env(sub), timeout=180).returncode
+        text = open(out, encoding="utf-8", errors="replace").read()
+        result, info = None, None
+        for line in text.splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") == "result":
+                result = e
+            elif e.get("type") == "rate_limit_event":
+                info = e.get("rate_limit_info") or {}
+        err = (result or {}).get("is_error") or code != 0
+        why = af.disabled_reason(text[-20000:])
+        detail = (why or (result or {}).get("result") or (text.strip().splitlines() or [""])[-1]) if err else ""
+        return not err, af.usage_line(info) if info else "", detail
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def kv_brief():
+    try:
+        import keyvault
+        return keyvault.summary()
+    except Exception as ex:  # noqa: BLE001 — thiếu thư viện / file hỏng: trang vẫn chạy
+        return {"stage": "error", "error": str(ex)}
+
+
+def kv_action(body):
+    """Thao tác KeyVault từ trang (action kv_*)."""
+    import keyvault as K
+    kind = body.get("action")
+    try:
+        if kind == "kv_state":
+            return K.summary()
+        if kind == "kv_server":
+            return "Địa chỉ KeyVault: %s" % K.set_server(body.get("server"))
+        if kind == "kv_request":
+            return K.request(body.get("name"), body.get("contact"), body.get("reason"), body.get("organization"),
+                             body.get("requested_keys"), body.get("server"))
+        if kind == "kv_status":
+            sm = K.refresh_status()
+            return dict(sm, message={"pending": "Đang chờ duyệt", "approved": "Đã duyệt — bấm Nhận thông tin",
+                                     "rejected": "Bị từ chối", "claimed_elsewhere": "Thông tin đã được nhận ở nơi khác"
+                                     }.get(sm["stage"], "Đã cập nhật"))
+        if kind == "kv_claim":
+            return dict(K.claim(), message="Đã nhận API key — thêm secret vào Google Authenticator rồi nhập OTP")
+        if kind == "kv_activate":
+            return K.activate(body.get("otp"))
+        if kind == "kv_import":
+            return K.import_key(body.get("api_key"), body.get("private_key"), body.get("server"))
+        if kind == "kv_pubkey":
+            return {"public_key": K.ensure_key(), "message": "Public key của máy này"}
+        if kind == "kv_keys":
+            ks = K.keys()
+            return {"keys": ks, "message": "%d key được cấp" % len(ks)}
+        if kind == "kv_test":
+            return kv_test_key(body.get("key_id"), body.get("otp"))
+        if kind == "kv_drop_others":
+            return kv_drop_others()
+        if kind == "kv_reset":
+            return K.reset()
+        if kind == "kv_fetch":
+            return kv_fetch_profile(body.get("name"), body.get("key_id"), body.get("otp"), bool(body.get("new")))
+    except K.KVError as ex:
+        raise ValueError(str(ex))
+    raise ValueError("thao tác KeyVault không rõ: %s" % kind)
 
 
 def save_profiles(new_list):
@@ -652,6 +947,8 @@ def action(body):
     if str(kind).startswith("config_"):  # trang Cấu hình
         import config_page
         return config_page.action(body, save_autofix)
+    if str(kind).startswith("kv_"):  # lấy token Claude từ KeyVault
+        return kv_action(body)
     if str(kind).startswith("tg_"):  # yêu cầu tester qua Telegram
         import tg_requests
         return tg_requests.action(body)
@@ -928,6 +1225,21 @@ def action(body):
         spawn(["--assist", run_name] + (["--note", note] if note else []) + extra + force, display_id)
         return "Claude đang hỗ trợ %s (tải file đính kèm, ticket liên quan, GET API server test)%s" % (
             display_id, " · có ghi chú" if note else "")
+    if kind in ("run_wip", "resume_run"):
+        display_id = body.get("display_id") or ""
+        if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):
+            raise ValueError("mã ticket không hợp lệ")
+        if kind == "run_wip":
+            return run_wip(root, acfg, display_id)
+        prof, why = af.choose_profile(root, acfg, body.get("profile"))
+        if prof is None:
+            raise ValueError("không có gói dùng được: " + why + ("" if force else " — tick \"Bỏ qua ngưỡng\" để chạy"))
+        return resume_run(root, acfg, display_id, ["--profile", body["profile"]] if body.get("profile") in names else [], force)
+    if kind == "cancel_run":
+        display_id = body.get("display_id") or ""
+        if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):
+            raise ValueError("mã ticket không hợp lệ")
+        return cancel_run(root, display_id)
     if kind in ("rerun", "review"):
         display_id = body.get("display_id") or ""
         if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):
@@ -984,6 +1296,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, state())
             if url.path == "/api/events":
                 return self.send(200, run_events(q.get("id", ""), int(q.get("from", "0"))))
+            if url.path == "/api/stats":
+                import stats
+                return self.send(200, stats.get(int(q.get("days", "30") or 30), "all" if q.get("scope") == "all" else "mine",
+                                                q.get("project", ""), q.get("refresh") == "1"))
             if url.path == "/api/joblog":
                 return self.send(200, {"text": job_log(q.get("key", ""))})
             if url.path == "/api/op":

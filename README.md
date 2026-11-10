@@ -57,13 +57,13 @@ cạnh nó nên service không cần `EnvironmentFile`. Sửa `.env` xong: `syst
 Lần chạy đầu chỉ ghi mốc các việc đang có (không báo); dùng `--notify-existing` để báo cả các việc đó.
 Trạng thái lưu ở `OP_WATCH_STATE` (mặc định `~/.local/state/op-watch/state.json`; `--reset` để xoá).
 
-## Nhiều dự án (projects.py — Cấu hình → Dự án)
+## Nhiều dự án (projects.py — tab Dự án)
 
 Tool làm được cho nhiều dự án OpenProject cùng lúc; mỗi dự án có repo, server test, quy ước riêng. Chưa khai báo thì
 dùng MỘT dự án dựng từ cấu hình cũ (`OP_PROJECT`, `OP_TICKET_PREFIX`, `OP_PROJECT_NAME`, danh sách repo, `deploy.json`)
 — chạy như trước.
 
-Thêm dự án: trang theo dõi → **Cấu hình → Dự án** → chọn dự án OpenProject → **+ Thêm dự án** (tự đọc tên + tiền tố mã
+Thêm dự án: trang theo dõi → **tab Dự án** → chọn dự án OpenProject → **+ Thêm dự án** (tự đọc tên + tiền tố mã
 ticket) → điền bối cảnh, server test → **Lưu dự án** → bấm **Repo ↓** để thêm repo cho dự án (chọn thư mục, AI điền)
 → **⟳ Áp dụng**. Lần lưu đầu, repo hiện có chuyển vào dự án đầu tiên (`config.json` → `projects`, sao lưu `.bak-*`).
 
@@ -115,6 +115,14 @@ op-watch gọi `op_autofix.py` (cấu hình `on_change`) cho mỗi sự kiện. 
    - giới hạn chi phí `max_budget_usd` (mặc định 5 USD / lượt).
 5. Claude ghi `report.md` (dòng đầu `KẾT QUẢ: ĐÃ SỬA | CẦN QUYẾT ĐỊNH | KHÔNG SỬA ĐƯỢC`, nguyên nhân, commit,
    kiểm tra, đề xuất comment). Script thêm dòng `AUTOFIX` vào inbox + thông báo desktop.
+6. Ticket dạng **câu hỏi** ("kiểm tra / làm rõ chức năng X làm gì", không nêu lỗi kèm kết quả mong đợi cụ thể) có
+   kết quả `KẾT QUẢ: GIẢI ĐÁP`:
+   - Claude đọc code để trả lời, không sửa và không commit.
+   - Script comment **[Autofix] Giải đáp**: hành vi thực tế từng trường hợp, kèm **Đề xuất** nếu thấy nên đổi. Sau đó
+     chuyển ticket sang `answer_status_id` (mặc định 96 = FEEDBACK, không nằm trong trạng thái theo dõi nên không chạy
+     lại). Đặt `null` thì chỉ comment.
+   - Không deploy, không chạy Gemini. Lỡ có commit thì để lại trong worktree, không push.
+   - Muốn làm theo đề xuất: comment chọn phương án rồi chuyển **Reopened**, autofix sẽ sửa đúng phương án đó.
 
 **Không bao giờ** tự push hay chuyển Resolved — bạn xem `report.md` + commit, rồi bảo Claude (phiên tương tác) đưa
 commit lên nhánh của mình, push và chuyển Resolved.
@@ -145,6 +153,54 @@ python3 op_autofix.py --follow SOAR-2789  # theo dõi / xem lại lượt của 
 
 Trạng thái mỗi ticket: `~/autofix/.status/<SOAR-xxxx>.json` (`queued` → `preparing` → `running` → `done` | `error` | `paused`).
 Luồng thao tác đầy đủ của Claude: `<thư mục lượt>/claude.jsonl`.
+
+### Huỷ lượt đang chạy
+Trên trang theo dõi có 2 chỗ huỷ lượt autofix đang chạy (cả lượt test lại / Claude hỗ trợ):
+- nút **■ Huỷ chạy** trong chi tiết lượt;
+- nút ■ nhỏ ở dòng hoạt động.
+
+Khi huỷ:
+- Tool dừng cả cây tiến trình (Claude, Gemini, build…): gửi SIGTERM, sau 8 giây còn sống thì SIGKILL.
+- Lượt chuyển trạng thái **Đã huỷ** và không bị `--recover` chạy lại.
+- Worktree và commit giữ nguyên, không đổi gì trên OpenProject. Muốn làm lại thì bấm "Chạy lại autofix".
+- Huỷ khi đang kiểm tra / push thì có thể đã push một phần, nên trang sẽ cảnh báo trước.
+- Chi tiết lượt đã huỷ hoặc bị ngắt có ô **Phần sửa dở**: file chưa commit, file mới, commit chưa push, báo cáo
+  đã có chưa, kèm gợi ý nên làm tiếp hay chạy lại.
+- **▶ Làm tiếp**: chạy `--resume` trên đúng worktree cũ, Claude xem phần đã sửa rồi làm tiếp. Đã có báo cáo thì đi
+  tiếp bước kiểm tra / giao. **Chạy lại autofix**: lượt mới từ code mới nhất, bỏ phần dở.
+- Dọn dẹp (`cleanup.py`) không xoá lượt:
+  - còn commit chưa push;
+  - còn thay đổi chưa commit (kể cả file mới);
+  - vừa huỷ trong `CLEANUP_KEEP_CANCELLED_DAYS` ngày (mặc định 3, đánh dấu bằng file `.cancelled` trong thư mục lượt).
+
+### Gỡ dự án (tab Dự án → "Gỡ dự án…", hoặc `python3 project_remove.py <mã> [--yes]`)
+Trang hiện danh sách sẽ xoá trước, phải gõ đúng mã dự án mới xoá được. Những thứ bị xoá:
+- cấu hình dự án (config.json được sao lưu trước khi ghi);
+- lượt autofix / QA của ticket `<PREFIX>-n`: thư mục, worktree, nhánh `auto/…`;
+- trạng thái, hàng chờ xem lại, khoá / log, log deploy;
+- thư mục build deploy và mốc deploy của repo dự án (repo dùng chung với dự án khác thì giữ);
+- lịch sử / hàng chờ QA, báo cáo tổng hợp;
+- token / phiên đăng nhập app của dự án (trừ dự án kiểu SOAR, vì dùng chung file);
+- chat Telegram gán cho dự án thì chuyển về dự án mặc định.
+
+Lượt còn commit chưa push được giữ lại, trừ khi tick xoá (`--drop-unpushed`). Không gỡ được khi dự án còn lượt đang
+chạy, và không gỡ được dự án cuối cùng. Giữ nguyên: thư mục repo, nhánh trên remote, OpenProject, dòng inbox cũ.
+
+### Thống kê (tab "Thống kê", `stats.py`)
+Số liệu lấy từ lịch sử đổi trạng thái trên OpenProject, gồm các ticket có cập nhật trong 7 / 30 / 90 ngày. Lọc được
+"Của tôi" hoặc "Cả dự án", và theo dự án.
+- **Hoàn thành**: chuyển sang Resolved / Done / Closed. Lần hoàn thành có comment `[Autofix]` trong ±10 phút được
+  tính là autofix.
+- **Bị reopen**: chuyển sang Reopened.
+- **Tỉ lệ reopen**: số ticket hoàn thành trong khoảng rồi bị reopen, chia cho số ticket hoàn thành.
+- **Trả lại nội bộ**: từ hoàn thành về UNREVIEWED / TO DO / Review…, thường do QA trên server trượt hoặc chờ Claude
+  xem lại. Tách riêng, không tính là reopen.
+
+Trang gồm biểu đồ theo ngày (có dạng bảng), danh sách ticket bị reopen (nhiều lần nhất trước), danh sách hoàn thành,
+danh sách trả lại nội bộ, và số liệu theo người / dự án. Bấm mã ticket để xem chi tiết.
+
+Activities được cache ở `~/.cache/op-watch/stats-activities.json` theo `updatedAt`, nên chỉ tải lại ticket có thay
+đổi. Kết quả cache 10 phút; nút ↻ để tải lại. Dòng lệnh: `python3 stats.py --days 30 --scope mine|all [--project <mã>]`.
 
 ### Hạn mức gói
 
@@ -233,6 +289,29 @@ Thêm gói (trên trang theo dõi, mục "+ Thêm gói"):
   `~/.config/op-watch/tokens/<tên>` (quyền 600); config chỉ ghi `{"name", "token_file"}`. Lượt chạy bằng gói này đặt
   `CLAUDE_CODE_OAUTH_TOKEN`, vẫn dùng thư mục cấu hình mặc định (~/.claude). Token hết hạn → nút "Đổi token".
 - **Thư mục đăng nhập:** `{"name", "config_dir"}`, rồi `CLAUDE_CONFIG_DIR=~/.claude-b claude` và gõ `/login`.
+- **Lấy từ KeyVault** (`keyvault.py`, theo [HUONG_DAN_LAY_KEY.md](https://github.com/vinhduong-051102/key_store/blob/main/HUONG_DAN_LAY_KEY.md)):
+  token Claude cất trong KeyVault, mỗi lần lấy cần API key + mã OTP Google Authenticator, giải mã tại máy
+  (X25519 + HKDF-SHA256 + AES-256-GCM). Đăng ký một lần ở ô **KeyVault** (dưới danh sách gói):
+  - Cách A: gửi yêu cầu (cặp khoá sinh trên máy này), chờ quản trị viên duyệt, rồi "Nhận thông tin". Thêm secret
+    vào Google Authenticator, nhập OTP để kích hoạt.
+  - Cách B: quản trị viên đăng ký giúp. Gửi họ public key ("Hiện public key"), nhận lại API key rồi dán vào.
+
+  Sau đó dùng nút **Lấy từ KeyVault** ở gói, hoặc "+ Thêm gói → Lấy từ KeyVault": chọn key, nhập OTP. Gói nhớ key
+  đã chọn (`kv_key`), nên lần sau chỉ cần OTP.
+
+  Lưu ở `~/.config/op-watch/`, quyền 600: `keyvault.json` (API key, request) và `keyvault-recipient.key`
+  (private key). Máy chủ mặc định là `http://100.112.133.34:8000`; đổi bằng `KV_SERVER` hoặc `"keyvault": {"server": …}`
+  trong config. http chỉ được phép với Tailscale, mạng nội bộ hoặc localhost.
+
+  **Chuyển hết sang KeyVault** (KeyVault → Quản lý):
+  1. Mỗi key chọn gói nhận, rồi bấm "Lấy & dùng". Token được thử gọi Claude trước, key hỏng thì gói giữ nguyên.
+     Gói thư mục đăng nhập sẽ chuyển thành gói token; thư mục để nguyên.
+  2. Bấm "Bỏ N gói không từ KeyVault". Token cũ chuyển vào `tokens/.backup-<giờ>/`.
+
+  Kiểm tra một key mà không lưu vào gói: nút "Kiểm tra", hoặc `python3 keyvault.py test --key-id <id> --otp <mã>`.
+
+  Dòng lệnh: `python3 keyvault.py request|status|claim|activate|import|pubkey|keys|test|reset`, và
+  `python3 keyvault.py fetch --key-id <id> --profile "Gói của Dũng"` (hỏi OTP, ghi token cho gói).
 
 - Gói đang dùng lưu ở `~/autofix/.profile.json` (chọn trên trang, hoặc `--profile <tên>` cho một lượt).
 - Tự chuyển gói (`auto_switch`, bật mặc định): trước mỗi lượt, gói đang dùng có 5 giờ ≥ `pause_above_utilization`

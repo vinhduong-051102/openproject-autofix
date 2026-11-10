@@ -2030,7 +2030,7 @@ def entered_status_after(api, wp, at_local):
 def deploy_only(cfg, acfg, dcfg, dry_run=False, qa_requested=False):
     """Dự án không QA tự động: chỉ deploy các repo có commit mới (deploy "command" / fe-bundle / be-image)."""
     if qa_requested:
-        log("dự án %s chưa bật QA tự động (Cấu hình → Dự án) — bỏ qua QA" % P.current(acfg)["name"])
+        log("dự án %s chưa bật QA tự động (tab Dự án) — bỏ qua QA" % P.current(acfg)["name"])
         return
     root = os.path.expanduser(acfg["root"])
     os.makedirs(root, exist_ok=True)
@@ -2341,7 +2341,7 @@ def main():
                         help="chỉ IN các lệnh rollout (bluegreen / service / recreate) sẽ chạy trên server cho FE/BE "
                              "(mặc định cả hai) với image giả định — không ssh, không build, không đổi gì")
     parser.add_argument("--strategy", choices=STRATEGIES, help="cùng --rollout-plan: thử cách khác DEPLOY_STRATEGY")
-    parser.add_argument("--project", help="chỉ deploy / QA dự án này (mã hoặc tiền tố, xem Cấu hình → Dự án)")
+    parser.add_argument("--project", help="chỉ deploy / QA dự án này (mã hoặc tiền tố, xem tab Dự án)")
     parser.add_argument("--destructive", action="store_true",
                         help="cùng --rollout-plan: giả định BE có migration phá cấu trúc")
     args = parser.parse_args()

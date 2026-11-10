@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 soar_api: gọi API / tải file của server test của dự án (DEPLOY_FE_URL / DEPLOY_API_URL, hoặc Server test của dự án
-trong Cấu hình → Dự án; dự án lấy theo biến OP_PROJECT_KEY) cho QA tự động / Claude hỗ trợ.
+trong tab Dự án; dự án lấy theo biến OP_PROJECT_KEY) cho QA tự động / Claude hỗ trợ.
 
-Cách đăng nhập theo "auth" của dự án (Cấu hình → Dự án → Đăng nhập):
+Cách đăng nhập theo "auth" của dự án (tab Dự án → Đăng nhập):
   kind "soar"   (mặc định) POST /api/v2/auth/login rồi /api/v2/auth/validate-otp (app_otp) → data.access_token
   kind "json"   POST login_path với login_body (mẫu JSON, {user} {password} {otp}); otp_path / otp_body nếu có bước
                 OTP; token lấy theo token_path (vd data.access_token; trống = tự tìm access_token / token / jwt…),
@@ -113,7 +113,7 @@ def credentials(cfg, name, password=None):
     """(username, password): tài khoản trong deploy.json; tài khoản test QA_AUTO_*; hoặc tài khoản tester ghi trong ticket
     (nằm trong qa_ticket_accounts) — hai loại sau: mật khẩu truyền --password lần đầu, tool nhớ."""
     if not cfg.get("accounts") and not cfg.get("app_user"):
-        sys.exit("Chưa có tài khoản đăng nhập app (Cấu hình → Dự án → Server test → Tài khoản đăng nhập app)")
+        sys.exit("Chưa có tài khoản đăng nhập app (tab Dự án → Server test → Tài khoản đăng nhập app)")
     accounts = cfg.get("accounts") or {cfg["app_user"]: {"password": cfg.get("app_password") or ""}}
     name = name or cfg.get("default_account") or cfg["app_user"]
     if name in accounts:
@@ -251,7 +251,7 @@ def login(cfg, user, password):
     a = auth_cfg(cfg)
     if a["kind"] == "static":
         if not a.get("token"):
-            sys.exit("Dự án dùng token cố định nhưng chưa nhập token (Cấu hình → Dự án → Đăng nhập)")
+            sys.exit("Dự án dùng token cố định nhưng chưa nhập token (tab Dự án → Đăng nhập)")
         return a["token"]
     if a["kind"] == "none":
         return ""

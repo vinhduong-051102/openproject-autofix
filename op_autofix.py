@@ -128,6 +128,11 @@ AUTOFIX_DEFAULTS = {
     # mới chuyển UNREVIEWED. Trang theo dõi có nút chạy lại bước này kèm ghi chú (op_autofix.py --assist RUN).
     "assist_auto": True,
     "assist_max_related": 8,
+    # Ticket dạng CÂU HỎI / "kiểm tra, làm rõ chức năng" (không nêu lỗi cụ thể): Claude đọc code trả lời, KHÔNG sửa
+    # code (KẾT QUẢ: GIẢI ĐÁP) → comment câu trả lời + đề xuất (nếu có) lên ticket, chuyển trạng thái này
+    # (96 = FEEDBACK, không nằm trong trạng thái theo dõi nên autofix không chạy lại). null = chỉ comment.
+    # Muốn làm theo đề xuất: comment chọn phương án rồi chuyển Reopened → autofix làm đúng phương án đó.
+    "answer_status_id": 96,
 }
 
 ALLOWED_TOOLS = [
@@ -162,6 +167,14 @@ khoảng cách, màu, font) — dùng token / biến có sẵn của dự án g�
 Nếu đã có comment **[Cần duyệt]** (autofix lần trước nêu các phương án) và SAU đó có comment của {assignee}
 (người được giao) chọn phương án / đưa hướng xử lý, thì đó là QUYẾT ĐỊNH ĐÃ DUYỆT: làm đúng theo quyết định đó, không
 hỏi lại, không kết luận "CẦN QUYẾT ĐỊNH" cho cùng vấn đề nữa (chỉ khi quyết định đó tự nó gây vấn đề mới).
+
+Ticket dạng CÂU HỎI — chỉ hỏi / nhờ "kiểm tra", "làm rõ", "giải thích" chức năng chạy thế nào, KHÔNG nêu một hành vi sai
+cụ thể kèm kết quả mong đợi cụ thể (vd kết quả mong đợi là "cần làm rõ chức năng X làm gì", "kiểm tra gợi ý có đúng
+không") → KHÔNG sửa code, KHÔNG commit: đọc code trả lời, report.md dòng đầu `KẾT QUẢ: GIẢI ĐÁP` (xem phần Báo cáo).
+Đọc code thấy có điểm nên đổi (chữ / gợi ý gây hiểu nhầm, hành vi thiếu…) thì chỉ ĐỀ XUẤT, không tự làm. Ticket nêu
+rõ lỗi + kết quả mong đợi cụ thể thì là bug → sửa như thường, kể cả khi tiêu đề có chữ "kiểm tra".
+Đã có comment **[Autofix] Giải đáp** và SAU đó có comment chọn đề xuất / yêu cầu sửa (ticket Reopened) → đó là
+QUYẾT ĐỊNH: làm theo như bug thường, không giải đáp lại.
 
 ## Code (đã sẵn sàng, đã merge code mới nhất của nhánh dev chung){merge_note}
 {code_repos}
@@ -198,7 +211,12 @@ Chỉ sửa trong {n_repos} thư mục này. Không tạo nhánh / worktree khá
 
 ## Báo cáo (bắt buộc, kể cả khi không sửa được)
 Ghi {run_dir}/report.md bằng tiếng Việt:
-- Dòng đầu: `KẾT QUẢ: ĐÃ SỬA` | `KẾT QUẢ: CẦN QUYẾT ĐỊNH` | `KẾT QUẢ: KHÔNG SỬA ĐƯỢC` (| `KẾT QUẢ: QA SAI` | `KẾT QUẢ: CẦN TEST TAY` khi có mục QA bên dưới)
+- Dòng đầu: `KẾT QUẢ: ĐÃ SỬA` | `KẾT QUẢ: CẦN QUYẾT ĐỊNH` | `KẾT QUẢ: KHÔNG SỬA ĐƯỢC` | `KẾT QUẢ: GIẢI ĐÁP` (| `KẾT QUẢ: QA SAI` | `KẾT QUẢ: CẦN TEST TAY` khi có mục QA bên dưới)
+- `KẾT QUẢ: GIẢI ĐÁP` (ticket dạng câu hỏi, không commit): `## Comment cho tester` là CÂU TRẢ LỜI — chức năng làm gì,
+  hành vi thực tế từng trường hợp ticket hỏi (dạng bảng / gạch đầu dòng: thao tác → kết quả nhìn thấy, cả trường hợp
+  không làm gì), theo màn hình, không tên file / hàm. Có điểm nên đổi thì thêm `## Đề xuất` — các phương án đánh số
+  (mỗi phương án: đổi gì, ảnh hưởng), không có thì bỏ mục này. Các mục Nguyên nhân / Đã sửa / Commit / hồi quy ghi
+  "Không (ticket dạng câu hỏi)".
 - Nguyên nhân; Đã sửa (file, cách sửa); Commit (repo + hash); Kiểm tra (lệnh + kết quả thật);
   `## Kiểm tra hồi quy` — các chỗ dùng đã rà (file / màn hình / API → còn đúng / đã sửa theo / cần quyết định) và test
   đã chạy cho phần bị ảnh hưởng (lệnh + kết quả);
@@ -1419,6 +1437,22 @@ def report_qa_wrong(api, wp_id, display_id, report_text, run_name):
     return "đã comment cách test đúng%s, QA lại ở lượt kế tiếp" % (", thêm %d rule QA" % n if n else "")
 
 
+def report_answer(api, acfg, wp_id, report_text, run_name, has_fix=False):
+    """GIẢI ĐÁP (ticket dạng câu hỏi): comment câu trả lời + đề xuất, chuyển answer_status_id (mặc định FEEDBACK).
+    Không push gì (lỡ có commit thì để lại worktree, ghi chú)."""
+    body = tester_body(report_text, "Comment cho tester") or "Xem báo cáo autofix %s." % run_name
+    lines = ["**[Autofix] Giải đáp** — ticket dạng câu hỏi / làm rõ chức năng, không sửa code:", "", body]
+    proposal = tester_body(report_text, "Đề xuất")
+    if proposal:
+        lines += ["", "**Đề xuất** (chưa làm):", "", proposal, "",
+                  "_Muốn làm theo: comment chọn phương án rồi chuyển Reopened — autofix sẽ làm đúng phương án đó._"]
+    status_id = acfg.get("answer_status_id", 96)
+    comment_and_status(api, wp_id, lines, status_id)
+    return "đã comment giải đáp%s%s%s" % (", có đề xuất" if proposal else "",
+                                           ", chuyển FEEDBACK" if status_id == 96 else (", chuyển trạng thái %s" % status_id if status_id else ""),
+                                           " · có commit trong worktree nhưng KHÔNG push" if has_fix else "")
+
+
 def report_cannot_fix(api, acfg, wp_id, report_text, run_name):
     """KHÔNG SỬA ĐƯỢC: comment lý do cho người xử lý + chuyển UNREVIEWED."""
     body = tester_body(report_text, "Comment cho tester", "Cần quyết định", "Nguyên nhân") \
@@ -2626,9 +2660,9 @@ def ship_run(cfg, acfg, run_name, profile=None):
     cfg, acfg = for_ticket(cfg, acfg, display_id)
     report_path = os.path.join(run_dir, "report.md")
     report_text = open(report_path, encoding="utf-8").read() if os.path.exists(report_path) else ""
-    kind = next((k for k in ("ĐÃ SỬA", "KHÔNG SỬA ĐƯỢC") if report_text.lstrip().startswith("KẾT QUẢ: " + k)), None)
+    kind = next((k for k in ("ĐÃ SỬA", "KHÔNG SỬA ĐƯỢC", "GIẢI ĐÁP") if report_text.lstrip().startswith("KẾT QUẢ: " + k)), None)
     if not kind:
-        sys.exit("%s: báo cáo không phải ĐÃ SỬA / KHÔNG SỬA ĐƯỢC — không giao lại" % run_name)
+        sys.exit("%s: báo cáo không phải ĐÃ SỬA / KHÔNG SỬA ĐƯỢC / GIẢI ĐÁP — không giao lại" % run_name)
     fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
     for r, d in R.trees(acfg, run_dir):  # cấu hình thư mục dùng chung / setup có thể đổi sau khi tạo worktree
         if os.path.isdir(d):
@@ -2657,6 +2691,8 @@ def ship_run(cfg, acfg, run_name, profile=None):
             if kind == "KHÔNG SỬA ĐƯỢC":
                 report_cannot_fix(api, acfg, wp_id, report_text, run_name)
                 shipped, ship_msg = False, "đã comment, chuyển UNREVIEWED"
+            elif kind == "GIẢI ĐÁP":
+                shipped, ship_msg = False, report_answer(api, acfg, wp_id, report_text, run_name, has_fix)
             elif not has_fix:
                 shipped, ship_msg = False, deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir,
                                                                  fe_dir, be_dir, report_text)
@@ -2665,7 +2701,7 @@ def ship_run(cfg, acfg, run_name, profile=None):
                                             report_text)
         except Exception as ex:  # noqa: BLE001
             shipped, ship_msg = False, "ship lỗi: %s" % str(ex).splitlines()[0][:200]
-        manual = has_fix and not shipped and "UNREVIEWED" not in ship_msg
+        manual = has_fix and not shipped and "UNREVIEWED" not in ship_msg and kind != "GIẢI ĐÁP"
         verdict = kind + " → " + ship_msg + (" (sửa tay rồi push)" if manual else "")
         set_status(root, display_id, state="done", verdict=verdict)
         inbox(cfg, "**AUTOFIX** %s — giao lại %s: %s" % (display_id, run_name, verdict))
@@ -2919,6 +2955,11 @@ def assist_run(cfg, acfg, run_name, note="", profile=None):
     elif verdict.startswith("CẦN TEST TAY"):
         try:
             verdict += " → " + report_manual_test(api, wp_id, report_text, run_name, acfg.get("review_status_id"))
+        except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+            verdict += " (comment lên ticket lỗi: %s)" % ex
+    elif verdict.startswith("GIẢI ĐÁP"):
+        try:
+            verdict += " → " + report_answer(api, acfg, wp_id, report_text, run_name, any_fix(acfg, run_dir))
         except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
             verdict += " (comment lên ticket lỗi: %s)" % ex
     verdict = "Sau hỗ trợ: " + verdict
@@ -3349,7 +3390,7 @@ def main():
         log("%s (%s): bỏ qua — dự án %s đang tắt tự sửa" % (display_id, event, proj["name"]))
         return
     if not R.repos(acfg):
-        log("%s (%s): bỏ qua — dự án %s chưa khai báo repo (Cấu hình → Dự án)" % (display_id, event, proj["name"]))
+        log("%s (%s): bỏ qua — dự án %s chưa khai báo repo (tab Dự án)" % (display_id, event, proj["name"]))
         return
     num = re.search(r"(\d+)$", display_id)
     if event != "MANUAL" and acfg.get("min_ticket_number") and num and int(num.group(1)) < acfg["min_ticket_number"]:
@@ -3576,6 +3617,11 @@ def main():
         elif verdict.startswith("QA SAI"):
             try:
                 verdict += " → " + report_qa_wrong(api, wp_id, display_id, report_text, run_name)
+            except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
+                verdict += " (comment lên ticket lỗi: %s)" % ex
+        elif verdict.startswith("GIẢI ĐÁP"):
+            try:
+                verdict += " → " + report_answer(api, acfg, wp_id, report_text, run_name, has_fix)
             except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
                 verdict += " (comment lên ticket lỗi: %s)" % ex
         elif verdict.startswith("KHÔNG SỬA ĐƯỢC") and acfg.get("review_status_id"):

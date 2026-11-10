@@ -120,6 +120,38 @@ def _status(root, display_id):
         return {}
 
 
+KEEP_CANCELLED_DAYS = float(envconf.get("CLEANUP_KEEP_CANCELLED_DAYS") or 3)
+
+
+def dirty(acfg, root, run_name):
+    """Worktree của lượt còn thay đổi CHƯA commit (kể cả file mới chưa add) → không được xoá."""
+    import repos as R
+    for r, d in R.trees(acfg, os.path.join(root, run_name)):
+        if os.path.isdir(d):
+            st = subprocess.run(["git", "-C", d, "status", "--porcelain"], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, universal_newlines=True)
+            if st.returncode != 0 or st.stdout.strip():
+                return True
+    return False
+
+
+def recently_cancelled(root, run_name):
+    """Lượt bị huỷ từ trang theo dõi (file .cancelled) trong KEEP_CANCELLED_DAYS ngày → giữ để xem lại / làm tiếp."""
+    mark = os.path.join(root, run_name, ".cancelled")
+    return os.path.exists(mark) and time.time() - os.path.getmtime(mark) < KEEP_CANCELLED_DAYS * 86400
+
+
+def keep_reason(acfg, root, run_name):
+    """Lý do phải giữ lượt (rỗng = xoá được)."""
+    if recently_cancelled(root, run_name):
+        return "vừa huỷ (giữ %g ngày)" % KEEP_CANCELLED_DAYS
+    if unpushed(acfg, root, run_name):
+        return "còn commit chưa có trên remote"
+    if dirty(acfg, root, run_name):
+        return "còn thay đổi chưa commit"
+    return ""
+
+
 def _untouched(repo_dir):
     """Worktree không có commit nào ngoài remote và không có thay đổi chưa commit (repo này không bị sửa)."""
     out = subprocess.run(["git", "-C", repo_dir, "rev-list", "--no-merges", "--max-count=1", "HEAD", "--not", "--remotes"],
@@ -152,7 +184,7 @@ def drop_trees(acfg, root, dry=False):
                 continue
             older = current and name != current and os.path.isdir(os.path.join(root, current)) and \
                 os.path.getmtime(rd) <= os.path.getmtime(os.path.join(root, current))
-            if older and not unpushed(acfg, root, name):
+            if older and not keep_reason(acfg, root, name):
                 size = du([rd])
                 notes.append("%s (lượt cũ) %.0f MB" % (name, size / 1e6))
                 freed += size
@@ -325,9 +357,10 @@ def run(dry=False, only=None):
         if busy(root, display_id):
             print("%s: đang chạy, để lần sau" % display_id)
             continue
-        unsafe = [r for r in runs if unpushed(acfg, root, r)]
+        unsafe = [(r, keep_reason(acfg, root, r)) for r in runs]
+        unsafe = [(r, why) for r, why in unsafe if why]
         if unsafe:
-            print("%s: giữ lại vì còn commit chưa có trên remote: %s" % (display_id, ", ".join(unsafe)))
+            print("%s: giữ lại — %s" % (display_id, ", ".join("%s: %s" % x for x in unsafe)))
             continue
         dirs = [os.path.join(root, r) for r in runs]
         reports = glob.glob(os.path.join(report_dir, "%s-*.md" % display_id)) if report_dir else []

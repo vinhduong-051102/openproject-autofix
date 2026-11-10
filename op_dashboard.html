@@ -139,7 +139,14 @@ button { background: var(--panel); border: 1px solid var(--border); border-radiu
 button:hover { border-color: var(--accent); color: var(--accent); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.primary:hover { filter: brightness(1.08); color: #fff; }
-button.link { border: 0; background: none; padding: 0; color: var(--text-3); font-size: 12px; }
+/* Nút phụ: nhỏ, có viền (không còn dạng chữ). .ico = nút chỉ có biểu tượng (✕ ■ ▲ ▼) — ô vuông; .plain = chữ nằm
+   trong câu / dòng danh sách bấm được (giữ dạng chữ). */
+button.link { border: 1px solid var(--border); background: var(--panel); padding: 2px 9px; border-radius: 6px;
+  color: var(--text-2); font-size: 12px; line-height: 1.5; white-space: nowrap; vertical-align: middle; }
+button.link:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+button.link.ico { padding: 0; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; }
+button.link.plain { border: 0; background: none; padding: 0; color: var(--accent); white-space: normal; }
+button.link.plain:hover { background: none; text-decoration: underline; }
 button:disabled { opacity: .45; cursor: default; }
 /* Nút đang gửi thao tác: vòng xoay + khoá; xong thì ✓ / ✕ thoáng qua. */
 button.busy, button.busy:disabled { opacity: .85; cursor: progress; }
@@ -173,6 +180,13 @@ select, input { background: var(--panel); border: 1px solid var(--border); borde
 .limits-form label { display: flex; align-items: center; gap: 6px; }
 .limits-form input { width: 64px; text-align: right; }
 .force { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--warn); cursor: pointer; }
+#kvModal .modal-box { width: min(620px, 100%); }
+.kv-form { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; margin: 10px 0; }
+.kv-form label { font-size: 13px; color: var(--text-2); }
+.kv-form input, .kv-form select, .kv-form textarea { width: 100%; box-sizing: border-box; }
+.kv-secret { font-family: var(--mono, monospace); font-size: 15px; letter-spacing: 1px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; word-break: break-all; user-select: all; }
+.kv-otp { width: 9ch !important; font-size: 18px; letter-spacing: 3px; text-align: center; }
+.kv-box .p-head .p-name::before { content: "🔐 "; }
 .add-help { flex-basis: 100%; font-size: 12px; color: var(--text-3); }
 .runs { max-height: 62vh; overflow: auto; }
 .run { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 4px 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }
@@ -431,6 +445,40 @@ header { flex-wrap: wrap; min-width: 0; }
 .tg-tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; cursor: pointer; text-align: left; }
 .tg-tile .l { font-size: 12px; color: var(--text-2); } .tg-tile .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--text); }
 .tg-tile.on { border-color: var(--accent); }
+/* ---- Thống kê: 2 chuỗi màu (palette dataviz đã kiểm tra CVD / tương phản, sáng + tối) ---- */
+:root { --s1: #2a78d6; --s2: #eb6834; }
+:root[data-theme="dark"] { --s1: #3987e5; --s2: #d95926; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme]) { --s1: #3987e5; --s2: #d95926; } }
+.view[data-view="stats"].on { display: block; overflow: auto; }
+#statsBox { max-width: 1280px; margin: 0 auto; }
+.st-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 12px 0; }
+.st-tile { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; background: var(--panel); }
+.st-tile .l { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+.st-tile .v { font-size: 26px; font-weight: 700; color: var(--text); line-height: 1.2; margin-top: 2px; }
+.st-tile .s { font-size: 12px; color: var(--text-3); }
+.st-key { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.st-chart { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 14px; background: var(--panel); }
+.st-chart svg { width: 100%; height: 190px; display: block; }
+.st-chart .grid { stroke: var(--border); stroke-width: 1; } .st-chart .base { stroke: var(--text-3); stroke-width: 1; }
+.st-chart .tk { fill: var(--text-3); font-size: 10px; }
+.st-chart .b1 { fill: var(--s1); } .st-chart .b2 { fill: var(--s2); }
+.st-chart .hit { fill: transparent; } .st-chart .tip { opacity: 0; pointer-events: none; }
+.st-chart .tip rect { fill: var(--text); } .st-chart .tip text { fill: var(--panel); font-size: 11px; font-weight: 600; }
+.st-chart g.col:hover .tip { opacity: 1; } .st-chart g.col:hover .hit { fill: var(--panel-2); }
+.st-legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-2); align-items: center; flex-wrap: wrap; }
+.st-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.st-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 14px; }
+@media (max-width: 960px) { .st-grid { grid-template-columns: minmax(0, 1fr); } }
+.st-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.st-table th { text-align: left; font-weight: 600; color: var(--text-2); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.st-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.st-table th.n { text-align: right; }
+.st-table td.nw, .st-table td:first-child { white-space: nowrap; }
+.st-table td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.st-table .subj { color: var(--text-2); }
+.st-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; background: var(--panel); }
+.st-card h3 { margin: 0 0 6px; font-size: 14px; display: flex; gap: 8px; align-items: center; }
+.st-card .more { margin-top: 6px; }
 .tg-chart { padding: 6px 16px 0; } .tg-chart svg { width: 100%; height: 130px; display: block; }
 .tg-chart .grid { stroke: var(--border); stroke-width: 1; } .tg-chart .base { stroke: var(--text-3); stroke-width: 1; }
 .tg-chart .tk { fill: var(--text-3); font-size: 10px; } .tg-chart .bar { fill: var(--accent); }
@@ -449,6 +497,14 @@ header { flex-wrap: wrap; min-width: 0; }
 .tg-acts input[type=text] { flex: 1; min-width: 180px; width: auto; }
 .tg-pick { display: flex; gap: 8px; align-items: flex-start; } .tg-pick input { margin-top: 12px; }
 .tg-acts button.danger { color: var(--crit); }
+#prjRmModal .modal-box { width: min(720px, 100%); }
+.prm-list { font-size: 13px; line-height: 1.6; max-height: 45vh; overflow: auto; }
+#prmGo { color: var(--crit); border-color: var(--crit); }
+.wip { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; display: grid; gap: 6px; }
+.wip-sum { display: flex; gap: 6px; flex-wrap: wrap; }
+.wip-repo code { font-size: 12px; }
+.toolbar button.danger { color: var(--crit); border-color: var(--crit); }
+.act-cancel { color: var(--crit) !important; padding: 0 4px; font-size: 12px; }
 .tg-ask { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--panel-2); display: grid; gap: 6px; font-size: 13px; }
 .tg-ask .q { white-space: pre-wrap; } .tg-ask textarea { min-height: 90px; }
 .tg-ask-md { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px; max-height: 340px; overflow: auto; overscroll-behavior: contain; }
@@ -515,9 +571,12 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
 .tg-chatfoot { display: flex; gap: 10px; align-items: center; padding-top: 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }
 #tgModal.wide #tgmBody { overflow: hidden; }
 /* Trang Cấu hình */
-.view[data-view="config"].on { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; max-width: none;
-  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "proj env" "repo env"; }
-#cfgProjBox { grid-area: proj; } #cfgRepoBox { grid-area: repo; } #cfgEnvBox { grid-area: env; }
+/* Tab Dự án: dự án | repo của dự án đang chọn — hai cột cạnh nhau. Tab Cấu hình: biến .env. */
+.view[data-view="projects"].on { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; max-width: none;
+  grid-template-rows: minmax(0, 1fr); }
+.view[data-view="config"].on { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; max-width: 1100px;
+  grid-template-rows: minmax(0, 1fr); margin: 0 auto; width: 100%; }
+#cfgProjBox h2 .apply-btn { margin-left: 8px; }
 #cfgProjBox, #cfgRepoBox, #cfgEnvBox { min-height: 0; }
 .cfg-repo .hd { flex-wrap: wrap; } .cfg-repo .hd > span:last-child { white-space: nowrap; }
 .cfg-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 16px; flex-shrink: 1 !important; }
@@ -548,8 +607,8 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
   .svc .chip { padding: 6px 8px; font-size: 12px; }
   #reviewBox { max-height: 40%; }
   .leftcol { gap: 12px; }
-  .view[data-view="config"].on { grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(3, minmax(0, 1fr));
-    grid-template-areas: "proj" "repo" "env"; gap: 12px; }
+  .view[data-view="projects"].on { grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .view[data-view="config"].on { gap: 12px; }
   .cfg-item { grid-template-columns: minmax(0, 1fr); }
   .cfg-grid { grid-template-columns: 96px minmax(0, 1fr); }
   .tg-chatwrap { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 32%) minmax(0, 1fr); }
@@ -587,8 +646,10 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
     <button data-view="todo">Cần xử lý <span class="vbadge" id="todoN"></span></button>
     <button data-view="autofix">Autofix <span class="vbadge live" id="liveN"></span></button>
     <button data-view="ticket">Ticket</button>
+    <button data-view="stats">Thống kê</button>
     <button data-view="telegram">Telegram <span class="vbadge" id="tgN"></span></button>
     <button data-view="system">Hệ thống <span class="vbadge crit" id="sysN"></span></button>
+    <button data-view="projects">Dự án</button>
     <button data-view="config">Cấu hình <span class="vbadge" id="cfgN"></span></button>
   </nav>
   <div class="meta">
@@ -631,6 +692,18 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
     <section id="detail"><div class="empty">Chọn một mục để xem chi tiết</div></section>
     </div>
   </div>
+  <div class="view" data-view="stats">
+    <section id="statsBox">
+      <h2>Thống kê task hoàn thành / bị reopen <span class="sum" id="stSum"></span></h2>
+      <div class="op-bar">
+        <div class="seg" id="stDays"><button data-v="7">7 ngày</button><button data-v="30" class="on">30 ngày</button><button data-v="90">90 ngày</button></div>
+        <div class="seg" id="stScope"><button data-v="mine" class="on" title="Ticket tôi chuyển hoàn thành, hoặc Dev / người được giao là tôi">Của tôi</button><button data-v="all">Cả dự án</button></div>
+        <select id="stProj" title="Dự án"></select>
+        <button id="stRefresh" title="Tải lại từ OpenProject (số liệu cache 10 phút)">↻</button>
+      </div>
+      <div id="stBody"><div class="empty">Đang tải…</div></div>
+    </section>
+  </div>
   <div class="view" data-view="ticket">
     <section id="reviewBox">
       <h2>Chờ QA trên server <span class="right" id="reviewCount"></span></h2>
@@ -667,19 +740,22 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
       <div class="op-list" id="tgList"><div class="empty">Đang tải…</div></div>
     </section>
   </div>
-  <div class="view" data-view="config">
+  <div class="view" data-view="projects">
     <section id="cfgProjBox">
-      <h2>Dự án <span class="right muted" id="cfgProjSum"></span></h2>
+      <h2>Dự án <span class="right muted" id="cfgProjSum"></span>
+        <button class="apply-btn" hidden title="Khởi động lại dịch vụ để dùng cấu hình mới">⟳ Áp dụng</button></h2>
       <div class="cfg-body" id="cfgProjs"><div class="empty">Đang tải…</div></div>
     </section>
     <section id="cfgRepoBox">
       <h2>Danh sách repo <span class="right muted" id="cfgRepoSum"></span></h2>
       <div class="cfg-body" id="cfgRepos"><div class="empty">Đang tải…</div></div>
     </section>
+  </div>
+  <div class="view" data-view="config">
     <section id="cfgEnvBox">
       <h2>Biến cấu hình (.env) <span class="right muted" id="cfgEnvSum"></span></h2>
       <div class="op-bar"><input type="search" id="cfgQ" placeholder="Tìm theo tên biến / ghi chú…">
-        <button class="primary" id="cfgSave" disabled>Lưu</button><button id="cfgApply" hidden title="Khởi động lại dịch vụ để dùng giá trị mới">⟳ Áp dụng</button></div>
+        <button class="primary" id="cfgSave" disabled>Lưu</button><button id="cfgApply" class="apply-btn" hidden title="Khởi động lại dịch vụ để dùng giá trị mới">⟳ Áp dụng</button></div>
       <div class="cfg-body" id="cfgEnv"><div class="empty">Đang tải…</div></div>
     </section>
   </div>
@@ -709,6 +785,7 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
       </div>
       <div class="profile" id="gemini"></div>
       <div id="profiles"></div>
+      <div class="profile kv-box" id="kvBox"></div>
       <div class="limits-form">
         <span class="lf-title">Ngưỡng hạn mức chung <span class="lf-sub">— gói không đặt ngưỡng riêng thì dùng các mức này</span></span>
         <label title="Hạn mức 5 giờ của gói đạt mức này thì không dùng gói đó cho lượt mới (đổi gói / hoãn)">5 giờ
@@ -724,6 +801,7 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
         <div class="add-mode">
           <label><input type="radio" name="addMode" value="token" checked> Token (setup-token)</label>
           <label><input type="radio" name="addMode" value="dir"> Thư mục đăng nhập</label>
+          <label><input type="radio" name="addMode" value="kv"> Lấy từ KeyVault</label>
         </div>
         <input id="newName" placeholder="Tên gói, vd Gói phụ">
         <input id="newToken" type="password" autocomplete="off" placeholder="Dán token sk-ant-oat01-…">
@@ -743,15 +821,27 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
   <div class="modal-box"><div id="wpHead"></div><div class="wp-split"><div id="wpBody"><div class="empty">Đang tải…</div></div><div class="wp-side"><div id="wpChatScroll"></div><div id="wpFoot"></div></div></div></div>
 </div>
 <div id="imgZoom" hidden><img alt=""></div>
+<div class="modal" id="prjRmModal" hidden role="dialog" aria-modal="true" aria-labelledby="prmTitle">
+  <div class="modal-box">
+    <div class="modal-head"><h3 id="prmTitle">Gỡ dự án</h3><button class="link ico" onclick="prjRemoveClose()" aria-label="Đóng">✕</button></div>
+    <div id="prmBody"></div>
+  </div>
+</div>
+<div class="modal" id="kvModal" hidden role="dialog" aria-modal="true" aria-labelledby="kvTitle">
+  <div class="modal-box">
+    <div class="modal-head"><h3 id="kvTitle">KeyVault</h3><button class="link ico" id="kvClose" aria-label="Đóng">✕</button></div>
+    <div id="kvBody"></div>
+  </div>
+</div>
 <div class="modal" id="taskModal" hidden role="dialog" aria-modal="true" aria-labelledby="tmTitle">
   <div class="modal-box">
-    <div class="modal-head"><h3 id="tmTitle">Tạo task trên OpenProject</h3><button class="link" id="tmClose" aria-label="Đóng">✕</button></div>
+    <div class="modal-head"><h3 id="tmTitle">Tạo task trên OpenProject</h3><button class="link ico" id="tmClose" aria-label="Đóng">✕</button></div>
     <div id="tmStep1">
       <div class="tm-row" id="tmProjRow" hidden><label class="tm-label" for="tmProj" style="margin:0">Dự án</label>
         <select id="tmProj" style="width:auto"></select></div>
       <label class="tm-label" for="tmPrompt">Mô tả task <span class="muted">— lỗi gì, ở màn nào, tài khoản nào, mong muốn ra sao… (AI sẽ viết lại theo mẫu của tester)</span></label>
       <textarea id="tmPrompt" rows="6" placeholder="Ví dụ: Màn Quản trị > Giám sát kết nối, đăng nhập admint, cột STT quá rộng làm cột Kết nối bị rớt dòng. Mong muốn STT ~70px, cột Kết nối rộng hơn."></textarea>
-      <div class="tm-drop" id="tmDrop" tabindex="0">Kéo thả file vào đây, dán ảnh (Ctrl+V) hoặc <button class="link" id="tmPick">chọn file</button>
+      <div class="tm-drop" id="tmDrop" tabindex="0">Kéo thả file vào đây, dán ảnh (Ctrl+V) hoặc <button class="link plain" id="tmPick">chọn file</button>
         <input type="file" id="tmFiles" multiple hidden></div>
       <div id="tmFileList" class="tm-files"></div>
       <div class="tm-actions"><button class="primary" id="tmDraft">AI soạn mô tả</button><span class="muted" id="tmStatus"></span></div>
@@ -776,21 +866,21 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
 </div>
 <div class="modal" id="splitModal" hidden role="dialog" aria-modal="true" aria-labelledby="spTitle">
   <div class="modal-box">
-    <div class="modal-head"><h3 id="spTitle">Tách việc</h3><button class="link" id="spClose" aria-label="Đóng">✕</button></div>
+    <div class="modal-head"><h3 id="spTitle">Tách việc</h3><button class="link ico" id="spClose" aria-label="Đóng">✕</button></div>
     <div id="spBody"></div>
     <div id="spFoot"></div>
   </div>
 </div>
 <div class="modal" id="tgModal" hidden role="dialog" aria-modal="true" aria-labelledby="tgmTitle">
   <div class="modal-box">
-    <div class="modal-head"><h3 id="tgmTitle">Yêu cầu</h3><button class="link" id="tgmClose" aria-label="Đóng">✕</button></div>
+    <div class="modal-head"><h3 id="tgmTitle">Yêu cầu</h3><button class="link ico" id="tgmClose" aria-label="Đóng">✕</button></div>
     <div id="tgmBody"></div>
   </div>
 </div>
 <script>
 const STATE_LABEL = {queued: ["Xếp hàng", "warn"], preparing: ["Chuẩn bị", "accent"], running: ["Đang chạy", "accent"],
   shipping: ["Kiểm tra / push", "accent"], done: ["Xong", "ok"], error: ["Lỗi", "crit"], paused: ["Hoãn", "warn"],
-  stale: ["Bị ngắt", "crit"]};
+  stale: ["Bị ngắt", "crit"], cancelled: ["Đã huỷ", "warn"]};
 let S = null, sel = null, tab = "Thao tác", logLines = [], logNext = 0, fileCache = "";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
@@ -890,7 +980,7 @@ function limitsEditor(p) {
 function renderProfiles(force) {
   $("auto").checked = !!S.auto_switch;
   renderLimitsBox();
-  if (editingLimits && !force && S.profiles.some((p) => p.name === editingLimits)) return;
+  if (editingLimits && !force && S.profiles.some((p) => p.name === editingLimits)) return renderKvBox();
   const quota = S.order_mode !== "priority", n = S.profiles.length;
   $("profiles").innerHTML = `
     <div class="order-mode">
@@ -923,6 +1013,7 @@ function renderProfiles(force) {
         <button data-rename="${esc(p.name)}">Đổi tên</button>
         <button data-probe="${esc(p.name)}" ${p.logged_in ? "" : "disabled"} title="Gửi một câu rất ngắn để lấy hạn mức mới nhất">Cập nhật hạn mức</button>
         ${p.kind === "token" ? `<button data-token="${esc(p.name)}" title="Dán token mới (token setup-token hết hạn sau khoảng 1 năm)">Đổi token</button>` : ""}
+        ${kvActive() ? `<button data-kvfetch="${esc(p.name)}" title="${p.kv_key ? "Lấy lại token từ KeyVault (key đã nhớ) — chỉ cần nhập OTP" : "Lấy token cho gói này từ KeyVault"}">Lấy từ KeyVault</button>` : ""}
         ${S.profiles.length > 1 ? `<button class="link" data-remove="${esc(p.name)}">Bỏ khỏi danh sách</button>` : ""}
       </div>
     </div>`).join("") + `<div class="hint"><button class="link" id="toggleAdd">+ Thêm gói</button></div>`;
@@ -951,8 +1042,168 @@ function renderProfiles(force) {
     editingLimits = null;
     post({action: "set_profile_limits", name: b.dataset.resetLimits});
   });
+  document.querySelectorAll("[data-kvfetch]").forEach((b) => b.onclick = () => kvOpen("fetch", {name: b.dataset.kvfetch}));
   $("toggleAdd").onclick = () => $("addForm").classList.toggle("open");
+  renderKvBox();
+  const kvSig = JSON.stringify([(S.keyvault || {}).stage, (S.keyvault || {}).keys]);
+  if (kvMode && kvSig !== kvLastSig) kvRender();  // chỉ vẽ lại khi trạng thái đổi (không xoá ô đang nhập)
+  kvLastSig = kvSig;
 }
+// ---- KeyVault: lấy token Claude bằng API key + OTP Google Authenticator (keyvault.py) ----
+const KV_STAGE = {none: ["Chưa kết nối", ""], pending: ["Chờ duyệt", "warn"], approved: ["Đã duyệt — nhận thông tin", "accent"],
+  rejected: ["Bị từ chối", "crit"], claimed: ["Chờ kích hoạt OTP", "warn"], claimed_elsewhere: ["Đã nhận ở nơi khác", "crit"],
+  active: ["Đã kết nối", "ok"], error: ["Lỗi", "crit"]};
+let kvMode = null, kvCtx = {}, kvKeys = null, kvLastSig = "", kvTests = {};
+function kvGuess(keyName) {
+  // cla_dungmt → "Gói của Dũng", cla_vinhdq_canhan → "Gói cá nhân", cla_vinhdq_cty → "Công ty" (so tên gói bỏ dấu)
+  const plain = (t) => t.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/gi, "d").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const kn = plain(keyName.replace(/^cla_/, "")).replace("cty", "congty");
+  const hit = S.profiles.find((p) => { const n = plain(p.name).replace(/^goi(cua)?/, ""); return n && kn.includes(n); })
+    || S.profiles.find((p) => { const n = plain(p.name).replace(/^goi(cua)?/, ""); return n.length >= 3 && kn.includes(n.slice(0, 4)); });
+  return hit ? hit.name : keyName;
+}
+const kvActive = () => (S.keyvault || {}).stage === "active";
+function renderKvBox() {
+  const k = S.keyvault || {stage: "none"}, [label, cls] = KV_STAGE[k.stage] || [k.stage, ""];
+  $("kvBox").innerHTML = `<div class="p-head"><span class="p-name">KeyVault</span><span class="badge ${cls}">${esc(label)}</span>
+      <span class="p-dir" style="margin-left:auto">${esc(k.server || "")}${k.api_key_tail ? " · API key …" + esc(k.api_key_tail) : ""}</span></div>
+    <div class="p-note muted">${k.stage === "active" ? "Lấy token cho gói: bấm \"Lấy từ KeyVault\" ở gói (cần mã OTP Google Authenticator), hoặc + Thêm gói → Lấy từ KeyVault."
+      : k.stage === "error" ? esc(k.error || "") : "Lấy token Claude từ KeyVault thay vì dán tay: đăng ký một lần, sau đó mỗi lần lấy chỉ cần mã OTP."}</div>
+    <div class="p-actions"><button class="${k.stage === "active" ? "" : "primary"}" id="kvManage">${k.stage === "active" ? "Quản lý" : k.stage === "none" ? "Kết nối KeyVault" : "Tiếp tục đăng ký"}</button></div>`;
+  $("kvManage").onclick = () => kvOpen(k.stage === "active" ? "manage" : "setup");
+}
+function kvOpen(mode, ctx) {
+  kvMode = mode; kvCtx = ctx || {}; $("kvModal").hidden = false; kvRender();
+  if (mode === "fetch" && kvKeys === null) kvLoadKeys();
+}
+function kvClose() { $("kvModal").hidden = true; kvMode = null; }
+async function kvPost(body, btn) { const d = await post(body, btn); return d; }
+async function kvLoadKeys(btn) {
+  const d = await post({action: "kv_keys"}, btn === undefined ? null : btn);
+  if (d) { kvKeys = d.keys; if (S.keyvault) S.keyvault.keys = d.keys; }
+  kvRender();
+}
+function kvKeySelect(sel) {
+  const ks = kvKeys || (S.keyvault || {}).keys || [];
+  if (!ks.length) return `<span class="muted">Chưa có key nào được cấp — <button class="link" id="kvReload">tải lại</button></span>`;
+  return `<select id="kvKey">${ks.map((k) => `<option value="${esc(k.id)}" ${k.id === sel ? "selected" : ""}>${esc(k.name)}${k.description ? " — " + esc(k.description) : ""} (${k.size} B)</option>`).join("")}</select>`;
+}
+function kvRender() {
+  if (!kvMode) return;
+  const k = S.keyvault || {stage: "none"}, st = k.stage, B = $("kvBody");
+  const otpRow = (lbl) => `<label for="kvOtp">${lbl || "Mã OTP"}</label><span><input id="kvOtp" class="kv-otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000">
+      <span class="muted"> mục KeyVault mang tên máy này trong Google Authenticator · mỗi mã dùng 1 lần</span></span>`;
+  if (kvMode === "fetch") {
+    const prof = S.profiles.find((p) => p.name === kvCtx.name);
+    $("kvTitle").textContent = kvCtx.new ? "Thêm gói từ KeyVault" : `Lấy token cho ${kvCtx.name}`;
+    B.innerHTML = !kvActive() ? `<p>Chưa kết nối KeyVault. <button class="link" id="kvGoSetup">Kết nối ngay</button></p>` : `
+      <div class="kv-form">
+        ${kvCtx.new ? `<label for="kvName">Tên gói</label><input id="kvName" value="${esc(kvCtx.name || "")}" placeholder="vd Gói của Dũng">` : ""}
+        <label for="kvKey">Key</label><span>${kvKeySelect(kvCtx.key_id || (prof && prof.kv_key))}</span>
+        ${otpRow()}
+      </div>
+      <div class="tm-actions"><button class="primary" id="kvFetch">Lấy token</button>
+        <span class="muted">Token giải mã tại máy này, lưu ~/.config/op-watch/tokens/ (quyền 600), không hiện trên trang.</span></div>`;
+    if ($("kvGoSetup")) $("kvGoSetup").onclick = () => kvOpen("setup");
+    if ($("kvReload")) $("kvReload").onclick = (e) => kvLoadKeys(e.target);
+    if ($("kvFetch")) $("kvFetch").onclick = async (e) => {
+      const name = kvCtx.new ? $("kvName").value.trim() : kvCtx.name;
+      const d = await post({action: "kv_fetch", name, new: !!kvCtx.new, key_id: $("kvKey") ? $("kvKey").value : "", otp: $("kvOtp").value}, e.target);
+      if (d) { kvClose(); if (kvCtx.new) { $("newName").value = ""; $("addForm").classList.remove("open"); } }
+      else { $("kvOtp").value = ""; $("kvOtp").focus(); }
+    };
+    if ($("kvOtp")) { $("kvOtp").focus(); $("kvOtp").onkeydown = (e) => { if (e.key === "Enter") $("kvFetch").click(); }; }
+    return;
+  }
+  $("kvTitle").textContent = "KeyVault";
+  const head = `<p class="muted">Máy chủ: <b>${esc(k.server || "")}</b>${k.name ? " · đăng ký tên <b>" + esc(k.name) + "</b>" : ""}${k.request_id ? " · yêu cầu " + esc(k.request_id) : ""}</p>`;
+  if (st === "none" || st === "rejected" || st === "error") {
+    B.innerHTML = head + (st === "rejected" ? `<p class="badge crit">Yêu cầu bị từ chối${k.review_note ? ": " + esc(k.review_note) : ""}</p>` : "") + `
+      <h4>Cách A — gửi yêu cầu (quản trị viên duyệt)</h4>
+      <div class="kv-form">
+        <label for="kvServer">Máy chủ</label><input id="kvServer" value="${esc(k.server || "")}">
+        <label for="kvRName">Tên</label><input id="kvRName" placeholder="vd op-watch máy vinhdq">
+        <label for="kvContact">Liên hệ</label><input id="kvContact" placeholder="email / số điện thoại">
+        <label for="kvOrg">Tổ chức</label><input id="kvOrg" placeholder="(không bắt buộc)">
+        <label for="kvReason">Lý do</label><input id="kvReason" value="Lấy token Claude cho tool autofix (op-watch)">
+        <label for="kvWant">Key muốn lấy</label><input id="kvWant" placeholder="vd claude-goi-cua-dung (không bắt buộc)">
+      </div>
+      <div class="tm-actions"><button class="primary" id="kvReq">Gửi yêu cầu</button>
+        <span class="muted">Cặp khoá X25519 sinh trên máy này — private key không gửi đi đâu.</span></div>
+      <h4>Cách B — quản trị viên đã đăng ký giúp</h4>
+      <p class="muted">Gửi quản trị viên public key của máy này: <button class="link" id="kvPub">Hiện public key</button> <code id="kvPubOut" class="kv-secret" hidden></code></p>
+      <div class="kv-form">
+        <label for="kvApi">API key</label><input id="kvApi" type="password" autocomplete="off" placeholder="kv_…">
+        <label for="kvPriv">Private key</label><textarea id="kvPriv" rows="3" placeholder="(bỏ trống = dùng khoá của máy này) hoặc dán PEM recipient.key nếu đã tạo ở nơi khác"></textarea>
+      </div>
+      <div class="tm-actions"><button id="kvImport">Lưu API key</button></div>`;
+    $("kvReq").onclick = (e) => post({action: "kv_request", server: $("kvServer").value, name: $("kvRName").value, contact: $("kvContact").value,
+      organization: $("kvOrg").value, reason: $("kvReason").value, requested_keys: $("kvWant").value}, e.target);
+    $("kvPub").onclick = async (e) => { const d = await post({action: "kv_pubkey"}, e.target); if (d) { $("kvPubOut").textContent = d.public_key; $("kvPubOut").hidden = false; } };
+    $("kvImport").onclick = async (e) => { const d = await post({action: "kv_import", server: $("kvServer").value, api_key: $("kvApi").value, private_key: $("kvPriv").value}, e.target);
+      if (d) { $("kvApi").value = ""; $("kvPriv").value = ""; } };
+  } else if (st === "pending" || st === "approved" || st === "claimed_elsewhere") {
+    B.innerHTML = head + `<p>${st === "approved" ? `<span class="badge accent">Đã duyệt</span> Nhận API key + secret OTP (chỉ nhận được <b>một lần</b>${k.claim_expires_at ? ", hạn " + esc(k.claim_expires_at) + " UTC" : ""}).`
+        : st === "pending" ? `<span class="badge warn">Đang chờ duyệt</span> Nhờ quản trị viên KeyVault duyệt yêu cầu.` : `<span class="badge crit">Thông tin đã được nhận ở nơi khác</span> Liên hệ quản trị viên để cấp lại.`}
+        ${k.review_note ? "<br>Ghi chú: " + esc(k.review_note) : ""}</p>
+      <div class="tm-actions">${st === "approved" ? `<button class="primary" id="kvClaim">Nhận thông tin</button>` : `<button class="primary" id="kvStatus">Kiểm tra lại</button>`}
+        <button class="link" id="kvReset">Huỷ / gửi lại</button></div>`;
+    if ($("kvStatus")) $("kvStatus").onclick = (e) => post({action: "kv_status"}, e.target);
+    if ($("kvClaim")) $("kvClaim").onclick = (e) => post({action: "kv_claim"}, e.target);
+  } else if (st === "claimed") {
+    B.innerHTML = head + `<p>Mở Google Authenticator → <b>+</b> → <b>Nhập khóa thiết lập</b>, tên tài khoản tuỳ ý (vd "KeyVault op-watch"), dán secret:</p>
+      <div class="kv-secret">${esc(k.totp_secret || "(đã ẩn)")}</div>
+      <p class="muted">Secret chỉ lưu tạm trên máy tới khi kích hoạt xong rồi xoá.</p>
+      <div class="kv-form">${otpRow("Mã OTP đầu tiên")}</div>
+      <div class="tm-actions"><button class="primary" id="kvAct">Kích hoạt</button><button class="link" id="kvReset">Gỡ kết nối</button></div>`;
+    $("kvAct").onclick = (e) => post({action: "kv_activate", otp: $("kvOtp").value}, e.target);
+  } else {
+    B.innerHTML = head + `<p><span class="badge ok">Đã kết nối</span> API key …${esc(k.api_key_tail || "")}</p>
+      <h4>Key được cấp <button class="link" id="kvReload">tải lại</button></h4>
+      <div>${(kvKeys || k.keys || []).map((x) => `<div class="p-note">${esc(x.name)} <span class="muted">${esc(x.description || "")} · ${x.size} B · fp ${esc(x.fingerprint)}</span>
+          ${(() => { const used = S.profiles.filter((p) => p.kv_key === x.id).map((p) => p.name); return used.length ? `<span class="badge">gói: ${esc(used.join(", "))}</span>` : ""; })()}
+          <button class="link" data-kvtest="${esc(x.id)}" title="Lấy key (cần OTP) và thử gọi Claude bằng token đó — không lưu vào gói nào">Kiểm tra</button>
+          <span class="muted" data-kvres="${esc(x.id)}">${esc(kvTests[x.id] || "")}</span></div>`).join("")
+        || '<div class="muted">Chưa tải danh sách.</div>'}</div>
+      <div class="kv-form">${otpRow("OTP")}</div>
+      <h4>Chuyển hết sang KeyVault</h4>
+      <p class="muted">Mỗi dòng: chọn gói nhận key → bấm "Lấy & dùng" (cần một mã OTP mới mỗi lần, ~30 giây/mã). Token được thử gọi Claude trước —
+        hỏng thì gói giữ nguyên. Xong thì bỏ các gói còn lại.</p>
+      <div class="kv-form">${(kvKeys || k.keys || []).map((x) => {
+        const cur = S.profiles.find((p) => p.kv_key === x.id), guess = cur ? cur.name : kvGuess(x.name);
+        return `<label>${esc(x.name)}</label><span><input data-kvname="${esc(x.id)}" list="kvProfNames" value="${esc(guess)}" style="width:14em">
+          <button data-kvuse="${esc(x.id)}">${cur ? "Lấy lại" : "Lấy & dùng"}</button> ${cur ? '<span class="badge ok">đã dùng</span>' : ""}
+          <span class="muted" data-kvuseres="${esc(x.id)}"></span></span>`; }).join("")}</div>
+      <datalist id="kvProfNames">${S.profiles.map((p) => `<option value="${esc(p.name)}">`).join("")}</datalist>
+      ${(() => { const rest = S.profiles.filter((p) => !p.kv_key); return rest.length
+        ? `<div class="tm-actions"><button class="primary" id="kvDrop" ${S.profiles.some((p) => p.kv_key) ? "" : "disabled"}>Bỏ ${rest.length} gói không từ KeyVault</button>
+            <span class="muted">${esc(rest.map((p) => p.name).join(", "))} — token cũ chuyển vào thư mục sao lưu, thư mục đăng nhập để nguyên</span></div>`
+        : '<p><span class="badge ok">Mọi gói đều lấy từ KeyVault</span></p>'; })()}
+      <div class="tm-actions"><button class="link" id="kvReset">Gỡ kết nối</button></div>`;
+    document.querySelectorAll("[data-kvuse]").forEach((b) => b.onclick = async () => {
+      const id = b.dataset.kvuse, name = document.querySelector(`[data-kvname="${CSS.escape(id)}"]`).value.trim();
+      const res = document.querySelector(`[data-kvuseres="${CSS.escape(id)}"]`);
+      res.textContent = "đang lấy + thử (tới ~1 phút)…";
+      const exists = S.profiles.some((p) => p.name === name);
+      const d = await post({action: "kv_fetch", name, new: !exists, key_id: id, otp: $("kvOtp").value}, b);
+      $("kvOtp").value = ""; res.textContent = d ? "✓ " + d.message : "✗ xem thông báo lỗi";
+    });
+    if ($("kvDrop")) $("kvDrop").onclick = (e) => confirm("Bỏ các gói không lấy từ KeyVault khỏi danh sách?") && post({action: "kv_drop_others"}, e.target);
+    $("kvReload").onclick = (e) => kvLoadKeys(e.target);
+    document.querySelectorAll("[data-kvtest]").forEach((b) => b.onclick = async () => {
+      const id = b.dataset.kvtest, otp = $("kvOtp").value;
+      kvTests[id] = "đang thử (tới ~1 phút)…"; document.querySelector(`[data-kvres="${CSS.escape(id)}"]`).textContent = kvTests[id];
+      const d = await post({action: "kv_test", key_id: id, otp}, b);
+      kvTests[id] = d ? (d.ok ? "✓ " : "✗ ") + d.message : "lỗi — xem thông báo";
+      $("kvOtp").value = "";
+      const el = document.querySelector(`[data-kvres="${CSS.escape(id)}"]`); if (el) el.textContent = kvTests[id];
+    });
+  }
+  if ($("kvReset")) $("kvReset").onclick = (e) => confirm("Gỡ kết nối KeyVault? (xoá API key trên máy này; private key đổi tên .old)") && post({action: "kv_reset"}, e.target);
+}
+$("kvClose").onclick = kvClose;
+$("kvModal").onclick = (e) => { if (e.target.id === "kvModal") kvClose(); };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("kvModal").hidden) kvClose(); });
 function renderLimitsBox() {
   // Ô ngưỡng chung chỉ điền lại khi người dùng chưa sửa dở (trang làm mới mỗi 3 giây).
   if (!limitsDirty) {
@@ -1015,9 +1266,14 @@ function renderActs() {
     <div class="act ${selKind === a.kind && selKey === a.key ? "sel" : ""}" data-kind="${a.kind}" data-key="${esc(a.key)}">
       <span class="kind">${KIND[a.kind]}</span>
       <span class="title"><span class="id">${esc(a.id)}</span><span class="badge ${a.cls}" title="${esc(a.badge)}">${esc(a.badge)}</span>${a.extra ? `<span class="badge">${esc(a.extra)}</span>` : ""}</span>
-      <span class="when">${esc(a.when)}</span>
+      <span class="when">${esc(a.when)}${a.kind === "run" && a.live ? ` <button class="link ico act-cancel" data-cancel-run="${esc(a.key)}" title="Huỷ lượt chạy này" aria-label="Huỷ ${esc(a.id)}">■</button>` : ""}</span>
       <span class="sub" title="${esc(a.sub)}">${esc(a.sub)}</span>
     </div>`).join("") : '<div class="empty">Chưa có hoạt động</div>';
+  document.querySelectorAll("[data-cancel-run]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    const r = S.runs.find((x) => x.display_id === b.dataset.cancelRun);
+    if (r) cancelRun(r, b);
+  });
   document.querySelectorAll("[data-filter]").forEach((b) => b.onclick = () => { filter = b.dataset.filter; renderActs(); });
   document.querySelectorAll(".act").forEach((el) => el.onclick = () => {
     if (el.dataset.kind === "run") select(el.dataset.key); else selectOther(el.dataset.kind, el.dataset.key);
@@ -1028,7 +1284,7 @@ const ddmm = (d) => d ? d.slice(8, 10) + "/" + d.slice(5, 7) : "";
 const todayIso = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 function scheduleBox(j) {
   const sc = j.schedule || {times: [], days: "daily"};
-  const times = (sc.times.length ? sc.times : ["12:00"]).map((t) => `<span class="tchip"><input type="text" inputmode="numeric" maxlength="5" pattern="[0-2]?[0-9]:[0-5][0-9]" placeholder="HH:MM" value="${esc(t)}" data-stime aria-label="Giờ chạy (HH:MM)"><button class="link" data-sdel title="Bỏ giờ này" aria-label="Bỏ giờ ${esc(t)}">✕</button></span>`).join("");
+  const times = (sc.times.length ? sc.times : ["12:00"]).map((t) => `<span class="tchip"><input type="text" inputmode="numeric" maxlength="5" pattern="[0-2]?[0-9]:[0-5][0-9]" placeholder="HH:MM" value="${esc(t)}" data-stime aria-label="Giờ chạy (HH:MM)"><button class="link ico" data-sdel title="Bỏ giờ này" aria-label="Bỏ giờ ${esc(t)}">✕</button></span>`).join("");
   return `<div class="sched">
     <div class="sched-row"><span class="lf-title">Lịch chạy tự động</span>
       <span id="schedTimes">${times}</span><button class="link" id="schedAdd">+ thêm giờ</button>
@@ -1045,7 +1301,7 @@ function bindSchedule() {
   if (!$("schedSave")) return;
   const bindDel = () => document.querySelectorAll("[data-sdel]").forEach((b) => b.onclick = () => { if (document.querySelectorAll("[data-stime]").length > 1) b.parentElement.remove(); });
   bindDel();
-  $("schedAdd").onclick = () => { const sp = document.createElement("span"); sp.className = "tchip"; sp.innerHTML = `<input type="text" inputmode="numeric" maxlength="5" pattern="[0-2]?[0-9]:[0-5][0-9]" placeholder="HH:MM" value="09:00" data-stime aria-label="Giờ chạy (HH:MM)"><button class="link" data-sdel aria-label="Bỏ giờ này">✕</button>`; $("schedTimes").appendChild(sp); bindDel(); };
+  $("schedAdd").onclick = () => { const sp = document.createElement("span"); sp.className = "tchip"; sp.innerHTML = `<input type="text" inputmode="numeric" maxlength="5" pattern="[0-2]?[0-9]:[0-5][0-9]" placeholder="HH:MM" value="09:00" data-stime aria-label="Giờ chạy (HH:MM)"><button class="link ico" data-sdel aria-label="Bỏ giờ này">✕</button>`; $("schedTimes").appendChild(sp); bindDel(); };
   $("schedSave").onclick = () => post({action: "merge_schedule", days: $("schedDays").value, times: [...document.querySelectorAll("[data-stime]")].map((i) => i.value).filter(Boolean)});
   if ($("skipOff")) $("skipOff").onclick = () => post({action: "merge_skip", until: ""});
   if ($("skipToday")) $("skipToday").onclick = () => post({action: "merge_skip", until: todayIso()});
@@ -1246,22 +1502,70 @@ function renderDetail() {
     </div>
     <div class="toolbar">
       <select id="runProfile" title="Gói dùng cho lượt chạy lại">${opts}</select>
-      <button class="primary" id="rerun" ${live ? "disabled" : ""}>Chạy lại autofix</button>
+      ${live || r.state === "stale" ? `<button class="danger" id="cancelRun" title="Dừng lượt này (Claude, Gemini, build…). Worktree giữ nguyên, không đụng OpenProject; bấm Chạy lại autofix để làm lại">■ Huỷ chạy</button>` : ""}
+      ${["cancelled", "stale"].includes(r.state) ? `<button class="primary" id="resumeRun" title="Làm tiếp trên đúng worktree cũ: Claude xem phần đã sửa / commit dở rồi làm tiếp, không làm lại từ đầu">▶ Làm tiếp</button>` : ""}
+      <button class="${["cancelled", "stale"].includes(r.state) ? "" : "primary"}" id="rerun" ${live ? "disabled" : ""} title="Lượt mới từ code mới nhất của nhánh — bỏ phần sửa dở của lượt này">Chạy lại autofix</button>
       <button id="review" ${live ? "disabled" : ""} title="Gemini test lại bản đã push, Claude xem lại các ý chưa đạt">Test lại</button>
       ${ASSIST_RX.test(r.verdict || "") ? `<button id="assist" ${live ? "disabled" : ""} title="Claude gỡ vướng trên đúng lượt này: tải file đính kèm, ticket liên quan, gọi GET API server test; nhập thêm ghi chú hướng dẫn nếu cần">🤝 Claude hỗ trợ</button>` : ""}
       <label class="force" title="Chạy dù gói đã quá ngưỡng 5 giờ / 7 ngày tự đặt. Gói đã hết hạn mức thật thì vẫn không chạy được.">
         <input type="checkbox" id="ignoreLimits"> Bỏ qua ngưỡng hạn mức</label>
       ${r.wp_id ? `<a href="${esc(S.op_url)}/work_packages/${esc(r.wp_id)}" target="_blank" rel="noopener"><button>Mở OpenProject ↗</button></a>` : ""}
     </div>
+    ${["cancelled", "stale"].includes(r.state) ? `<div class="wip" id="wip">${wipHtml(r)}</div>` : ""}
     <div class="tabs">${tabs.map((t) => `<button class="${t === tab ? "on" : ""}" data-tab="${esc(t)}">${esc(t === "Thao tác" ? "Log thao tác" : t)}</button>`).join("")}</div>
     <div class="diffline" id="diff"></div>
     <div class="log" id="log"></div>`;
   document.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { tab = b.dataset.tab; fileCache = ""; renderDetail(); loadTab(true); });
   const forceNote = () => $("ignoreLimits").checked ? " (bỏ qua ngưỡng hạn mức)" : "";
   $("rerun").onclick = () => confirm(`Chạy lại autofix cho ${r.display_id} bằng ${$("runProfile").value}${forceNote()}?`) && post({action: "rerun", display_id: r.display_id, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked});
+  if ($("cancelRun")) $("cancelRun").onclick = (e) => cancelRun(r, e.target);
+  if ($("resumeRun")) $("resumeRun").onclick = (e) => confirm(`Làm tiếp ${r.display_id} trên worktree cũ bằng ${$("runProfile").value}${forceNote()}?`)
+    && post({action: "resume_run", display_id: r.display_id, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked}, e.target);
+  if (["cancelled", "stale"].includes(r.state)) loadWip(r);
   if ($("assist")) $("assist").onclick = () => runAssist(r.display_id, $("runProfile").value, $("ignoreLimits").checked);
   $("review").onclick = () => confirm(`Test lại ${r.display_id}${forceNote()}?`) && post({action: "review", display_id: r.display_id, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked});
   paintLog();
+}
+// Phần sửa dở của lượt đã huỷ / bị ngắt (run_wip) — tải khi mở chi tiết, cache theo lượt + lần cập nhật.
+const WIP = {};
+const wipKey = (r) => r.display_id + "|" + (r.run_name || "") + "|" + (r.updated_at || "");
+async function loadWip(r) {
+  const k = wipKey(r);
+  if (WIP[k]) return;
+  WIP[k] = {loading: true};
+  try {
+    const res = await fetch("/api/action", {method: "POST", headers: {"Content-Type": "application/json", "X-Autofix": "1"},
+      body: JSON.stringify({action: "run_wip", display_id: r.display_id})});
+    const d = await res.json(); WIP[k] = res.ok ? d : {error: d.error || res.status};
+  } catch (e) { WIP[k] = {error: e.message}; }
+  const cur = current();
+  if (cur && wipKey(cur) === k && $("wip")) $("wip").innerHTML = wipHtml(cur);
+}
+function wipHtml(r) {
+  const w = WIP[wipKey(r)];
+  if (!w || w.loading) return '<span class="muted">Đang xem phần sửa dở…</span>';
+  if (w.error) return `<span class="muted">Không đọc được phần sửa dở: ${esc(w.error)}</span>`;
+  if (!w.exists) return '<span class="muted">Không còn thư mục lượt chạy — chỉ Chạy lại được.</span>';
+  const nChanged = w.repos.reduce((n, x) => n + x.changed.length + x.new.length, 0), nCommits = w.repos.reduce((n, x) => n + x.commits.length, 0);
+  const advice = !w.can_resume ? "Không làm tiếp được (thiếu prompt / worktree) — dùng Chạy lại autofix."
+    : w.report_done ? "Claude đã viết xong báo cáo — Làm tiếp sẽ đi tiếp bước kiểm tra / giao."
+    : nChanged || nCommits ? "Có phần sửa dở — nên Làm tiếp để Claude dùng lại; Chạy lại nếu muốn bỏ phần này."
+    : "Chưa sửa gì — Làm tiếp hay Chạy lại đều như nhau (Chạy lại lấy code mới nhất).";
+  return `<div class="lf-title">Phần sửa dở${w.cancelled_from ? ` <span class="muted">(huỷ khi ${esc(w.cancelled_from)})</span>` : ""}</div>
+    <div class="wip-sum"><span class="badge ${nChanged ? "warn" : ""}">${nChanged} file chưa commit</span>
+      <span class="badge ${nCommits ? "accent" : ""}">${nCommits} commit chưa push</span>
+      <span class="badge ${w.report_done ? "ok" : ""}">${w.report_done ? "đã có báo cáo" : "chưa có báo cáo"}</span></div>
+    ${w.repos.filter((x) => x.changed.length || x.new.length || x.commits.length).map((x) => `<div class="wip-repo"><b>${esc(x.repo)}</b>
+      ${x.stat ? `<span class="muted">${esc(x.stat)}</span>` : ""}
+      ${x.changed.length ? `<div>Sửa: ${x.changed.map((f) => `<code>${esc(f)}</code>`).join(" ")}</div>` : ""}
+      ${x.new.length ? `<div>File mới: ${x.new.map((f) => `<code>${esc(f)}</code>`).join(" ")}</div>` : ""}
+      ${x.commits.length ? `<div>Commit: ${x.commits.map((c) => `<code>${esc(c)}</code>`).join(" · ")}</div>` : ""}</div>`).join("")}
+    <div class="muted">${esc(advice)}</div>`;
+}
+function cancelRun(r, btn) {
+  const warn = r.state === "shipping" ? "\n\nLượt đang kiểm tra / push: có thể đã push một phần hoặc đã comment lên ticket." : "";
+  if (confirm(`Huỷ lượt chạy ${r.display_id}?${warn}\n\nDừng Claude / Gemini / build của lượt này. Worktree và commit giữ nguyên, không đổi trạng thái ticket.`))
+    post({action: "cancel_run", display_id: r.display_id}, btn);
 }
 // Tab là file markdown (report.md, gemini.md, followup.md, qa-server.md, prompt.md); còn lại là log thô.
 const MD_TABS = ["Báo cáo", "Gemini", "Claude xem lại", "QA", "Prompt"];
@@ -1466,14 +1770,17 @@ $("pollNow").onclick = async () => {
 };
 const addMode = () => document.querySelector("[name=addMode]:checked").value;
 document.querySelectorAll("[name=addMode]").forEach((r) => r.onchange = () => {
-  const token = addMode() === "token";
-  $("newToken").hidden = !token; $("newDir").hidden = token;
-  $("addHelp").innerHTML = token
-    ? $("addHelp").dataset.token
+  const mode = addMode(), token = mode === "token";
+  $("newToken").hidden = !token; $("newDir").hidden = mode !== "dir";
+  $("addBtn").textContent = mode === "kv" ? "Tiếp tục…" : "Thêm";
+  $("addHelp").innerHTML = token ? $("addHelp").dataset.token
+    : mode === "kv" ? (kvActive() ? "Chọn key token Claude trong KeyVault và nhập mã OTP Google Authenticator. Token giải mã ngay trên máy này."
+        : "Chưa kết nối KeyVault — bấm Tiếp tục để đăng ký.")
     : "Sau khi thêm, đăng nhập trong terminal: <code>CLAUDE_CONFIG_DIR=&lt;thư mục&gt; claude</code> rồi gõ <code>/login</code>.";
 });
 $("addHelp").dataset.token = $("addHelp").innerHTML;
 $("addBtn").onclick = async () => {
+  if (addMode() === "kv") return kvOpen(kvActive() ? "fetch" : "setup", {new: true, name: $("newName").value.trim()});
   const body = {action: "add_profile", name: $("newName").value};
   if (addMode() === "token") body.token = $("newToken").value; else body.config_dir = $("newDir").value;
   await post(body);
@@ -1514,7 +1821,7 @@ pollCompose(); setInterval(pollCompose, 3000);
 let tmFiles = [], tmDraftId = null, tmPoll = null, TM_QS = [];
 const tmFmt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
 function tmRenderFiles() {
-  $("tmFileList").innerHTML = tmFiles.map((f, i) => `<span class="tm-file">${esc(f.name)} <small>${tmFmt(f.size)}</small><button class="link" data-tmdel="${i}" aria-label="Bỏ ${esc(f.name)}">✕</button></span>`).join("");
+  $("tmFileList").innerHTML = tmFiles.map((f, i) => `<span class="tm-file">${esc(f.name)} <small>${tmFmt(f.size)}</small><button class="link ico" data-tmdel="${i}" aria-label="Bỏ ${esc(f.name)}">✕</button></span>`).join("");
   document.querySelectorAll("[data-tmdel]").forEach((b) => b.onclick = () => { tmFiles.splice(+b.dataset.tmdel, 1); tmRenderFiles(); });
 }
 function tmAdd(list) {
@@ -1549,7 +1856,7 @@ async function tmRecent() {
   $("tmRecent").innerHTML = !list.length ? "" : `<div class="tm-label" style="margin-top:14px">Bản nháp chưa tạo (${list.length}) — bấm để mở lại</div>
     ${list.map((d) => `<div class="tm-row" style="display:flex;gap:8px;align-items:center;margin:4px 0">
       <span class="badge ${(lab[d.state] || ["", d.state])[0]}">${(lab[d.state] || ["", d.state])[1]}</span>
-      <button class="link" data-tmopen="${esc(d.id)}" style="text-align:left;flex:1">${esc(d.subject || d.prompt || d.id)}</button>
+      <button class="link plain" data-tmopen="${esc(d.id)}" style="text-align:left;flex:1">${esc(d.subject || d.prompt || d.id)}</button>
       <span class="muted">${esc((d.updated_at || "").slice(11, 16))} ${esc((d.updated_at || "").slice(8, 10))}/${esc((d.updated_at || "").slice(5, 7))}</span></div>`).join("")}`;
   document.querySelectorAll("[data-tmopen]").forEach((b) => b.onclick = async () => {
     const st = await (await fetch("/api/taskdraft?id=" + encodeURIComponent(b.dataset.tmopen))).json();
@@ -1763,7 +2070,7 @@ async function openWP(id, opts) {
   try { w = await (await fetch("/api/op/wp?id=" + encodeURIComponent(id))).json(); }
   catch (e) { w = {error: "Không tải được — dashboard mất kết nối?"}; }
   if (req !== wpReq) return;
-  const close = '<button class="link" data-wpclose aria-label="Đóng" style="font-size:18px">✕</button>';
+  const close = '<button class="link ico" data-wpclose aria-label="Đóng" style="font-size:18px">✕</button>';
   if (w.error) { $("wpFoot").innerHTML = ""; $("wpChatScroll").innerHTML = ""; $("wpHead").innerHTML = `<div class="wp-head"><div></div>${close}</div>`;
     $("wpBody").innerHTML = `<div class="empty">${esc(w.error)}</div>`; bindWP(); return; }
   const meta = [["Trạng thái", `<span class="wp-status" id="wpStatus"><span class="badge ${opBadge(w.status)}">${esc(w.status)}</span>
@@ -2296,7 +2603,7 @@ async function tgChat(chatId, opts) {
         <button id="tgImport" title="Đọc lịch sử từ Telegram (tin cũ chỉ được lưu; chọn tin rồi tạo yêu cầu)">Nhập</button></span></div>
       ${opts.focus ? `<div class="tg-focusbar">Đang xem đoạn chat của yêu cầu <b>#${opts.focus}</b> <button class="link" id="tgBackReq">← quay lại yêu cầu</button> <button class="link" id="tgLatest">xem tin mới nhất</button></div>` : ""}
       <div class="tg-msgs tg-chatmsgs">${d.messages.map((m) => `<label class="tg-pick ${opts.focus && m.request_id === opts.focus ? "hl" : ""}" data-req="${m.request_id || ""}"><input type="checkbox" value="${m.id}" ${m.request_id ? "disabled" : ""}>
-        <div style="flex:1">${m.request_id ? `<button class="link tg-reqlink" data-openreq="${m.request_id}" title="Mở yêu cầu này">thuộc yêu cầu #${m.request_id}</button>` : ""}${tgMsgHtml(m)}</div></label>`).join("") || `<div class="empty">Chưa có tin nhắn.</div>`}</div>
+        <div style="flex:1">${m.request_id ? `<button class="link plain tg-reqlink" data-openreq="${m.request_id}" title="Mở yêu cầu này">thuộc yêu cầu #${m.request_id}</button>` : ""}${tgMsgHtml(m)}</div></label>`).join("") || `<div class="empty">Chưa có tin nhắn.</div>`}</div>
       <div class="tg-chatfoot"><button class="primary" id="tgFromMsgs">Tạo yêu cầu từ tin đã chọn</button><span class="muted">tin cũ chỉ được lưu, không tự thành yêu cầu</span></div>
     </section></div>`;
   const box = document.querySelector("#tgmBody .tg-chatmsgs");
@@ -2402,7 +2709,7 @@ function tgChatsRender(st, rows) {
         <td><select data-k="mode">${Object.entries(modes).map(([k, l]) => `<option value="${k}" ${r.mode === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
           ${projList().length > 1 ? `<select data-k="project" title="Việc từ chat này tạo vào dự án" style="margin-top:4px"><option value="">Dự án: mặc định (${esc(projList()[0].name)})</option>${projList().map((p) => `<option value="${esc(p.key)}" ${r.project === p.key ? "selected" : ""}>Dự án: ${esc(p.name)}</option>`).join("")}</select>` : ""}</td>
         ${["requests", "asks", "notify"].map((k) => `<td class="c"><input type="checkbox" data-k="${k}" ${r[k] !== false ? "checked" : ""} aria-label="${k}"></td>`).join("")}
-        <td><button class="link" data-del="${i}" title="Bỏ nguồn này" aria-label="Bỏ ${esc(r.ref)}">✕</button></td></tr>`; }).join("")
+        <td><button class="link ico" data-del="${i}" title="Bỏ nguồn này" aria-label="Bỏ ${esc(r.ref)}">✕</button></td></tr>`; }).join("")
       || `<tr><td colspan="6" class="muted">Chưa có nguồn chat nào — chọn bên dưới.</td></tr>`}
     </tbody></table>
     <div class="tm-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
@@ -2558,7 +2865,7 @@ $("tgBox").querySelector("h2").addEventListener("click", () => setTimeout(tgLoad
 tgLoad(); setInterval(tgLoad, 15000);
 
 // ---- Trang (nav trên header / đáy màn hình trên điện thoại) ----
-const VIEWS = ["todo", "autofix", "ticket", "telegram", "system", "config"];
+const VIEWS = ["todo", "autofix", "ticket", "stats", "telegram", "system", "projects", "config"];
 function showView(v) {
   if (!VIEWS.includes(v)) v = "todo";
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("on", el.dataset.view === v));
@@ -2567,13 +2874,120 @@ function showView(v) {
   if (v === "telegram" && typeof tgLoad === "function") tgLoad();
   if (v === "ticket" && typeof loadOP === "function") loadOP();
   if (v === "todo") renderTodo();
-  if (v === "config") loadConfig();
+  if (v === "config" || v === "projects") loadConfig();
+  if (v === "stats") loadStats();
   document.querySelectorAll(".view.on .scroll-reset").forEach((el) => { el.scrollTop = 0; });
 }
 document.querySelectorAll("nav.views [data-view]").forEach((b) => b.onclick = () => showView(b.dataset.view));
 $("health").onclick = () => showView("system");
 document.addEventListener("click", (e) => { const m = $("menu"); if (m.open && !e.target.closest("#menu")) m.open = false; });
 
+// ---- Thống kê: task hoàn thành / bị reopen (stats.py — lịch sử trạng thái OpenProject) ----
+const ST = {days: "30", scope: "mine", project: "", data: null, poll: null, showAll: {}, table: false};
+function stSeg(id, key) {
+  $(id).querySelectorAll("button").forEach((b) => b.onclick = () => {
+    ST[key] = b.dataset.v; $(id).querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); loadStats();
+  });
+}
+stSeg("stDays", "days"); stSeg("stScope", "scope");
+$("stProj").onchange = () => { ST.project = $("stProj").value; loadStats(); };
+$("stRefresh").onclick = () => loadStats(true);
+async function loadStats(refresh) {
+  const ps = projList();
+  $("stProj").hidden = ps.length < 2;
+  if (ps.length > 1 && !$("stProj").options.length)
+    $("stProj").innerHTML = `<option value="">Tất cả dự án</option>` + ps.map((p) => `<option value="${esc(p.key)}">${esc(p.name)}</option>`).join("");
+  clearTimeout(ST.poll);
+  let d;
+  try { d = await tgFetch(`/api/stats?days=${ST.days}&scope=${ST.scope}&project=${encodeURIComponent(ST.project)}${refresh ? "&refresh=1" : ""}`); }
+  catch (e) { $("stBody").innerHTML = `<div class="empty">Không tải được: ${esc(e.message)}</div>`; return; }
+  if (d.error) { $("stBody").innerHTML = `<div class="empty">Lỗi: ${esc(d.error)}</div>`; return; }
+  if (d.building) {
+    const p = d.progress;
+    $("stSum").textContent = p ? `đang đọc lịch sử ${p[0]}/${p[1]} ticket…` : "đang tải từ OpenProject…";
+    if (d.stale) renderStats(d.stale); else if (!ST.data) $("stBody").innerHTML = '<div class="empty">Đang đọc lịch sử trạng thái từ OpenProject (lần đầu có thể mất ~1 phút)…</div>';
+    ST.poll = setTimeout(() => { if (document.querySelector('.view[data-view="stats"].on')) loadStats(); }, 1500);
+    return;
+  }
+  ST.data = d; renderStats(d);
+}
+function stChartSvg(days) {
+  const el = $("stChart"), W = Math.max(320, (el && el.clientWidth) || 800), H = 190, L = 28, B = 22, T = 26, ph = H - B - T;
+  const slot = (W - L) / days.length, gap = 2, bw = Math.max(2, Math.min(14, (slot - 6 - gap) / 2));
+  const vmax = Math.max(1, ...days.map((d) => Math.max(d.done, d.reopen))), step = Math.max(1, Math.ceil(vmax / 4)), ymax = step * Math.ceil(vmax / step);
+  const bar = (x, v, cls) => { if (!v) return ""; const bh = ph * v / ymax, y = T + ph - bh, r = Math.min(4, bh, bw / 2);
+    return `<path class="${cls}" d="M${x},${T + ph} V${y + r} Q${x},${y} ${x + r},${y} H${x + bw - r} Q${x + bw},${y} ${x + bw},${y + r} V${T + ph} Z"/>`; };
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Số ticket hoàn thành và bị reopen mỗi ngày">`;
+  for (let v = 0; v <= ymax; v += step) {
+    const y = T + ph - ph * v / ymax;
+    s += `<line class="${v ? "grid" : "base"}" x1="${L}" x2="${W}" y1="${y}" y2="${y}"/><text class="tk" x="${L - 6}" y="${y + 3}" text-anchor="end">${v}</text>`;
+  }
+  const every = Math.ceil(days.length / Math.max(4, Math.floor((W - L) / 46)));
+  days.forEach((d, i) => {
+    const x0 = L + i * slot, cx = x0 + slot / 2, x1 = cx - bw - gap / 2, x2 = cx + gap / 2;
+    const lab = d.date.slice(8, 10) + "/" + d.date.slice(5, 7);
+    const tipText = `${lab}: ${d.done} hoàn thành${d.autofix ? ` (${d.autofix} autofix)` : ""} · ${d.reopen} reopen`;
+    const tw = tipText.length * 6.4 + 16, tx = Math.min(Math.max(cx - tw / 2, 0), W - tw);
+    s += `<g class="col"><rect class="hit" x="${x0}" y="${T}" width="${slot}" height="${ph}"/>` + bar(x1, d.done, "b1") + bar(x2, d.reopen, "b2");
+    if ((days.length - 1 - i) % every === 0) s += `<text class="tk" x="${cx}" y="${T + ph + 15}" text-anchor="middle">${lab}</text>`;
+    s += `<g class="tip"><rect x="${tx}" y="2" width="${tw}" height="18" rx="4"/><text x="${tx + tw / 2}" y="15" text-anchor="middle">${tipText}</text></g></g>`;
+  });
+  return s + "</svg>";
+}
+function stTicket(x) {
+  return `<a href="#" data-stwp="${esc(x.id)}" title="Xem chi tiết">${esc(x.display_id)}</a>`;
+}
+function stList(key, rows, head, row, limit) {
+  const all = ST.showAll[key], shown = all ? rows : rows.slice(0, limit);
+  return `<table class="st-table"><thead><tr>${head}</tr></thead><tbody>${shown.map(row).join("") || `<tr><td colspan="9" class="muted">Không có</td></tr>`}</tbody></table>
+    ${rows.length > limit ? `<div class="more"><button class="link" data-stmore="${key}">${all ? "Thu gọn" : `Xem tất cả ${rows.length}`}</button></div>` : ""}`;
+}
+function renderStats(d) {
+  const k = d.kpi, pct = (v) => v == null ? "—" : (v * 100).toFixed(v < 0.1 ? 1 : 0) + "%";
+  const ago = Math.round((Date.now() / 1000 - d.generated_at) / 60);
+  $("stSum").textContent = `${d.days} ngày · ${d.scope === "mine" ? "của tôi" : "cả dự án"} · ${d.scanned} ticket có cập nhật · số liệu ${ago < 1 ? "vừa tải" : ago + " phút trước"}`;
+  const when = (t) => { const x = new Date(t); return `${pad(x.getDate())}/${pad(x.getMonth() + 1)} ${pad(x.getHours())}:${pad(x.getMinutes())}`; };
+  const tile = (l, v, sub, color) => `<div class="st-tile"><div class="l">${color ? `<span class="st-key" style="background:var(${color})"></span>` : ""}${l}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`;
+  const people = (rows, f, lbl) => rows.length ? `<table class="st-table"><thead><tr><th>Người</th><th class="n">${lbl}</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r.name)}</td><td class="n">${r[f]}</td></tr>`).join("")}</tbody></table>` : '<div class="muted">Không có</div>';
+  $("stBody").innerHTML = `
+    <div class="st-tiles">
+      ${tile("Hoàn thành", k.done, `${k.done_events} lần chuyển Resolved / Done / Closed`, "--s1")}
+      ${tile("Autofix hoàn thành", k.autofix, k.done ? `${pct(k.autofix / k.done)} số ticket hoàn thành` : "—")}
+      ${tile("Bị reopen", k.reopened, `${k.reopen_events} lần chuyển Reopened`, "--s2")}
+      ${tile("Tỉ lệ reopen", pct(k.reopen_rate), "ticket hoàn thành trong khoảng rồi bị reopen")}
+      ${tile("Trả lại nội bộ", k.returned, `${k.returned_events} lần: QA server trượt → UNREVIEWED, chờ xem lại → TO DO…`)}
+    </div>
+    <div class="st-chart">
+      <div class="st-legend"><span><span class="st-key" style="background:var(--s1)"></span>Hoàn thành</span><span><span class="st-key" style="background:var(--s2)"></span>Bị reopen</span>
+        <span class="muted" style="margin-left:auto">mỗi cột một ngày · rê chuột xem số</span><button class="link" id="stTableBtn">${ST.table ? "Ẩn bảng" : "Xem dạng bảng"}</button></div>
+      <div id="stChart"></div>
+      ${ST.table ? `<table class="st-table"><thead><tr><th>Ngày</th><th class="n">Hoàn thành</th><th class="n">Autofix</th><th class="n">Bị reopen</th><th class="n">Trả lại nội bộ</th></tr></thead><tbody>${d.series.slice().reverse().map((x) => `<tr><td>${x.date.slice(8, 10)}/${x.date.slice(5, 7)}</td><td class="n">${x.done}</td><td class="n">${x.autofix}</td><td class="n">${x.reopen}</td><td class="n">${x.returned}</td></tr>`).join("")}</tbody></table>` : ""}
+    </div>
+    <div class="st-grid">
+      <div>
+        <div class="st-card"><h3><span class="st-key" style="background:var(--s2)"></span>Bị reopen <span class="muted">${d.reopens.length} ticket · nhiều lần nhất trước</span></h3>
+          ${stList("reopens", d.reopens, "<th>Ticket</th><th>Tiêu đề</th><th class='n'>Lần</th><th>Người reopen</th><th>Người hoàn thành</th><th>Hiện tại</th><th>Lần cuối</th>",
+            (r) => `<tr><td>${stTicket(r)}</td><td class="subj">${esc(r.subject)}</td><td class="n">${r.count}</td><td>${esc([...new Set(r.events.map((e) => e.by_name))].join(", "))}</td><td>${esc(r.resolved_by_name || "—")}</td><td>${esc(r.status)}</td><td class="nw">${when(r.last_at)}</td></tr>`, 10)}</div>
+        <div class="st-card"><h3><span class="st-key" style="background:var(--s1)"></span>Hoàn thành <span class="muted">${d.done.length} lần · mới nhất trước</span></h3>
+          ${stList("done", d.done, "<th>Lúc</th><th>Ticket</th><th>Tiêu đề</th><th>Người</th><th>Sang</th><th>Hiện tại</th>",
+            (x) => `<tr><td>${when(x.at)}</td><td class="nw">${stTicket(x)}</td><td class="subj">${esc(x.subject)}</td><td>${esc(x.by_name)}${x.autofix ? ' <span class="badge accent">autofix</span>' : ""}</td><td>${esc(x.to)}</td><td>${esc(x.status)}</td></tr>`, 15)}</div>
+        <div class="st-card"><h3>Trả lại nội bộ <span class="muted">từ hoàn thành về trạng thái đang làm (không phải Reopened)</span></h3>
+          ${stList("returned", d.returned, "<th>Lúc</th><th>Ticket</th><th>Tiêu đề</th><th>Chuyển</th><th>Người</th>",
+            (x) => `<tr><td>${when(x.at)}</td><td class="nw">${stTicket(x)}</td><td class="subj">${esc(x.subject)}</td><td>${esc(x.frm)} → ${esc(x.to)}</td><td>${esc(x.by_name)}</td></tr>`, 8)}</div>
+      </div>
+      <div>
+        <div class="st-card"><h3>Hoàn thành theo người</h3>${people(d.by_user, "done", "Lần")}</div>
+        <div class="st-card"><h3>Reopen theo người</h3>${people(d.reopen_by, "reopen", "Lần")}</div>
+        ${d.by_project.length > 1 ? `<div class="st-card"><h3>Theo dự án</h3><table class="st-table"><thead><tr><th>Dự án</th><th class="n">Hoàn thành</th><th class="n">Reopen</th></tr></thead><tbody>${d.by_project.map((p) => `<tr><td>${esc(p.project)}</td><td class="n">${p.done}</td><td class="n">${p.reopen}</td></tr>`).join("")}</tbody></table></div>` : ""}
+        <div class="st-card muted" style="font-size:12px">Hoàn thành = chuyển sang Resolved / Done / Closed. Bị reopen = chuyển sang Reopened. Tỉ lệ reopen = ticket hoàn thành trong khoảng rồi bị reopen ÷ ticket hoàn thành. Autofix = lần hoàn thành có comment [Autofix] trong ±10 phút. "Của tôi" = tôi chuyển hoàn thành, hoặc Dev / người được giao là tôi.</div>
+      </div>
+    </div>`;
+  document.querySelectorAll("[data-stmore]").forEach((b) => b.onclick = () => { ST.showAll[b.dataset.stmore] = !ST.showAll[b.dataset.stmore]; renderStats(d); });
+  document.querySelectorAll("[data-stwp]").forEach((a) => a.onclick = (e) => { e.preventDefault(); openWP(a.dataset.stwp); });
+  $("stTableBtn").onclick = () => { ST.table = !ST.table; renderStats(d); };
+  if (!ST.table) $("stChart").innerHTML = stChartSvg(d.series);  // sau khi khung đã có trên trang: đo đúng bề rộng
+}
+window.addEventListener("resize", () => { if (ST.data && !ST.table && document.querySelector('.view[data-view="stats"].on') && $("stChart")) $("stChart").innerHTML = stChartSvg(ST.data.series); });
 // ---- Cần xử lý: gom mọi việc đang chờ chính bạn (ticket chờ quyết, câu hỏi tester, yêu cầu Telegram, lỗi) ----
 const TODO = {tg: null, asks: null};
 const todoHidden = () => { try { return JSON.parse(localStorage.getItem("todoHidden") || "{}"); } catch (e) { return {}; } };
@@ -2671,7 +3085,7 @@ function renderTodo() {
     const prof = (S.profiles.find((p) => p.active) || {}).name;
     for (const id of ids) await post({action: "rerun", display_id: id, profile: prof});
     toast(`Đã xếp hàng ${ids.length} lượt chạy lại`); });
-  $$("[data-tproj]", async (b) => { showView("config"); await loadConfig(); CFG.proj = b.dataset.tproj; await loadCfgRepos();
+  $$("[data-tproj]", async (b) => { showView("projects"); await loadConfig(); CFG.proj = b.dataset.tproj; await loadCfgRepos();
     $("cfgRepoBox").scrollIntoView({behavior: "smooth"}); });
   $$("[data-tjob]", (b) => { selectOther("job", b.dataset.tjob); showView("autofix"); });
   $$("[data-tconf]", (b) => { selectOther("conf", b.dataset.tconf); showView("autofix"); });
@@ -2739,7 +3153,7 @@ function renderCfgProjects(msg) {
       const d = x.deploy || {}, dv = (k) => Array.isArray(d[k]) ? d[k].join(", ") : (d[k] ?? "");
       const fieldD = ([k, l, h]) => `<label for="cpd${i}_${k}">${esc(l)}</label><input type="${/password|otp/.test(k) ? "password" : "text"}" id="cpd${i}_${k}" data-pi="${i}" data-dk="${k}" value="${esc(dv(k))}" placeholder="${esc(x.deploy_inherit || x._legacy ? "trống = theo deploy.json / .env" : h)}" title="${esc(h)}" autocomplete="off">`;
       return `<div class="cfg-repo"><div class="hd"><b>${esc(x.name || x.key)}</b><span class="muted">· OP #${esc(x.op_project)} · mã ${esc(x.prefix)}-… · ${(x.repo_labels || []).length ? "repo: " + esc(x.repo_labels.join(", ")) : "chưa có repo"}${i === 0 ? " · mặc định" : ""}</span>
-          <span style="margin-left:auto;display:flex;gap:6px"><button class="link" data-pai="${i}" title="AI đọc source các repo của dự án → điền bối cảnh dự án, cách đăng nhập, đường dẫn kiểm tra server (bạn xem lại rồi Lưu)">🤖 AI đọc source điền cấu hình</button><button class="link" data-prepo="${i}" title="Sửa danh sách repo của dự án này">Repo ↓</button>${list.length > 1 ? `<button class="link" data-pdel="${i}" title="Bỏ dự án">✕</button>` : ""}</span></div>
+          <span style="margin-left:auto;display:flex;gap:6px"><button class="link" data-pai="${i}" title="AI đọc source các repo của dự án → điền bối cảnh dự án, cách đăng nhập, đường dẫn kiểm tra server (bạn xem lại rồi Lưu)">🤖 AI đọc source điền cấu hình</button><button class="link" data-prepo="${i}" title="Sửa danh sách repo của dự án này">Repo ↓</button>${list.length > 1 ? `<button class="link" data-pdel="${i}" title="${x._orig ? "Gỡ dự án khỏi tool kèm dữ liệu liên quan (xem trước rồi mới xoá)" : "Bỏ dự án chưa lưu"}">${x._orig ? "Gỡ dự án…" : "✕"}</button>` : ""}</span></div>
         <div class="cfg-grid">
           <label for="cp${i}_key">Mã</label><input type="text" id="cp${i}_key" data-pi="${i}" data-pk="key" value="${esc(x.key)}" ${x._orig ? "readonly title=\"mã đã dùng cho cấu hình, không đổi\"" : ""}>
           ${CFG_PROJ.map(fieldP).join("")}
@@ -2797,6 +3211,7 @@ function renderCfgProjects(msg) {
     $("cpaSt" + i).textContent = r ? r.message : "Không đăng nhập được — xem thông báo lỗi"; });
   CFG.syncProj = sync;
   document.querySelectorAll("[data-pdel]").forEach((b) => b.onclick = () => { sync(); const x = list[+b.dataset.pdel];
+    if (x._orig) return prjRemoveOpen(x._orig, b);
     if (confirm(`Bỏ dự án ${x.name}?${(x.repo_labels || []).length ? "\nDanh sách repo của dự án (" + x.repo_labels.join(", ") + ") cũng bị bỏ khi lưu." : ""}`)) { list.splice(+b.dataset.pdel, 1); renderCfgProjects(); } });
   document.querySelectorAll("[data-prepo]").forEach((b) => b.onclick = async () => { sync(); const x = list[+b.dataset.prepo];
     if (!x._orig) { toast("Lưu dự án trước rồi mới thêm repo", true); return; }
@@ -2825,12 +3240,52 @@ function renderCfgProjects(msg) {
     if (!confirm(`Lưu ${list.length} dự án?`)) return;
     const r = await post({action: "config_projects", projects: list}, $("cfgProjSave"));
     if (!r) return;
-    CFG.applied = [...new Set(CFG.applied.concat(["projects"]))]; $("cfgApply").hidden = false;
+    CFG.applied = [...new Set(CFG.applied.concat(["projects"]))]; cfgShowApply(true);
     const pj = await tgFetch("/api/config/projects");
     CFG.pj = pj; CFG.plist = pj.projects.map((p) => ({...p, deploy: {...(p.deploy || {})}, _orig: p.key}));
     renderCfgProjects(esc(r.message)); await loadCfgRepos();
   };
 }
+// ---- Gỡ dự án: xem trước (project_remove.plan) → gõ mã dự án xác nhận → xoá ----
+async function prjRemoveOpen(key, btn) {
+  const pl = await post({action: "config_project_remove_plan", project: key}, btn);
+  if (!pl) return;
+  const mb = (n) => (n / 1e6).toFixed(n > 1e8 ? 0 : 1) + " MB";
+  const unp = pl.runs.filter((r) => r.unpushed);
+  $("prmTitle").textContent = `Gỡ dự án ${pl.name}`;
+  $("prmBody").innerHTML = `
+    ${pl.default ? `<p class="badge warn">Đây là dự án mặc định — dự án kế tiếp sẽ thành mặc định.</p>` : ""}
+    ${pl.active.length ? `<p class="badge crit">Đang chạy: ${esc(pl.active.join(", "))} — huỷ hoặc chờ xong rồi mới gỡ được.</p>` : ""}
+    <p>Sẽ xoá khỏi tool (tổng <b>${mb(pl.total_size)}</b>):</p>
+    <ul class="prm-list">
+      <li>Cấu hình dự án <b>${esc(pl.key)}</b> (tiền tố ${esc(pl.prefix)}) — config.json được sao lưu trước khi ghi</li>
+      ${pl.runs.length ? `<li>${pl.runs.length} lượt autofix / QA (thư mục, worktree, nhánh <code>auto/…</code>):
+        <ul>${pl.runs.map((r) => `<li><code>${esc(r.name)}</code> ${mb(r.size)}${r.unpushed ? ' <span class="badge warn">commit chưa push</span>' : ""}</li>`).join("")}</ul></li>` : ""}
+      ${pl.files.length ? `<li>${pl.files.length} file / thư mục khác:
+        <ul>${pl.files.map((f) => `<li><code>${esc(f.path)}</code> <span class="muted">${esc(f.why)}</span></li>`).join("")}</ul></li>` : ""}
+      ${pl.deploy_state.length ? `<li>Mốc deploy của repo: ${esc(pl.deploy_state.join(", "))}</li>` : ""}
+      ${Object.keys(pl.qa_keys || {}).length ? `<li>Lịch sử / hàng chờ QA: ${esc(Object.entries(pl.qa_keys).map(([f, k]) => f + " (" + k.length + ")").join(", "))}</li>` : ""}
+      ${pl.chats.length ? `<li>Chat Telegram gán cho dự án → về dự án mặc định: ${esc(pl.chats.join(", "))}</li>` : ""}
+    </ul>
+    <p class="muted">Giữ nguyên: thư mục repo (${esc(pl.repos.map((r) => r.path).join(", ") || "—")}), nhánh của bạn trên remote, dữ liệu OpenProject, dòng inbox cũ.</p>
+    ${unp.length ? `<label><input type="checkbox" id="prmDropUnp"> Xoá cả ${unp.length} lượt còn commit chưa push (mặc định giữ lại)</label>` : ""}
+    <div class="kv-form"><label for="prmConfirm">Gõ <b>${esc(pl.key)}</b> để xác nhận</label><input id="prmConfirm" autocomplete="off"></div>
+    <div class="tm-actions"><button class="danger" id="prmGo" disabled>Gỡ dự án</button><button class="link" id="prmCancel">Huỷ</button></div>`;
+  $("prjRmModal").hidden = false;
+  $("prmConfirm").oninput = () => { $("prmGo").disabled = $("prmConfirm").value.trim() !== pl.key || pl.active.length > 0; };
+  $("prmConfirm").focus();
+  $("prmCancel").onclick = prjRemoveClose;
+  $("prmGo").onclick = async (e) => {
+    const r = await post({action: "config_project_remove", project: pl.key, confirm: $("prmConfirm").value.trim(),
+      drop_unpushed: $("prmDropUnp") ? $("prmDropUnp").checked : false}, e.target);
+    if (!r) return;
+    prjRemoveClose();
+    CFG.applied = [...new Set(CFG.applied.concat(["projects"]))]; cfgShowApply(true);
+    if (CFG.proj === pl.key) CFG.proj = "";
+    await loadConfig();
+  };
+}
+function prjRemoveClose() { $("prjRmModal").hidden = true; }
 function cfgVal(x, k) { const v = x[k]; return Array.isArray(v) ? v.join("\n") : (v ?? ""); }
 function renderCfgRepos(msg) {
   const R = CFG.repos, list = CFG.list, pre = R.presets || {};
@@ -2847,7 +3302,7 @@ function renderCfgRepos(msg) {
         ? `<textarea id="cr${i}_${k}" data-ri="${i}" data-rk="${k}" rows="${k === "deploy_cmd" ? 4 : 2}" placeholder="${ph(k, h)}" title="${esc(h)}">${esc(cfgVal(x, k))}</textarea>`
         : `<input type="text" id="cr${i}_${k}" data-ri="${i}" data-rk="${k}" value="${esc(cfgVal(x, k))}" placeholder="${ph(k, h)}" title="${esc(h)}">`}`;
       return `<div class="cfg-repo"><div class="hd"><b>${esc(x.label || (x.key || "?").toUpperCase())}</b><span class="muted">${i === 0 ? "· thư mục làm việc của Claude" : ""}</span>
-          <span style="margin-left:auto;display:flex;gap:4px"><button class="link" data-rmove="${i}" data-d="-1" ${i ? "" : "disabled"} title="Lên">▲</button><button class="link" data-rmove="${i}" data-d="1" ${i < list.length - 1 ? "" : "disabled"} title="Xuống">▼</button><button class="link" data-rdel="${i}" title="Bỏ repo">✕</button></span></div>
+          <span style="margin-left:auto;display:flex;gap:4px"><button class="link ico" data-rmove="${i}" data-d="-1" ${i ? "" : "disabled"} title="Lên">▲</button><button class="link ico" data-rmove="${i}" data-d="1" ${i < list.length - 1 ? "" : "disabled"} title="Xuống">▼</button><button class="link ico" data-rdel="${i}" title="Bỏ repo">✕</button></span></div>
         <div class="cfg-grid">
           <label for="cr${i}_preset">Mẫu</label><select id="cr${i}_preset" data-ri="${i}" data-rk="preset"><option value="">Tự khai báo</option><option value="fe" ${x.preset === "fe" ? "selected" : ""}>FE (React/Vite — npm run build)</option><option value="be" ${x.preset === "be" ? "selected" : ""}>BE (Spring Boot — Maven)</option></select>
           ${CFG_BASIC.map(field).join("")}
@@ -2897,8 +3352,8 @@ async function cfgPick(path, withRepos) {
   const used = new Set(CFG.list.map((x) => tilde(x.path)));
   $("cfgPick").innerHTML = `<div class="cfg-repo"><div class="hd"><b>Chọn thư mục repo</b><button class="link" id="cfgPickClose" style="margin-left:auto">✕ đóng</button></div>
     ${(CFG.gitRepos || []).length ? `<div class="muted cfg-msg">Repo git trên máy (mới dùng gần đây trước):</div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${CFG.gitRepos.map((p) => `<button class="${used.has(p) ? "" : ""}" data-pickrepo="${esc(p)}" ${used.has(p) ? "disabled title='đã có trong danh sách'" : ""}>${esc(p)}</button>`).join("")}</div>` : ""}
-    <div class="muted cfg-msg">Hoặc duyệt: ${d.crumbs.map((c) => `<button class="link" data-pickdir="${esc(c.path)}">${esc(c.name)}</button>`).join(" / ")}</div>
-    <div style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:4px">${d.parent ? `<div><button class="link" data-pickdir="${esc(d.parent)}">⬆ ..</button></div>` : ""}${d.dirs.map((x) => `<div style="display:flex;gap:8px;align-items:center;padding:2px 4px"><button class="link" data-pickdir="${esc(x.path)}">📁 ${esc(x.name)}</button>${x.git ? `<span class="badge ok">git</span><button data-pickrepo="${esc(tilde(x.path))}" style="margin-left:auto" ${used.has(tilde(x.path)) ? "disabled" : ""}>Chọn</button>` : ""}</div>`).join("") || '<div class="muted">(không có thư mục con)</div>'}</div>
+    <div class="muted cfg-msg">Hoặc duyệt: ${d.crumbs.map((c) => `<button class="link plain" data-pickdir="${esc(c.path)}">${esc(c.name)}</button>`).join(" / ")}</div>
+    <div style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:4px">${d.parent ? `<div><button class="link plain" data-pickdir="${esc(d.parent)}">⬆ ..</button></div>` : ""}${d.dirs.map((x) => `<div style="display:flex;gap:8px;align-items:center;padding:2px 4px"><button class="link plain" data-pickdir="${esc(x.path)}">📁 ${esc(x.name)}</button>${x.git ? `<span class="badge ok">git</span><button data-pickrepo="${esc(tilde(x.path))}" style="margin-left:auto" ${used.has(tilde(x.path)) ? "disabled" : ""}>Chọn</button>` : ""}</div>`).join("") || '<div class="muted">(không có thư mục con)</div>'}</div>
     ${d.git ? `<div class="tm-row" style="margin-top:8px"><button class="primary" data-pickrepo="${esc(tilde(d.path))}" ${used.has(tilde(d.path)) ? "disabled" : ""}>Chọn thư mục này (${esc(tilde(d.path))})</button></div>` : `<div class="muted cfg-msg">Thư mục đang xem không phải repo git — chọn thư mục có nhãn <b>git</b>.</div>`}
     <div class="cfg-msg" id="cfgPickSt"></div></div>`;
   $("cfgPickClose").onclick = () => { $("cfgPick").innerHTML = ""; };
@@ -2949,13 +3404,15 @@ $("cfgSave").onclick = async () => {
   const r = await post({action: "config_env", changes});
   if (!r) return;
   CFG.applied = [...new Set(CFG.applied.concat(r.changed || []))]; CFG.changes.clear();
-  $("cfgApply").hidden = !CFG.applied.length;
+  cfgShowApply(CFG.applied.length > 0);
   await loadConfig();
 };
+function cfgShowApply(on) { document.querySelectorAll(".apply-btn").forEach((b) => { b.hidden = !on; }); }
+document.querySelectorAll("#cfgProjBox .apply-btn").forEach((b) => b.onclick = () => $("cfgApply").click());
 $("cfgApply").onclick = async () => {
   if (!confirm("Khởi động lại op-watch / op-telegram / trang theo dõi để dùng giá trị mới?\n(lượt autofix đang chạy không bị dừng)")) return;
   const r = await post({action: "config_apply", changed: CFG.applied});
-  if (r) { CFG.applied = []; $("cfgApply").hidden = true; setTimeout(() => location.reload(), 4000); }
+  if (r) { CFG.applied = []; cfgShowApply(false); setTimeout(() => location.reload(), 4000); }
 };
 (function () { let v = "todo"; try { v = localStorage.getItem("view") || "todo"; } catch (e) {} showView(v); })();
 loadTodoExtra(); setInterval(loadTodoExtra, 15000);
