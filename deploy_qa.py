@@ -96,6 +96,14 @@ DEFAULTS = {
     # trước đây dùng chung GEMINI_TIMEOUT (900s) và treo là bỏ luôn ticket.
     "qa_call_timeout": 240,
     "be_container": "soar",
+    # QA ĐẠT → đọc log container BE (docker logs, chỉ đọc) trong khoảng thời gian QA; có lỗi BE (ERROR trên luồng xử lý
+    # request / lỗi SQL như "does not exist", SQLGrammarException) → hạ thành KHÔNG ĐẠT. Tắt: QA_BE_LOG_CHECK=0.
+    "qa_be_log_check": True,
+    # Chỉ tính ERROR trên luồng xử lý request HTTP (tên luồng khớp regex này, vd "io-8888-exec-12") — job nền
+    # (scheduler, HealthCheckTestConnectionJob…) lỗi định kỳ không tính; lỗi SQL thì tính trên mọi luồng.
+    "qa_be_log_threads": r"exec-\d+",
+    # dòng log khớp một trong các regex này thì bỏ qua (lỗi nền biết trước, không liên quan ticket)
+    "qa_be_log_ignore": [],
     "qa_parallel": 3,  # số ticket QA (Gemini) chạy cùng lúc trên server 86
     # Request gặp 502/503/504 / lỗi kết nối: chờ server lên lại tối đa chừng này phút rồi gọi lại.
     "server_retry_minutes": 10,
@@ -153,6 +161,7 @@ ROLLOUT_ENV = {
     "DEPLOY_BG_BE_HEALTH_PATH": ("bg_be_health_path", "str"),
     "DEPLOY_BG_BE_ALIASES": ("bg_be_aliases", "bool"),
     "DEPLOY_BG_BE_DESTRUCTIVE": ("bg_be_destructive", "str"),
+    "QA_BE_LOG_CHECK": ("qa_be_log_check", "bool"),
 }
 STRATEGIES = ("bluegreen", "service", "recreate")
 
@@ -236,6 +245,15 @@ Giao diện thật (trình duyệt, tự đăng nhập tài khoản trong ticket
    gọi request), kết luận KHÔNG RÕ YÊU CẦU; phần kết quả nêu cụ thể điểm nào chưa rõ và 1-3 câu hỏi cần tester / BA trả lời.
    Chỉ dùng khi thật sự không suy ra được; thiếu vài chi tiết nhưng vẫn kiểm tra được theo diff + ticket thì vẫn test.
 
+5. TRUNG THỰC VỚI BẰNG CHỨNG (bắt buộc):
+   - MỌI response HTTP 5xx (500, 501…) gặp trong lần QA đều phải ghi vào Kết quả + Bằng chứng (request + response) và
+     nghĩa là KHÔNG ĐẠT — kể cả khi request đó không phải trọng tâm ticket (lỗi server là lỗi, không bỏ qua).
+   - Chỉ được nói một chức năng "chạy / tải bình thường / hiển thị đúng" khi có response hoặc ảnh / chữ đọc được TRONG
+     LẦN QA NÀY cho thấy điều đó. Đọc được chữ menu / tiêu đề trang KHÔNG chứng minh danh sách đã tải dữ liệu.
+   - Bản sửa có phần BE: ĐẠT cần ít nhất một request API (không phải đọc mã FE) liên quan tính năng trả 2xx với dữ liệu
+     đúng; chỉ kiểm tra được mã FE thì kết luận KHÔNG TỰ TEST ĐƯỢC.
+   Tool tự kiểm tra lại sau QA: có HTTP 5xx / log BE có lỗi trong lúc QA → tự hạ ĐẠT thành KHÔNG ĐẠT.
+
 ## Báo cáo (bắt buộc)
 Ghi {qa_dir}/qa.md bằng tiếng Việt. Dòng đầu đúng một trong: `QA: ĐẠT` | `QA: KHÔNG ĐẠT` | `QA: KHÔNG TỰ TEST ĐƯỢC` |
 `QA: KHÔNG RÕ YÊU CẦU`
@@ -308,6 +326,18 @@ An toàn — môi trường dùng chung với tester: không sửa dữ liệu k
 Lỗi thấy trên giao diện (màu, vị trí, chữ, icon, focus…): ƯU TIÊN dùng UI làm đúng các bước của ticket, đọc chữ / CSS
 của vùng liên quan và chụp ảnh có khoanh vùng đó; kết hợp SEARCH tìm chuỗi đặc trưng của diff trong mã FE đang chạy.
 Đúng kết quả mong đợi → ĐẠT; sai → KHÔNG ĐẠT; chỉ khi không làm được cả UI lẫn SEARCH mới KHÔNG TỰ TEST ĐƯỢC.
+
+TRUNG THỰC VỚI BẰNG CHỨNG (BẮT BUỘC):
+- MỌI response HTTP 5xx (500, 501…) trong "CÁC REQUEST ĐÃ GỌI" đều phải nêu trong result + evidence (request + mã +
+  phần response) và nghĩa là KHÔNG ĐẠT — kể cả request phụ, không phải trọng tâm ticket. Không được bỏ qua / bỏ sót.
+- Chỉ được viết một chức năng "chạy / tải bình thường / hiển thị đúng" khi có response API hoặc chữ / CSS đọc được
+  bằng UI TRONG LẦN QA NÀY cho thấy điều đó. Đọc được chữ menu / sidebar / tiêu đề KHÔNG chứng minh danh sách đã tải
+  dữ liệu; muốn kết luận danh sách tải được thì đọc chữ của bảng / danh sách hoặc gọi API danh sách (2xx).
+- SEARCH chỉ chứng minh mã FE đã deploy, không chứng minh BE chạy đúng. Bản sửa có phần BE (mục "# BE …" trong diff):
+  ĐẠT cần ít nhất một request API (GET/POST/PUT/PATCH/UPLOAD) liên quan tính năng trả 2xx với dữ liệu đúng; không làm
+  được thì KHÔNG TỰ TEST ĐƯỢC.
+- Công cụ tự kiểm tra lại sau khi bạn kết luận: có HTTP 5xx, log BE có lỗi trong lúc QA, hoặc BE sửa mà chỉ có
+  SEARCH → tự hạ ĐẠT. Đừng kết luận ĐẠT khi còn lỗi server.
 
 ẢNH MINH CHỨNG (shots, khi kết thúc; tối đa 6): ảnh chụp từ request UI (đường dẫn trong kết quả) với kind "SAU" và
 note ngắn cho tester (vùng khoanh đỏ là gì, đúng / sai thế nào); kèm ảnh gốc của tester trong ticket (dạng
@@ -526,6 +556,9 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
     """QA bằng Gemini nhiều vòng; ghi qa.md. Trả nội dung qa.md."""
     with open(os.path.join(qa_dir, "ticket", "ticket.md"), encoding="utf-8") as f:
         ticket = f.read()[-20000:]
+    spec = af.spec_excerpts(qa_dir, 20000)  # mockup + mục SRS liên quan (tool tự dò), không phải đầu tài liệu
+    if spec:
+        ticket += "\n\n" + spec
     with open(os.path.join(qa_dir, "diff.md"), encoding="utf-8") as f:
         diff = f.read()[:30000]
     if not diff.strip():
@@ -549,10 +582,11 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
             transcript="\n\n".join(transcript)[-60000:] or "(chưa gọi gì)")
         prompt = prompt.replace("\x00", "")
         call_timeout = max(60, int(dcfg.get("qa_call_timeout") or 240))
-        cmd = [os.path.expanduser(acfg["gemini_cmd"]), "-p", prompt, "--mode", "plan", "--output-format", "json",
-               "--json-schema", schema, "--print-timeout", "%ds" % (call_timeout - 15)]
-        if dcfg.get("qa_model") or acfg.get("gemini_model"):
-            cmd += ["--model", dcfg.get("qa_model") or acfg["gemini_model"]]
+        # Gemini QA không dùng công cụ nào (mọi request lên server do công cụ gọi + kiểm tra luật chỉ đọc): chặn hẳn
+        # lệnh và ghi file (bị chặn theo luật deny thì agy chạy tiếp, không dừng như khi thiếu quyền) — af.gemini_cmd.
+        cmd = af.gemini_cmd(acfg, prompt, [qa_dir], commands=False,
+                            extra=["--output-format", "json", "--json-schema", schema],
+                            timeout_s=call_timeout - 15, model=dcfg.get("qa_model"))
         answer, diag = {}, []
         for attempt in (1, 2):
             # Gemini trả rỗng / JSON hỏng (thường do lỗi tạm của CLI / hạn mức): ghi stderr rồi thử lại vòng đó 1 lần.
@@ -591,9 +625,13 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
                                {"round": rnd, "answer": answer}, ensure_ascii=False) + "\n")
         if not answer:
             err = next((d.get("stderr") or d.get("error") for d in reversed(diag) if d.get("stderr") or d.get("error")), "")
-            answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC",
-                      "result": "Gemini không trả kết quả (vòng %d, đã thử lại)%s" % (
-                          rnd, ": " + err.strip().splitlines()[-1][:300] if err.strip() else "")}
+            raw = "\n".join(str(d.get("stderr") or "") + "\n" + str(d.get("stdout_tail") or "") for d in diag)
+            if af.GEMINI_AUTH_RX.search(raw):
+                result = "%s (vòng %d)" % (af.GEMINI_NO_LOGIN, rnd)
+            else:
+                result = "Gemini không trả kết quả (vòng %d, đã thử lại)%s" % (
+                    rnd, ": " + err.strip().splitlines()[-1][:300] if err.strip() else "")
+            answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC", "result": result}
         if answer.get("done") or not answer.get("calls"):
             break
         calls, n_ui = [], 0
@@ -894,6 +932,52 @@ def pending(acfg, dcfg):
     return out
 
 
+UPDATE_VERSION_RX = re.compile(r"update version\s+(\S+)", re.I)
+
+
+def fe_latest_version(acfg):
+    """Version trong commit "update version X" mới nhất trên origin/<fe_upstream> (đã fetch). Không có → None."""
+    if not acfg.get("fe_repo"):
+        return None
+    last = git_lines(acfg["fe_repo"], "log", "-1", "--format=%s", "-i", "--grep=update version",
+                     "origin/" + acfg["fe_upstream"])
+    m = UPDATE_VERSION_RX.search(last[0]) if last else None
+    return m.group(1) if m else None
+
+
+def _vkey(version):
+    """"2.0.34.124" → (2, 0, 34, 124) để so cũ / mới; không phải dạng số chấm → None."""
+    parts = (version or "").split(".")
+    return tuple(int(p) for p in parts) if parts and all(p.isdigit() for p in parts) else None
+
+
+def fe_drift(acfg, dcfg, fp=None, fetch=False):
+    """
+    FE đang chạy trên server (meta version, fingerprint) khác / cũ hơn "update version X" mới nhất trên dev-ss →
+    {"running": bản server, "latest": X}; khớp hoặc không xác định được (server không trả lời, không phải kiểu SOAR,
+    chưa có commit update version) → None. Vd đợt deploy 11/11 18:35: FE .124 đã build + docker load + commit, BE build
+    lỗi nên chưa rollout → server vẫn .123 mà pending() thấy "FE 0 commit" mãi.
+    """
+    if not acfg.get("fe_repo") or not soar_server(dcfg):
+        return None
+    if fetch:
+        af.run(["git", "fetch", "-q", "origin", acfg["fe_upstream"]], cwd=acfg["fe_repo"], check=False)
+    latest = fe_latest_version(acfg)
+    if not latest:
+        return None
+    running = (fp if fp is not None else fingerprint(dcfg)).get("fe")
+    if not running or running == latest:
+        return None
+    if _vkey(running) and _vkey(latest) and _vkey(running) > _vkey(latest):
+        return None  # server chạy bản mới hơn dev-ss (deploy tay?) — không tự hạ bản
+    return {"running": running, "latest": latest, "branch": acfg["fe_upstream"]}
+
+
+def drift_text(drift):
+    return "FE trên server (%s) lệch bản mới nhất %s (%s) — cần deploy lại FE" % (
+        drift["running"], drift.get("branch") or "dev-ss", drift["latest"])
+
+
 def fresh_worktree(repo, path, ref):
     if os.path.isdir(path):
         subprocess.run(["git", "worktree", "remove", "--force", path], cwd=repo, check=False)
@@ -902,7 +986,40 @@ def fresh_worktree(repo, path, ref):
     af.run(["git", "worktree", "add", "-q", "--detach", path, ref], cwd=repo)
 
 
-def deploy_fe(acfg, dcfg, root, logf, changes=None):
+def _prev_version(version):
+    """Bản ngay trước version theo cách build-and-deploy.sh tăng số (A.B.C.D → D-1, A.B.C → C-1). Không lùi được → None."""
+    parts = (version or "").split(".")
+    if len(parts) not in (3, 4) or not all(p.isdigit() for p in parts) or int(parts[-1]) < 1:
+        return None
+    return ".".join(parts[:-1] + [str(int(parts[-1]) - 1)])
+
+
+def _pin_version(work, version):
+    """Ghi bản trước version vào build_dev/version-tags.json của worktree để build-and-deploy.sh tăng ra đúng version."""
+    prev = _prev_version(version)
+    if not prev:
+        raise RuntimeError("FE: không build lại được đúng bản %s (dạng version lạ) — cần deploy FE tay" % version)
+    path = os.path.join(work, "build_dev", "version-tags.json")
+    with open(path, encoding="utf-8") as f:
+        tags = json.load(f)
+    tags.setdefault("SS", {}).setdefault("dev", {})["version"] = prev
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(tags, f, indent=2)
+
+
+def _use_fe_image(dcfg, version, logf, changes, old_image=None):
+    """Ghi image FE soar-fe-ss:<version> vào docker-compose.yml + thêm vào changes để rollout() tạo lại soar-fe-nginx."""
+    new_image = "%s:%s" % (dcfg["fe_image"], version)
+    old_image = old_image or compose_image(dcfg, dcfg["fe_service"])
+    set_compose_image(dcfg, dcfg["fe_service"], new_image, logf)
+    if changes is not None:
+        changes.append({"part": "fe", "service": dcfg["fe_service"], "container": dcfg["fe_container"],
+                        "old_image": old_image, "new_image": new_image, "version": version})
+
+
+def deploy_fe(acfg, dcfg, root, logf, changes=None, pin_version=None, old_image=None):
+    """Build FE từ origin/<fe_upstream>, commit "update version X", docker load lên server, ghi compose (rollout sau).
+    pin_version: build lại đúng bản X đã có commit "update version X" (recover_fe) — không tạo commit mới."""
     repo, dev = acfg["fe_repo"], acfg["fe_upstream"]
     work = os.path.join(root, "deploy-fe")
     fresh_worktree(repo, work, "origin/" + dev)
@@ -910,6 +1027,8 @@ def deploy_fe(acfg, dcfg, root, logf, changes=None):
         os.symlink(os.path.join(repo, "node_modules"), os.path.join(work, "node_modules"))
         shutil.copy(os.path.join(repo, ".env.deploy"), os.path.join(work, ".env.deploy"))
         tar = os.path.join(work, "%s.tar" % dcfg["fe_image"])
+        if pin_version:
+            _pin_version(work, pin_version)
         try:
             sh(["bash", "./build-and-deploy.sh", "dev"], cwd=work, logf=logf, env=af.build_env(acfg))
         except RuntimeError as ex:
@@ -920,20 +1039,65 @@ def deploy_fe(acfg, dcfg, root, logf, changes=None):
             log("FE: build-and-deploy.sh lỗi ở bước sau khi tạo image (%s) — vẫn deploy lên 86" % str(ex)[:200])
         with open(os.path.join(work, "build_dev", "version-tags.json"), encoding="utf-8") as f:
             version = json.load(f)["SS"]["dev"]["version"]
-        af.run(["git", "add", "-A", "build_dev/version-tags.json", "releases"], cwd=work)
-        af.run(["git", "commit", "-q", "-m", "update version %s" % version], cwd=work)
-        af.push(work, dev)
+        if pin_version:
+            if version != pin_version:
+                raise RuntimeError("FE: build lại ra bản %s, không phải %s — không deploy" % (version, pin_version))
+            log("FE: build lại bản %s — không tạo commit \"update version\" mới" % version)
+        else:
+            af.run(["git", "add", "-A", "build_dev/version-tags.json", "releases"], cwd=work)
+            af.run(["git", "commit", "-q", "-m", "update version %s" % version], cwd=work)
+            af.push(work, dev)
         upload(dcfg, tar, "%s/images/%s.tar" % (dcfg["base"], dcfg["fe_image"]), logf)
         remote(dcfg, "cd %s && docker load -i images/%s.tar" % (dcfg["base"], dcfg["fe_image"]), logf)
-        new_image = "%s:%s" % (dcfg["fe_image"], version)
-        old_image = compose_image(dcfg, dcfg["fe_service"])
-        set_compose_image(dcfg, dcfg["fe_service"], new_image, logf)
-        if changes is not None:
-            changes.append({"part": "fe", "service": dcfg["fe_service"], "container": dcfg["fe_container"],
-                            "old_image": old_image, "new_image": new_image, "version": version})
+        _use_fe_image(dcfg, version, logf, changes, old_image)
         return version
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo, check=False)
+
+
+def local_image_exists(image):
+    """Image có trong docker máy này (chỉ đọc)?"""
+    try:
+        return subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def recover_fe(acfg, dcfg, root, logf, drift, changes=None):
+    """
+    FE lệch (fe_drift): đưa đúng bản X ("update version X" mới nhất trên dev-ss) lên server, không tạo commit
+    "update version" thứ hai cho cùng nội dung. Rẻ nhất trước:
+      1. image soar-fe-ss:X đã có trên server (docker images, chỉ đọc) → chỉ ghi compose + rollout;
+      2. có ở máy này → docker save + scp + docker load (không build);
+      3. không còn → build lại qua deploy_fe với version ghim = X (không commit).
+    → version X. Rollout (tạo lại soar-fe-nginx) do rollout() làm qua changes như deploy thường.
+    """
+    version = drift["latest"]
+    image = "%s:%s" % (dcfg["fe_image"], version)
+    # image cũ để rollout trả lại khi bản mới không lên: image container đang chạy (compose có thể đã ghi X).
+    old_image = None
+    try:
+        old_image = remote(dcfg, "docker inspect -f '{{.Config.Image}}' %s" % q(dcfg["fe_container"]),
+                           timeout=60).strip() or None
+    except (RuntimeError, subprocess.TimeoutExpired):
+        pass
+    old_image = old_image or ("%s:%s" % (dcfg["fe_image"], drift["running"]) if drift.get("running") else None)
+    log(drift_text(drift))
+    if remote(dcfg, "docker images -q %s" % q(image), timeout=60).strip():
+        log("FE: image %s đã có trên server — chỉ rollout lại FE (không build, không commit)" % image)
+    elif local_image_exists(image):
+        log("FE: image %s chưa có trên server, có ở máy này — docker save + scp + docker load (không build lại)" % image)
+        tar = os.path.join(root, "%s.tar" % dcfg["fe_image"])
+        sh(["docker", "save", "-o", tar, image], logf=logf)
+        upload(dcfg, tar, "%s/images/%s.tar" % (dcfg["base"], dcfg["fe_image"]), logf)
+        os.remove(tar)
+        remote(dcfg, "cd %s && docker load -i images/%s.tar" % (dcfg["base"], dcfg["fe_image"]), logf)
+    else:
+        log("FE: không còn image %s (server lẫn máy này) — build lại đúng bản %s" % (image, version))
+        return deploy_fe(acfg, dcfg, root, logf, changes, pin_version=version, old_image=old_image)
+    _use_fe_image(dcfg, version, logf, changes, old_image)
+    return version
 
 
 def deploy_be(acfg, dcfg, root, logf, changes=None):
@@ -986,6 +1150,62 @@ def deploy_be(acfg, dcfg, root, logf, changes=None):
         return tag
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo, check=False)
+
+
+def _part_error(what, ex, logf=None):
+    """Ghi rõ phần nào lỗi (FE / BE / rollout / repo tuỳ chỉnh) vào log + file log deploy → chuỗi để báo."""
+    line = "%s lỗi: %s" % (what, (str(ex).splitlines() or [repr(ex)])[0][:300])
+    log(line)
+    if logf:
+        logf.write("\n### %s\n" % line)
+        logf.flush()
+    return line
+
+
+def deploy_parts(acfg, dcfg, root, logf, commits, drift=None):
+    """
+    Build + đưa lên server từng phần, phần này lỗi không chặn phần kia: FE (commit mới → deploy_fe; FE lệch → recover_fe),
+    BE (deploy_be), rồi rollout các image đã build xong (BE build lỗi vẫn rollout FE đã docker load), rồi repo tuỳ chỉnh.
+    → (parts đã chạy trên server, fe_version đã rollout hoặc None, errors ["FE build/deploy lỗi: …", "BE build lỗi: …"]).
+    """
+    parts, errors, changes, built, fe_version = [], [], [], {}, None
+    if commits.get("FE") or drift:
+        try:
+            if commits.get("FE"):
+                v = deploy_fe(acfg, dcfg, root, logf, changes)
+            else:
+                v = recover_fe(acfg, dcfg, root, logf, drift, changes)
+            built["fe"] = "FE %s" % v
+        except Exception as ex:  # noqa: BLE001 — FE lỗi vẫn deploy BE
+            errors.append(_part_error("FE build/deploy" if commits.get("FE") else "FE deploy lại (%s)" % drift["latest"],
+                                      ex, logf))
+    if commits.get("BE"):
+        try:
+            built["be"] = "BE %s:%s" % (dcfg["be_image"], deploy_be(acfg, dcfg, root, logf, changes))
+        except Exception as ex:  # noqa: BLE001 — BE lỗi vẫn rollout FE đã build + docker load
+            errors.append(_part_error("BE build/deploy", ex, logf))
+    if changes:
+        names = "+".join(ch["part"].upper() for ch in changes)
+        try:
+            rollout(dcfg, changes, logf)
+            parts += [built[ch["part"]] for ch in changes if ch["part"] in built]
+            fe_version = next((ch["version"] for ch in changes if ch["part"] == "fe"), None)
+            if errors:
+                log("đã rollout %s dù phần khác lỗi" % ", ".join(parts))
+        except Exception as ex:  # noqa: BLE001
+            errors.append(_part_error("rollout %s" % names, ex, logf))
+    for r in acfg.get("custom_deploy") or []:
+        if commits.get(r["label"]):
+            try:
+                parts.append("%s %s" % (r["label"], deploy_custom(acfg, dcfg, r, root, logf)))
+            except Exception as ex:  # noqa: BLE001
+                errors.append(_part_error(r["label"], ex, logf))
+    return parts, fe_version, errors
+
+
+def _deploy_error_msg(errors, parts, logf):
+    msg = "deploy lỗi: %s (log %s)" % (" | ".join(errors), logf.name)
+    return msg + (" — vẫn đã deploy %s" % ", ".join(parts) if parts else "")
 
 
 def _compose_state(**kw):
@@ -1747,6 +1967,271 @@ def handle_fail(api, acfg, dcfg, wp, display_id, qa_path, qa_text, commits=()):
     return " → quá %d lần, đã chuyển UNREVIEWED" % dcfg["qa_fail_autofix_max"]
 
 
+# ---- Kiểm tra lại kết luận ĐẠT (sau sự cố SOAR-2896: Gemini gặp HTTP 500 vẫn kết luận ĐẠT) ----------------------
+API_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "UPLOAD")
+_REQ_HEAD = re.compile(r"(?:\A|\n\n)## (?:\[([^\]\n]{1,80})\] )?(GET|POST|PUT|PATCH|DELETE|UPLOAD|SEARCH|UI) ?([^\n]*)")
+_HTTP_LINE = re.compile(r"^HTTP (\d{3})\b", re.M)
+
+
+def _excerpt(text, limit=600):
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit] + " …"
+
+
+def qa_requests_from_md(text):
+    """Các request ghi trong mục "## Toàn bộ request" của qa.md (Gemini) → [{method, target, account, status, out}]."""
+    i = text.rfind("\n## Toàn bộ request\n")
+    if i < 0:
+        return []
+    body = text[i + len("\n## Toàn bộ request\n"):]
+    heads = list(_REQ_HEAD.finditer(body))
+    out = []
+    for n, m in enumerate(heads):
+        block = body[m.end():heads[n + 1].start() if n + 1 < len(heads) else len(body)]
+        a, b = block.find("```\n"), block.rfind("\n```")
+        resp = block[a + 4:b] if 0 <= a < b else block
+        target = m.group(3).split(" body: ")[0].strip()
+        st = _HTTP_LINE.search(resp) if m.group(2) in API_METHODS else None
+        out.append({"method": m.group(2), "target": target, "account": m.group(1) or "",
+                    "status": int(st.group(1)) if st else None, "out": resp})
+    return out
+
+
+def qa_requests_from_claude(path):
+    """QA bằng Claude: request soar_api.py / ui_check.py lấy từ claude.jsonl (stream-json) — không tin qa.md tự viết."""
+    if not os.path.exists(path):
+        return []
+    uses, results = {}, {}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                msg = (json.loads(line).get("message") or {})
+            except ValueError:
+                continue
+            content = msg.get("content")
+            for c in content if isinstance(content, list) else []:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") == "tool_use" and c.get("name") == "Bash":
+                    uses[c.get("id")] = str((c.get("input") or {}).get("command") or "")
+                elif c.get("type") == "tool_result":
+                    r = c.get("content")
+                    if isinstance(r, list):
+                        r = "\n".join(str(x.get("text") or "") for x in r if isinstance(x, dict))
+                    results[c.get("tool_use_id")] = str(r or "")
+    out = []
+    for uid, cmd in uses.items():
+        if os.path.basename(SOAR_API) in cmd:
+            try:
+                args = shlex.split(cmd.split(os.path.basename(SOAR_API), 1)[1])
+            except ValueError:
+                args = cmd.split(os.path.basename(SOAR_API), 1)[1].split()
+            pos, skip = [], False
+            for a in args:
+                if skip:
+                    skip = False
+                elif a in ("--as", "--password", "--header"):
+                    skip = True
+                elif a in ("|", "&&", ";", "||"):
+                    break
+                elif not a.startswith("--"):
+                    pos.append(a)
+            method, target = (pos + ["GET", ""])[:2] if pos else ("", "")
+        elif os.path.basename(UI_CHECK) in cmd:
+            method, target = "UI", "/"
+        else:
+            continue
+        resp = results.get(uid, "")
+        codes = [int(x) for x in _HTTP_LINE.findall(resp)] if method.upper() in API_METHODS else []
+        # một lệnh Bash có thể gọi nhiều request (&&): lấy mã lỗi nặng nhất để không bỏ sót 5xx
+        out.append({"method": method.upper(), "target": target, "account": "",
+                    "status": max(codes) if codes else None, "out": resp})
+    return out
+
+
+def be_tokens(diff_text):
+    """Phần BE có bị sửa không + từ khoá tính năng (vd "correlation", "correlation-rule") từ đường dẫn file Java (không
+    tính test) trong các mục "# BE <hash>" của diff.md. Trả (có BE, tập từ khoá)."""
+    generic = {"impl", "service", "services", "dto", "request", "response", "entity", "entities", "repository",
+               "repositories", "controller", "controllers", "config", "configuration", "util", "utils", "common",
+               "model", "models", "mapper", "mappers", "java", "main", "src", "com", "soar", "cyai", "exception",
+               "exceptions", "job", "jobs", "enums", "enum", "constant", "constants", "security", "advice", "api",
+               "v1", "v2", "domain", "core", "base", "helper", "helpers", "scheduler", "client", "resources"}
+    suffix = re.compile(r"(ServiceImpl|Service|ControllerImpl|Controller|Request|Response|Repository|Repo|Entity|"
+                        r"Dto|DTO|Mapper|Impl|Processor|Matcher|Job|Config|Helper|Utils?|Handler|Listener|Converter|"
+                        r"Validator|Spec|Specification)+$")
+    touched, tokens = False, set()
+    section = None
+    for line in diff_text.splitlines():
+        m = re.match(r"^# (\S+) [0-9a-f]{7,40}\s*$", line)
+        if m:
+            section = m.group(1)
+            continue
+        if section != "BE":
+            continue
+        m = re.match(r"^diff --git a/(\S+) b/", line)
+        if not m:
+            continue
+        touched = True
+        path = m.group(1)
+        if not path.endswith(".java") or "/test/" in path:
+            continue
+        parts = path.split("/")
+        name = suffix.sub("", parts[-1][:-5])
+        if len(name) >= 4:
+            tokens.add(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", name).lower())
+        dirs = parts[parts.index("java") + 1:-1] if "java" in parts else parts[:-1]
+        pkg = next((d.lower() for d in reversed(dirs) if d.lower() not in generic), None)
+        if pkg and len(pkg) >= 4:
+            tokens.add(pkg.replace("_", "-"))
+    return touched, tokens
+
+
+def _related(target, tokens):
+    t = target.split("?")[0].lower().replace("_", "-")
+    return not tokens or any(k in t or k.replace("-", "") in t.replace("-", "") for k in tokens)
+
+
+def be_log_errors(dcfg, start, end, limit=20, width=300):
+    """Đọc (chỉ đọc) log container BE trên server trong khoảng [start, end] (epoch giây). Trả (dòng lỗi, ghi chú).
+    Chỉ tính ERROR trên luồng xử lý request (qa_be_log_threads) hoặc lỗi SQL ở mọi luồng; bỏ dòng khớp qa_be_log_ignore.
+    Đọc log lỗi → ([], ghi chú), không làm hỏng QA."""
+    since, until = int(start) - 5, int(end) + 30
+    cmd = ("docker logs --timestamps --since %d --until %d %s 2>&1 | grep -E -A4 "
+           "' ERROR |Exception|does not exist|Error response from daemon' | head -n 4000") % (
+              since, until, shlex.quote(dcfg["be_container"]))
+    try:
+        out = remote(dcfg, cmd, timeout=120)
+    except Exception as ex:  # noqa: BLE001 — lỗi đọc log không được làm hỏng QA
+        msg = (str(ex).strip().splitlines() or [type(ex).__name__])[0]
+        return [], "không đọc được log BE (%s)" % msg[:200]
+    if "Error response from daemon" in out:
+        return [], "không đọc được log BE: %s" % out.strip().splitlines()[0][:200]
+    return parse_be_log(out, since, until, dcfg, limit, width), ""
+
+
+def parse_be_log(out, since, until, dcfg=None, limit=20, width=300):
+    """Lọc output `docker logs --timestamps` (đã grep) → các dòng lỗi BE (đã bỏ trùng, cắt ngắn)."""
+    dcfg = dcfg or {}
+    thread_rx = re.compile(dcfg.get("qa_be_log_threads") or r"exec-\d+")
+    ignore = [re.compile(x) for x in dcfg.get("qa_be_log_ignore") or []]
+    strong = re.compile(r"does not exist|SQLGrammarException|PSQLException|BadSqlGrammarException|"
+                        r"DataIntegrityViolationException|LazyInitializationException")
+    head_rx = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+\S*\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+\d+\s+---\s+(?:\[[^\]]*\]\s+)?"
+                         r"\[\s*([^\]]*)\]")
+    lo = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(since))  # docker --timestamps ghi giờ UTC
+    hi = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(until))
+    entries, cur = [], None
+    for line in out.splitlines():
+        if line == "--":
+            cur = None
+            continue
+        m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)\S*Z (.*)$", line)
+        ts, rest = (m.group(1), m.group(2)) if m else (None, line)
+        if ts and not lo <= ts <= hi:  # ngoài khoảng thời gian QA
+            cur = None
+            continue
+        h = head_rx.match(rest)
+        if h:
+            cur = {"level": h.group(1), "thread": h.group(2).strip(), "lines": [rest.strip()]}
+            entries.append(cur)
+        elif cur is not None:
+            if not re.match(r"^\s*(at |\.\.\. \d+ more)", rest):
+                cur["lines"].append(rest.strip())
+        elif strong.search(rest):  # dòng ngoại lệ lẻ (không thấy dòng đầu) — chỉ tính lỗi SQL
+            entries.append({"level": "ERROR", "thread": "?", "lines": [rest.strip()]})
+    picked, seen = [], set()
+    for e in entries:
+        text = "\n".join(e["lines"])
+        if e["level"] != "ERROR" or any(rx.search(text) for rx in ignore):
+            continue
+        if not (thread_rx.search(e["thread"]) or strong.search(text)):
+            continue
+        for ln in e["lines"][:3]:
+            key = re.sub(r"\d+", "#", re.sub(r"^\S+\s+(ERROR|WARN)\s+\d+\s+---\s+(\[[^\]]*\]\s+)?\[[^\]]*\]", "", ln))
+            if not ln or key in seen:
+                continue
+            seen.add(key)
+            picked.append(ln if len(ln) <= width else ln[:width] + " …")
+    if len(picked) > limit:
+        picked = picked[:limit] + ["… (còn %d dòng lỗi khác)" % (len(picked) - limit)]
+    return picked
+
+
+def _prepend_section(text, heading, add):
+    """Chèn `add` vào đầu mục "## <heading>" của qa.md (chưa có mục thì tạo ngay sau dòng kết luận)."""
+    m = re.search(r"^##\s*" + re.escape(heading) + r"[^\n]*\n", text, re.M)
+    if m:
+        return text[:m.end()] + add + text[m.end():]
+    first = text.index("\n") + 1 if "\n" in text else len(text)
+    return text[:first] + "\n## %s\n%s" % (heading, add) + text[first:]
+
+
+def _set_verdict(text, verdict, why, evidence):
+    """Ghi đè kết luận trong qa.md: dòng đầu, chèn lý do vào đầu mục Kết quả và bằng chứng vào đầu mục Bằng chứng."""
+    old = re.match(r"QA:\s*([^\n]*)", text)
+    text = re.sub(r"\AQA:[^\n]*", "QA: %s" % verdict, text, count=1) if old else "QA: %s\n\n%s" % (verdict, text)
+    text = _prepend_section(text, "Kết quả", "**[Kiểm tra tự động sau QA] Hạ kết luận %s → %s:** %s\n\n" % (
+        old.group(1).strip() if old else "?", verdict, why))
+    return _prepend_section(text, "Bằng chứng", evidence + "\n\n") if evidence else text
+
+
+def verify_pass(text, qa_dir, dcfg=None, start=None, end=None, read_log=None):
+    """Kiểm tra lại qa.md có kết luận ĐẠT (cả Gemini lẫn Claude), trước mọi comment / chuyển người trên OpenProject:
+    1. Có request API trả HTTP 5xx trong lần QA → KHÔNG ĐẠT (502-504 tạm thời đã được soar_call thử lại; còn lại là lỗi).
+    2. Log BE trong lúc QA có lỗi (ERROR / SQL) → KHÔNG ĐẠT ("lỗi BE trong lúc QA" — QA song song nhiều ticket dùng
+       chung khoảng thời gian nên không chắc do ticket này, vẫn chặn ĐẠT).
+    3. Bản sửa có phần BE mà không có request API (không phải SEARCH / UI) nào trả 2xx liên quan tính năng → KHÔNG TỰ
+       TEST ĐƯỢC (chỉ thấy mã FE, chưa chứng minh BE chạy).
+    read_log(start, end) → (dòng lỗi, ghi chú) — mặc định be_log_errors trên server. Trả (text mới, [lý do]) — không đổi
+    gì thì [] ."""
+    dcfg = dcfg or {}
+    if not re.match(r"QA:\s*ĐẠT\b", text):
+        return text, []
+    reqs = qa_requests_from_md(text) + qa_requests_from_claude(os.path.join(qa_dir, "claude.jsonl"))
+    reasons, verdict, why, evidence = [], None, [], []
+    bad = [r for r in reqs if r["method"] in API_METHODS and r["status"] and r["status"] >= 500]
+    if bad:
+        verdict = "KHÔNG ĐẠT"
+        reasons.append("HTTP 5xx")
+        why.append("trong lần QA có %d request API trả HTTP 5xx (lỗi server) — QA không được kết luận ĐẠT." % len(bad))
+        evidence.append("Request lỗi server (HTTP 5xx) trong lần QA này:\n" + "\n".join(
+            "- `%s%s %s` → HTTP %s\n```\n%s\n```" % ("[%s] " % r["account"] if r["account"] else "", r["method"],
+                                                   r["target"][:200], r["status"], _excerpt(r["out"]))
+            for r in bad[:5]))
+    if dcfg.get("qa_be_log_check", True) and start and (read_log or dcfg.get("host")):
+        lines, note = (read_log or (lambda s, e: be_log_errors(dcfg, s, e)))(start, end or time.time())
+        if lines:
+            verdict = "KHÔNG ĐẠT"
+            reasons.append("lỗi log BE")
+            why.append("log BE (container %s) có lỗi trong lúc QA (có thể do ticket QA song song khác, nhưng vẫn chặn "
+                       "ĐẠT tới khi người / autofix kiểm chứng)." % dcfg.get("be_container", "BE"))
+            evidence.append("Lỗi BE trong lúc QA (docker logs %s, %s → %s):\n```\n%s\n```" % (
+                dcfg.get("be_container", "BE"), datetime.fromtimestamp(start).strftime("%H:%M:%S"),
+                datetime.fromtimestamp(end or time.time()).strftime("%H:%M:%S"), "\n".join(lines)))
+        elif note:
+            log("%s: %s — bỏ qua kiểm tra log BE" % (os.path.basename(qa_dir), note))
+            text = _prepend_section(text, "Ghi chú", "_Kiểm tra log BE sau QA: %s_\n\n" % note)
+    diff_path = os.path.join(qa_dir, "diff.md")
+    diff_text = ""
+    if os.path.exists(diff_path):
+        with open(diff_path, encoding="utf-8", errors="replace") as f:
+            diff_text = f.read()
+    has_be, tokens = be_tokens(diff_text)
+    if has_be and not verdict:
+        ok = [r for r in reqs if r["method"] in API_METHODS and r["status"] and 200 <= r["status"] < 300
+              and "/api/" in r["target"] and _related(r["target"], tokens)]
+        if not ok:
+            verdict = "KHÔNG TỰ TEST ĐƯỢC"
+            reasons.append("BE chưa có bằng chứng")
+            why.append("bản sửa có phần BE nhưng lần QA không có request API nào (ngoài SEARCH mã FE / thao tác UI) "
+                       "trả 2xx liên quan tính năng%s — chưa chứng minh BE chạy đúng." % (
+                           " (%s)" % ", ".join(sorted(tokens)[:6]) if tokens else ""))
+    if not verdict:
+        return text, []
+    return _set_verdict(text, verdict, " ".join(why), "\n\n".join(evidence)), reasons
+
+
 def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None):
     """Bọc _qa_ticket: ghi thời gian QA trên server lên ticket (Testing)."""
     t0 = time.time()
@@ -1776,6 +2261,7 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
                                                                                    check=False)[:40000]))
     notify("[QA SERVER] %s" % display_id, "Đang test trên server 86 (%s): %s" % (
         dcfg["qa_engine"], wp.get("subject", "")))
+    qa_start = time.time()  # khoảng thời gian QA: đọc log BE sau khi xong (verify_pass)
     if dcfg["qa_engine"] == "gemini":
         gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard)
     else:
@@ -1806,6 +2292,20 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
     if change:
         raise ServerChanged(change)
     if verdict == "ĐẠT":
+        # Kiểm tra lại trước khi comment / chuyển QA: HTTP 5xx, lỗi log BE, BE sửa mà không có request API 2xx.
+        checked, reasons = verify_pass(text, qa_dir, dcfg, qa_start, time.time())
+        if reasons:
+            shutil.copy(path, os.path.join(qa_dir, "qa-engine.md"))  # giữ bản gốc của Gemini / Claude để đối chiếu
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(checked)
+            text = checked
+            verdict = re.match(r"QA:\s*(KHÔNG ĐẠT|KHÔNG TỰ TEST ĐƯỢC)", text).group(1)
+            log("%s: QA kết luận ĐẠT nhưng %s → hạ thành %s" % (display_id, ", ".join(reasons), verdict))
+        elif checked != text:  # chỉ thêm ghi chú (vd không đọc được log BE)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(checked)
+            text = checked
+    if verdict == "ĐẠT":
         body = af.report_section(text, "Kết quả") or "Đã kiểm tra đạt."
         comment = "**[QA tự động] Đã deploy lên môi trường test (%s) và kiểm tra lại: ĐẠT** — %schuyển %s.\n\n%s" % (
             deployed, "chuyển Resolved, " if review else "", dcfg["qa_user_name"], af.for_tester(body)[:3000])
@@ -1822,7 +2322,7 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
         verdict += handle_fail(api, acfg, dcfg, wp, display_id, path, text, commits)
     elif verdict == "KHÔNG TỰ TEST ĐƯỢC":
         result = af.report_section(text, "Kết quả")
-        if re.match(r"(Gemini lỗi|Gemini không trả kết quả)", result):
+        if re.match(r"(Gemini lỗi|Gemini không trả kết quả|Gemini chưa đăng nhập)", result):
             # Lỗi của công cụ QA, không phải ticket: không giao Claude, không ghi qa-history → lượt sau QA lại.
             verdict += " " + QA_TOOL_ERROR
         else:
@@ -1916,6 +2416,10 @@ def _review_queue(api=None, proj=None):
     queued = set(load_pending())
     fp = fingerprint(dcfg)
     build = "%s|%s" % (fp.get("fe"), fp.get("be")) + custom_build_key(acfg)
+    try:
+        lag = fe_drift(acfg, dcfg, fp)
+    except Exception:  # noqa: BLE001 — chỉ để hiện lý do trên trang theo dõi
+        lag = None
     out = []
     for w in wps:
         t = w.get("displayId") or "WP-%s" % w["id"]
@@ -1931,6 +2435,8 @@ def _review_queue(api=None, proj=None):
         elif (fe_h and fe_contains(acfg, fp.get("fe"), fe_h) is not True) or \
                 (be_h and be_contains(acfg, fp.get("be"), be_h) is not True):
             state, note = "not_deployed", "bản đang chạy chưa có bản sửa — chờ đợt merge + deploy"
+            if lag and fe_h and fe_contains(acfg, lag["latest"], fe_h) is True:
+                note = drift_text(lag)  # bản sửa đã nằm trong bản FE mới nhất, chỉ là server chưa chạy bản đó
         else:
             state, note = "waiting", "chờ lượt kiểm tra kế tiếp (tối đa 10 phút)"
         out.append({"display_id": t, "wp_id": w["id"], "subject": w.get("subject", ""),
@@ -1982,6 +2488,14 @@ def _review_watch(proj):
     fp = fingerprint(dcfg)
     if not fp.get("fe"):
         return
+    try:
+        lag = fe_drift(acfg, dcfg, fp, fetch=True)
+    except Exception as ex:  # noqa: BLE001 — chỉ để ghi lý do, lỗi không chặn QA
+        log("review-watch: không so được bản FE với %s: %s" % (acfg["fe_upstream"], ex))
+        lag = None
+    if lag:
+        # review-watch không deploy: chỉ ghi rõ lý do ticket còn chờ; đợt merge / deploy kế tiếp sẽ deploy lại FE.
+        log("review-watch: %s (đợt merge + deploy kế tiếp sẽ làm)" % drift_text(lag))
     build = "%s|%s" % (fp.get("fe"), fp.get("be"))
     root_status = os.path.join(root, ".status")
     review = set()
@@ -2035,25 +2549,17 @@ def deploy_only(cfg, acfg, dcfg, dry_run=False, qa_requested=False):
     root = os.path.expanduser(acfg["root"])
     os.makedirs(root, exist_ok=True)
     commits = pending(acfg, dcfg)
+    drift = None if commits.get("FE") else fe_drift(acfg, dcfg)
     log("chưa deploy: %s" % (", ".join("%s %d commit" % (k, len(v)) for k, v in commits.items()) or "không có repo deploy"))
-    if dry_run or not any(commits.values()):
+    if drift:
+        log(drift_text(drift))
+    if dry_run or not (any(commits.values()) or drift):
         return
     logf = open(os.path.join(root, "deploy-%s-%s.log" % (P.current(acfg)["key"], datetime.now().strftime("%m%d-%H%M"))),
                 "w", encoding="utf-8")
-    parts = []
-    try:
-        changes = []
-        if commits.get("FE"):
-            parts.append("FE %s" % deploy_fe(acfg, dcfg, root, logf, changes))
-        if commits.get("BE"):
-            parts.append("BE %s:%s" % (dcfg["be_image"], deploy_be(acfg, dcfg, root, logf, changes)))
-        if changes:
-            rollout(dcfg, changes, logf)
-        for r in acfg.get("custom_deploy") or []:
-            if commits.get(r["label"]):
-                parts.append("%s %s" % (r["label"], deploy_custom(acfg, dcfg, r, root, logf)))
-    except Exception as ex:  # noqa: BLE001
-        msg = "deploy lỗi: %s (log %s)" % (str(ex).splitlines()[0][:300], logf.name)
+    parts, _, errors = deploy_parts(acfg, dcfg, root, logf, commits, drift)
+    if errors:
+        msg = _deploy_error_msg(errors, parts, logf)
         log(msg)
         inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
         notify("[DEPLOY 86 LỖI]", msg)
@@ -2086,6 +2592,7 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
     me_id = api.me()["id"]
     deployed_parts, commits = [], pending(acfg, dcfg)
     waiting = load_pending()
+    drift = None
     auto = set()  # ticket lấy từ OpenProject (Resolved, giao cho mình) — chỉ QA khi bản đang chạy đã có bản sửa
     if only:
         tickets = list(only)
@@ -2101,26 +2608,24 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
         log("chưa deploy: %s · ticket mới: %s · hàng chờ QA: %s · Resolved/Review chưa QA: %s" % (
             ", ".join("%s %d commit" % (k, len(v)) for k, v in commits.items()), ", ".join(new) or "không có", ", ".join(waiting) or "trống",
             ", ".join(sorted(auto)) or "không có"))
-        if dry_run or not tickets:
+        # FE 0 commit mới nhưng server chưa chạy "update version" mới nhất (vd đợt trước BE build lỗi nên FE đã build
+        # mà chưa rollout) → deploy lại FE, không thì ticket chờ bản sửa trong bản đó đợi mãi.
+        drift = None if commits.get("FE") else fe_drift(acfg, dcfg)
+        if drift:
+            log(drift_text(drift) + (" (dry-run: không đổi gì)" if dry_run else ""))
+        if dry_run or not (tickets or drift):
             return
     fe_version = None
-    if not only and any(commits.values()):
+    if not only and (any(commits.values()) or drift):
         logf = open(os.path.join(root, "deploy-%s.log" % datetime.now().strftime("%m%d-%H%M")), "w", encoding="utf-8")
-        notify("[DEPLOY 86]", "Bắt đầu deploy: " + ", ".join("%s %d commit" % (k, len(v)) for k, v in commits.items() if v))
-        try:
-            changes = []
-            if commits["FE"]:
-                fe_version = deploy_fe(acfg, dcfg, root, logf, changes)
-                deployed_parts.append("FE %s" % fe_version)
-            if commits["BE"]:
-                deployed_parts.append("BE %s:%s" % (dcfg["be_image"], deploy_be(acfg, dcfg, root, logf, changes)))
-            if changes:
-                rollout(dcfg, changes, logf)
-            for r in acfg.get("custom_deploy") or []:
-                if commits.get(r["label"]):
-                    deployed_parts.append("%s %s" % (r["label"], deploy_custom(acfg, dcfg, r, root, logf)))
-        except Exception as ex:  # noqa: BLE001
-            msg = "deploy lỗi: %s (log %s)" % (str(ex).splitlines()[0][:300], logf.name)
+        what = ["%s %d commit" % (k, len(v)) for k, v in commits.items() if v]
+        if drift:
+            what.append("FE deploy lại bản %s (server đang %s)" % (drift["latest"], drift["running"]))
+        notify("[DEPLOY 86]", "Bắt đầu deploy: " + ", ".join(what))
+        parts, fe_version, errors = deploy_parts(acfg, dcfg, root, logf, commits, drift)
+        deployed_parts.extend(parts)
+        if errors:
+            msg = _deploy_error_msg(errors, parts, logf)
             log(msg)
             save_pending(tickets, "deploy lỗi")
             inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
@@ -2136,6 +2641,8 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
         log(msg)
         inbox(cfg, "**DEPLOY 86** " + msg)
         notify("[DEPLOY 86]", msg)
+        if not tickets:
+            return
 
     if not deployed_parts and not wait_up(dcfg, None, minutes=dcfg.get("alive_wait_minutes", 5)):
         msg = "server không trả lời (FE %s / API %s) — chưa QA, giữ hàng chờ" % (dcfg["fe_url"], dcfg["api_url"])
@@ -2153,6 +2660,9 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
         return
     deployed = ", ".join(deployed_parts) or "bản đang chạy: FE %s, BE %s" % (baseline["fe"], baseline["be"])
     log("dấu server: %s" % baseline)
+    lag = fe_drift(acfg, dcfg, baseline)  # còn lệch (vd --qa / review-watch không deploy) → ghi rõ lý do chờ
+    if lag:
+        log(drift_text(lag))
 
     def guard():
         return describe_change(baseline, fingerprint(dcfg))
@@ -2162,14 +2672,15 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
     open(QA_ACTIVE, "w").close()
     try:
         _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
-                 waiting, remaining, done, auto=auto, force=set(only or []) if force else set(), review=set(review or []))
+                 waiting, remaining, done, auto=auto, force=set(only or []) if force else set(), review=set(review or []),
+                 fe_lag=lag)
     finally:
         if os.path.exists(QA_ACTIVE):
             os.remove(QA_ACTIVE)
 
 
 def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
-             waiting, remaining, done, auto=(), force=(), review=()):
+             waiting, remaining, done, auto=(), force=(), review=(), fe_lag=None):
     """QA các ticket, tối đa qa_parallel ticket cùng lúc (Gemini); server đổi giữa chừng thì dừng tất cả."""
     mu = threading.Lock()
     stop = {"msg": None}
@@ -2200,7 +2711,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             # chưa có → đợi deploy.
             if (fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is False) or \
                     (be_hashes and be_contains(acfg, baseline["be"], be_hashes) is False) or False in cust_state:
-                log("%s: vào Review nhưng bản đang chạy chưa có bản sửa — đợi deploy" % display_id)
+                log("%s: vào Review nhưng bản đang chạy chưa có bản sửa — đợi deploy%s"
+                    % (display_id, " (%s)" % drift_text(fe_lag) if fe_lag else ""))
                 with mu:
                     remaining.remove(display_id)
                 return
@@ -2216,7 +2728,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             if (fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is not True) or \
                     (be_hashes and be_contains(acfg, baseline["be"], be_hashes) is not True) or \
                     any(x is not True for x in cust_state):
-                return drop("bản đang chạy (FE %s, BE %s) chưa chắc có bản sửa" % (baseline["fe"], baseline["be"]))
+                return drop("bản đang chạy (FE %s, BE %s) chưa chắc có bản sửa%s" % (
+                    baseline["fe"], baseline["be"], " (%s)" % drift_text(fe_lag) if fe_lag else ""))
             last = qa_history(display_id)
             if last and last.get("build") == build:
                 return drop("đã QA trên bản này (%s)" % last.get("verdict"))
@@ -2227,7 +2740,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
                 % (display_id, display_id, acfg["fe_upstream"], acfg["be_upstream"]))
             return
         elif fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes) is False:
-            log("%s: bản FE %s trên server chưa có bản sửa — để lại hàng chờ" % (display_id, baseline["fe"]))
+            log("%s: bản FE %s trên server chưa có bản sửa — để lại hàng chờ%s"
+                % (display_id, baseline["fe"], " (%s)" % drift_text(fe_lag) if fe_lag else ""))
             return
         elif be_hashes and be_contains(acfg, baseline["be"], be_hashes) is False:
             log("%s: bản BE %s trên server chưa có bản sửa — để lại hàng chờ" % (display_id, baseline["be"]))

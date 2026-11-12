@@ -11,7 +11,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import subprocess
 import sys
 import threading
@@ -109,33 +108,19 @@ def start_split(display_id, hint=""):
 
 
 def _attachments(api, wp, d):
-    """Tải file đính kèm không phải ảnh, trích chữ (zip / tar / xlsx / docx / text) vào docs/. Trả danh sách mô tả."""
-    import tg_requests
-    os.makedirs(os.path.join(d, "att"), exist_ok=True)
-    os.makedirs(os.path.join(d, "docs"), exist_ok=True)
-    res = api.get("/api/v3/work_packages/%s/attachments" % wp["id"])
-    lines, used = [], set()
-    for a in (res.get("_embedded") or {}).get("elements") or []:
-        ctype = ((a.get("contentType") or "") if isinstance(a.get("contentType"), str) else "")
-        if ctype.startswith("image/") or (a.get("fileSize") or 0) > ATT_MAX:
+    """Tải file đính kèm không phải ảnh, trích chữ (zip / tar / xlsx / docx / html / text) vào docs/. Trả danh sách mô tả."""
+    lines = []
+    for r in af.download_attachments(api, wp["id"], os.path.join(d, "att"), os.path.join(d, "docs"),
+                                     max_size=ATT_MAX):
+        if r["skipped"]:
             continue
-        name = task_create.safe_name(a.get("fileName") or "file", used)
-        path = os.path.join(d, "att", name)
-        req = op_watch.urllib.request.Request(api.url + "/api/v3/attachments/%s/content" % a["id"], headers=api.headers)
-        try:
-            with op_watch.urllib.request.urlopen(req, timeout=120) as resp, open(path, "wb") as f:
-                shutil.copyfileobj(resp, f)
-        except (op_watch.urllib.error.URLError, OSError) as ex:
-            lines.append("- %s: không tải được (%s)" % (name, ex))
+        if r["error"]:
+            lines.append("- %s: %s" % (r["name"], r["error"]))
             continue
-        docs, notes = tg_requests.extract_docs(path)
-        for i, x in enumerate(docs):
-            out = os.path.join(d, "docs", "%s__%02d__%s.txt" % (name, i, re.sub(r"[^\w.-]+", "_", x["name"])[-80:]))
-            with open(out, "w", encoding="utf-8") as f:
-                f.write(x["text"])
-            lines.append("- %s → %s (%d ký tự)" % (name if x["name"] == name else "%s / %s" % (name, x["name"]),
-                                                 out, len(x["text"])))
-        lines += ["  (%s)" % n for n in notes[:5]]
+        for out, inner, n in r["texts"]:
+            lines.append("- %s → %s (%d ký tự)" % (r["name"] if inner == r["name"] else "%s / %s" % (r["name"], inner),
+                                                 out, n))
+        lines += ["  (%s)" % n for n in r["notes"][:5]]
     return lines
 
 
@@ -145,8 +130,11 @@ def _run(d, display_id, hint):
         cfg, acfg, _ = task_create.load(P.prefix_of(display_id) or None)  # dự án của ticket cha
         acfg = dict(af.AUTOFIX_DEFAULTS, **acfg)
         api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
-        wp = af.fetch_ticket(api, display_id, os.path.join(d, "ticket"))
+        wp = af.fetch_ticket(api, display_id, os.path.join(d, "ticket"), attachments=False)  # tự tải ở _attachments
         docs = _attachments(api, wp, d)
+        import gdocs  # tài liệu Google có link trong ticket (fetch_ticket đã tải vào ticket/gdocs/)
+        docs += ["- Tài liệu Google → %s (%d byte; mục \"Tài liệu Google\" trong ticket.md)" % (p, os.path.getsize(p))
+                 for p in gdocs.text_files(os.path.join(d, "ticket"))]
         task_create.set_state(d, wp_id=wp["id"], subject=wp.get("subject"), docs=len(docs))
         out = os.path.join(d, "split.json")
         prompt = PROMPT.format(project_name=P.name(acfg), display_id=wp.get("displayId") or display_id, d=d,

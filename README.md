@@ -106,6 +106,11 @@ op-watch gọi `op_autofix.py` (cấu hình `on_change`) cho mỗi sự kiện. 
 
 1. Khoá: tối đa `max_parallel` phiên cùng lúc (chỉnh trên dashboard); ticket đang xử lý thì bỏ qua sự kiện mới của nó.
 2. Tải mô tả + toàn bộ comment + ảnh vào `~/autofix/<SOAR-xxxx>-<MMDD-HHMM>/ticket/`.
+   File đính kèm không phải ảnh (≤ 30 MB: đặc tả HTML, SRS docx/xlsx, zip/tar, text…) tải vào `ticket/attachments/`,
+   chữ trích ra ở `ticket/attachments/text/`; `ticket.md` có mục "File đính kèm" liệt kê từng file (lỗi tải chỉ ghi log).
+   Gemini test lại / QA server cũng được trỏ tới (QA chèn thẳng tối đa 15 000 ký tự chữ trích vào prompt).
+   Link Google Docs / Sheets / Slides / Drive trong mô tả / comment (SRS, đặc tả) tải vào `ticket/gdocs/` bằng tài
+   khoản Google của bạn — xem [Tài liệu Google](#tài-liệu-google-gdocspy); `ticket.md` có mục "Tài liệu Google".
 3. Tạo worktree riêng `fe/` và `be/` trên nhánh `auto/<SOAR-xxxx>-<MMDD-HHMM>`, tách từ
    `FE_BRANCH` / `BE_BRANCH` và merge sẵn `origin/FE_UPSTREAM` / `origin/BE_UPSTREAM`.
 4. Chạy `claude -p` (headless) với `--permission-mode dontAsk`:
@@ -142,6 +147,28 @@ python3 op_autofix.py --clean SOAR-2789-1030-1205   # xoá worktree + nhánh aut
 
 Tắt tự sửa: đặt `"autofix": {"enabled": false}` (op-watch vẫn báo như cũ). Đổi model / ngân sách trong
 `"autofix"` của `~/.config/op-watch/config.json`. Log của Claude: `claude.json`, `claude.err` trong thư mục lượt chạy.
+
+### Tài liệu Google (`gdocs.py`)
+
+Ticket hay dẫn link SRS trên Google Docs không công khai. Tool tải bằng **tài khoản Google của bạn** (tài liệu đã chia sẻ
+cho email đó) qua OAuth 2.0 (client loại *Desktop app*, PKCE, quyền chỉ đọc `drive.readonly` + email). Cấu hình trên
+trang theo dõi → **Cấu hình → Google Docs**:
+
+1. Google Cloud Console → tạo / chọn project → APIs & Services → Library → bật **Google Drive API**.
+2. OAuth consent screen: *Internal* (tài khoản Workspace công ty) hoặc *External* + thêm email của bạn vào Test users.
+   Chế độ *Testing* thì quyền hết hạn sau 7 ngày — dùng lâu dài thì **Publish app** (dùng cá nhân không cần xác minh;
+   màn hình đồng ý báo "chưa xác minh" → Nâng cao → Tiếp tục).
+3. Credentials → Create OAuth client ID → **Desktop app** (nhận mọi redirect `http://127.0.0.1:<cổng>`).
+4. Dán Email, Client ID, Client secret → **Lưu** → **Kết nối Google** → đăng nhập, tích ô xem file Drive → tab báo
+   "Đã kết nối". Thử bằng ô **Kiểm tra link**. Mở trang từ máy khác (Tailscale): sau khi đồng ý, chép URL
+   `http://127.0.0.1:…/api/google/callback?…` trên thanh địa chỉ dán vào mục "Trình duyệt ở máy khác".
+
+Lưu ở `~/.config/op-watch/google.json` + `google-access.json` (quyền 600; secret / token không hiện lại trên trang).
+Docs → markdown, Sheets → chữ mọi trang tính (+ bản xlsx), Slides → text, file Drive (pdf / docx / xlsx / zip…) → bản gốc
++ chữ trích; tối đa 6 link / ticket, 20 MB / file, 2 MB chữ / file; cache theo `modifiedTime` trong `<root>/.gdocs-cache`.
+Chưa kết nối thì chỉ tải được tài liệu công khai; tài liệu không đọc được (chưa cấp quyền, tài khoản không có quyền xem,
+Drive API chưa bật…) ghi lý do trong mục "Tài liệu Google", không chặn lượt sửa. Thử dòng lệnh:
+`python3 gdocs.py status`, `python3 gdocs.py <link>` (tải vào `./gdocs/`). "Ngắt kết nối" thu hồi quyền ở Google.
 
 ### Xem tiến trình
 
@@ -228,6 +255,23 @@ Cài đặt: token Gitea (Settings → Applications → Generate token, quyền 
 
 Chạy thử: `python3 merge_to_dev.py --dry-run` (merge + build, không push / không tạo PR); chạy ngay:
 `systemctl --user start op-merge.service`; xem log: `journalctl --user -u op-merge -n 50`.
+`op-merge.service` chạy `merge_to_dev.py --scheduled`: chỉ lượt có `--scheduled` mới bị hoãn (`.merge-skip.json`); chạy
+tay trên dòng lệnh (không `--scheduled`) luôn chạy, kể cả terminal mở dưới systemd (trước đây dựa vào `INVOCATION_ID`
+nên chạy tay cũng bị hoãn nhầm). Unit cài trước bản này: chạy lại `./install.sh op-merge` hoặc thêm `--scheduled` vào
+`ExecStart` rồi `systemctl --user daemon-reload`.
+
+### QA tự động ĐẠT được kiểm tra lại trước khi chuyển QA (deploy_qa.py `verify_pass`)
+Gemini / Claude kết luận ĐẠT thì tool kiểm tra lại trước mọi comment / chuyển người trên OpenProject (bản gốc giữ ở
+`qa-engine.md` cạnh `qa.md`):
+- request API nào trong lần QA trả **HTTP 5xx** (502-504 tạm thời đã được thử lại) → **KHÔNG ĐẠT**, kèm request + response;
+- **log BE** (`docker logs --since/--until <khoảng QA> <be_container>`, chỉ đọc) có ERROR trên luồng xử lý request
+  (`qa_be_log_threads`, mặc định `exec-\d+`) hoặc lỗi SQL (`does not exist`, `SQLGrammarException`, `PSQLException`…) →
+  **KHÔNG ĐẠT** ("lỗi BE trong lúc QA" — QA song song nhiều ticket dùng chung khoảng thời gian nên không chắc do ticket
+  này). Tối đa 20 dòng, bỏ trùng. Đọc log lỗi thì ghi chú trong `qa.md` và QA tiếp. Tắt: `QA_BE_LOG_CHECK=0` (hoặc
+  `"qa_be_log_check": false` trong deploy.json); bỏ qua lỗi nền biết trước: `"qa_be_log_ignore": ["regex", …]`;
+- bản sửa có phần BE (mục `# BE …` trong `diff.md`) mà không có request API (ngoài SEARCH / UI) trả 2xx liên quan tính
+  năng (từ khoá lấy từ tên file / package Java đã sửa) → **KHÔNG TỰ TEST ĐƯỢC**.
+Kiểm thử: `python3 -m unittest discover -s tests` (dùng `tests/fixtures/SOAR-2896-qa`).
 
 ## Deploy không dừng trang (deploy_qa.py — DEPLOY_STRATEGY)
 
@@ -254,6 +298,17 @@ lệnh cần làm tay. Tiến trình hiện trên trang theo dõi như log compo
 
 Xem trước các lệnh (không ssh, không đổi gì): `python3 deploy_qa.py --rollout-plan [fe] [be] [--strategy service]
 [--destructive]`.
+
+**FE và BE độc lập** (`deploy_parts`): FE build / docker load, rồi BE build; image nào xong thì vẫn rollout — BE build lỗi
+(vd lỗi compile) không còn chặn rollout FE đã build. Báo `DEPLOY 86 LỖI` ghi rõ phần lỗi (`FE build/deploy lỗi: …`,
+`BE build/deploy lỗi: …`, `rollout FE+BE lỗi: …`) và phần vẫn đã deploy.
+
+**FE lệch bản** (`fe_drift`): FE trên server (`<meta name="version">`) khác / cũ hơn commit `update version X` mới nhất
+trên `dev-ss` mà không có commit FE mới (vd 11/11: `.124` đã commit + docker load, BE lỗi nên chưa rollout, server vẫn
+`.123`) → đợt deploy kế tiếp deploy lại FE bản X, **không** tạo commit `update version` mới: image `soar-fe-ss:X` đã có
+trên server (`docker images`, chỉ đọc) → chỉ ghi compose + rollout; có ở máy này → `docker save` + scp + `docker load`;
+không còn → build lại với version ghim = X. `--dry-run` và `--review-watch` chỉ ghi log
+`FE trên server (…) lệch bản mới nhất dev-ss (…) — cần deploy lại FE` (trang theo dõi hiện cùng lý do), không deploy.
 
 **BE và DB**: trong lúc chuyển, 2 bản BE chạy cùng Postgres / Redis vài phút. Liquibase của bản mới migrate khi bản cũ vẫn
 phục vụ (Liquibase có khoá `DATABASECHANGELOGLOCK`, chỉ một bản migrate). Thêm bảng / cột là an toàn; migration phá cấu trúc
@@ -328,6 +383,15 @@ Trang hiển thị: hạn mức 5 giờ / 7 ngày của từng gói + ngưỡng,
 (đang chạy trước), thao tác Claude trực tiếp, số file đã sửa, các file báo cáo / Gemini / build-test; nút chạy lại
 autofix hoặc test lại bằng gói tùy chọn; inbox.
 
+## Gemini không chạy được
+
+Gemini (agy) không ra kết luận (chưa đăng nhập, bị từ chối quyền, quá giờ, hết hạn mức…) → **không push, không đổi
+trạng thái ticket**: commit nằm lại trong worktree, trạng thái "ĐÃ SỬA → <lý do> · CHƯA push, chờ xem lại", lượt được
+đánh dấu `<lượt>/.gemini-pending`. Chưa đăng nhập thì báo "Gemini chưa đăng nhập (chạy agy để đăng nhập lại)".
+Sửa xong nguyên nhân → nút **Test lại** (hoặc `op_autofix.py --review SOAR-x`): lượt đang chờ được kiểm tra + Gemini
+lại trên đúng worktree đó (như `--ship`), Gemini qua thì push + Resolved như thường. Quyền gửi cho agy: xem
+`gemini_cmd` trong `op_autofix.py` (đọc thư mục không dùng glob, lệnh chỉ chạy trong sandbox).
+
 ## Hàng chờ Claude xem lại (khi hết hạn mức)
 
 Gemini kết luận CẦN XEM / KHÔNG ĐẠT mà không gói nào còn hạn mức → bước Claude xem lại bị bỏ:
@@ -373,7 +437,8 @@ Trên trang theo dõi bấm chip "Merge + deploy + QA":
   lịch trong `.env`). Khi lưu, mốc "lần chạy trước" của timer được đặt = bây giờ để `Persistent=true` không chạy bù ngay
   các giờ vừa thêm mà đã qua trong hôm nay.
 - **Hoãn**: "Hoãn hôm nay" hoặc hoãn tới hết một ngày → `~/autofix/.merge-skip.json`; lượt chạy theo lịch thấy đang hoãn
-  thì ghi inbox `MERGE DEV HOÃN` rồi thoát. "Chạy ngay" trên trang và chạy tay `merge_to_dev.py` vẫn chạy.
+  thì ghi inbox `MERGE DEV HOÃN` rồi thoát. Lượt theo lịch = có cờ `--scheduled` (op-merge.service); "Chạy ngay" trên
+  trang (để lại `.merge-force`) và chạy tay `merge_to_dev.py` (không `--scheduled`) vẫn chạy.
 
 ### Tạo task từ trang theo dõi
 Nút "+ Tạo task": nhập mô tả (lỗi gì, màn nào, tài khoản…) + kéo thả / dán ảnh, file liên quan (tối đa 10 file, 20 MB)

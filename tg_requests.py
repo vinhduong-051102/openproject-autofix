@@ -717,9 +717,65 @@ def _docx_text(data):
     return "\n".join("".join(t.text or "" for t in p.iter(ns + "t")) for p in root.iter(ns + "p")).strip()
 
 
+_HTML_BLOCK = {"p", "div", "br", "tr", "li", "ul", "ol", "table", "section", "article", "header", "footer", "h1",
+               "h2", "h3", "h4", "h5", "h6", "pre", "blockquote", "hr", "dt", "dd", "caption", "thead", "tbody"}
+# Thẻ thường đứng sát nhau trong giao diện (menu, nhãn, nút…): chèn dấu cách để chữ không dính vào nhau.
+_HTML_INLINE_SEP = {"span", "a", "button", "label", "option", "img", "nav", "aside"}
+
+
+def _html_text(data):
+    """HTML → chữ đọc được: bỏ thẻ / script / style, xuống dòng ở thẻ khối, ô bảng nối bằng " | "."""
+    from html.parser import HTMLParser
+
+    class P(HTMLParser):
+        def __init__(self):
+            HTMLParser.__init__(self, convert_charrefs=True)
+            self.out, self.skip = [], 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style", "head", "noscript", "template"):
+                self.skip += 1
+            elif tag in ("td", "th"):
+                self.out.append(" | ")
+            elif tag in _HTML_BLOCK:
+                self.out.append("\n")
+            elif tag in _HTML_INLINE_SEP:
+                self.out.append(" ")
+            if tag in ("input", "textarea", "select") and not self.skip:  # mockup: giá trị / gợi ý của ô nhập
+                a = dict(attrs)
+                if (a.get("type") or "").lower() in ("checkbox", "radio"):
+                    self.out.append(" [%s] " % ("x" if "checked" in a else " "))
+                elif (a.get("type") or "").lower() != "hidden" and (a.get("value") or a.get("placeholder")):
+                    self.out.append(" [%s] " % (a.get("value") or a.get("placeholder")))
+            if tag == "li":
+                self.out.append("- ")
+            elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                self.out.append("#" * int(tag[1]) + " ")
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style", "head", "noscript", "template"):
+                self.skip = max(0, self.skip - 1)
+            elif tag in _HTML_BLOCK:
+                self.out.append("\n")
+            elif tag in _HTML_INLINE_SEP:
+                self.out.append(" ")
+
+        def handle_data(self, d):
+            if not self.skip:
+                self.out.append(re.sub(r"\s+", " ", d))
+
+    p = P()
+    p.feed(_decode(data))
+    p.close()
+    lines = [re.sub(r"^\s*\|\s*", "", re.sub(r"[ \t]+", " ", x)).strip() for x in "".join(p.out).split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
 def _doc_from_bytes(name, data):
     low = name.lower()
     try:
+        if low.endswith((".html", ".htm")):
+            return _html_text(data)
         if low.endswith(".xlsx"):
             return _xlsx_text(data)
         if low.endswith(".docx"):
@@ -732,7 +788,7 @@ def _doc_from_bytes(name, data):
 
 
 def extract_docs(path):
-    """[{name, text}] + ghi chú. zip / tar(.gz) đọc từng file bên trong; xlsx / docx / text đọc trực tiếp."""
+    """[{name, text}] + ghi chú. zip / tar(.gz) đọc từng file bên trong; xlsx / docx / html / text đọc trực tiếp."""
     import tarfile
     import zipfile
     name = os.path.basename(path)

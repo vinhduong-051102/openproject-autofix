@@ -41,6 +41,7 @@ ACTIVE_STATES = ("queued", "preparing", "running", "shipping")
 RUN_FILES = (("Báo cáo", "report.md"), ("Gemini", "gemini.md"), ("Claude xem lại", "followup.md"),
              ("Build/test", "verify.log"), ("QA", "qa-server.md"), ("Prompt", "prompt.md"), ("Lỗi Claude", "claude.err"))
 CONFIG_ARGS = {"config": None}
+DASH = {"port": envconf.DASHBOARD_PORT}  # cổng đang nghe — redirect URI OAuth Google (gdocs.py)
 
 
 def load():
@@ -949,6 +950,9 @@ def action(body):
         return config_page.action(body, save_autofix)
     if str(kind).startswith("kv_"):  # lấy token Claude từ KeyVault
         return kv_action(body)
+    if str(kind).startswith("gdocs_"):  # kết nối Google Docs (tải tài liệu có link trong ticket)
+        import gdocs
+        return gdocs.action(body, DASH["port"])
     if str(kind).startswith("tg_"):  # yêu cầu tester qua Telegram
         import tg_requests
         return tg_requests.action(body)
@@ -1369,6 +1373,18 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as ex:
                     return self.send(400, {"error": str(ex)})
                 return self.send(200 if res is not None else 404, res if res is not None else {"error": "not found"})
+            if url.path == "/api/google/status":
+                import gdocs
+                return self.send(200, dict(gdocs.status(), redirect=gdocs.redirect_uri(DASH["port"])))
+            if url.path == "/api/google/callback":
+                # Google chuyển hướng về đây sau màn hình đồng ý (GET cấp cao nhất, không có header X-Autofix): chống
+                # CSRF bằng state dùng một lần + PKCE verifier chỉ có trong tiến trình này (gdocs.finish).
+                import gdocs
+                try:
+                    ok, msg = True, gdocs.finish(q.get("state"), q.get("code"), q.get("error"))
+                except Exception as ex:  # noqa: BLE001 — thông báo lỗi không chứa code / token
+                    ok, msg = False, str(ex)
+                return self.send(200 if ok else 400, gdocs.callback_page(ok, msg), "text/html; charset=utf-8")
             if url.path.startswith("/api/tg/"):  # yêu cầu tester qua Telegram (tg_requests.py)
                 import tg_requests
                 try:
@@ -1821,6 +1837,7 @@ def main():
     parser.add_argument("--config", help="đường dẫn config op-watch")
     args = parser.parse_args()
     CONFIG_ARGS["config"] = args.config
+    DASH["port"] = args.port
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = "http://127.0.0.1:%d" % args.port
     print("op-dashboard: %s (Ctrl+C để dừng)" % url, flush=True)

@@ -101,7 +101,8 @@ AUTOFIX_DEFAULTS = {
     "time_activity_test": "Testing",
     "set_dates": True,
     # Gemini (Antigravity CLI `agy`, chế độ plan = chỉ đọc) kiểm tra lại bản sửa sau khi build/test qua, trước khi push.
-    # KHÔNG ĐẠT → không push (gemini_block_on_fail). Gemini lỗi / hết hạn mức → vẫn push, ghi chú trong báo cáo.
+    # KHÔNG ĐẠT → không push (gemini_block_on_fail). Gemini không ra kết luận (lỗi / chưa đăng nhập / hết hạn mức / bị
+    # từ chối quyền) → CHƯA push, giữ commit trong worktree, chờ "Test lại" (--review chạy lại Gemini rồi push nếu qua).
     "gemini_enabled": True,
     "gemini_cmd": "~/.local/bin/agy",
     "gemini_model": "gemini-3.8-flash-high",
@@ -161,7 +162,11 @@ PROMPT = """Bạn đang tự động sửa một bug OpenProject của dự án 
 ## Ticket
 {display_id} (#{wp_id}, trạng thái {status}, sự kiện {event}) — {subject}
 Toàn bộ mô tả + comment: {run_dir}/ticket/ticket.md ; ảnh đính kèm: {run_dir}/ticket/images/ (đọc bằng Read).
-Có mục "Thiết kế Figma" trong ticket.md thì xem ảnh frame ({run_dir}/ticket/figma/) và làm ĐÚNG thông số ghi kèm (kích thước,
+File đính kèm khác (bản gốc + chữ đã trích trong text/): {run_dir}/ticket/attachments/ — xem mục "File đính kèm" cuối
+ticket.md; đọc các file liên quan (đặc tả HTML, SRS, file mẫu…) TRƯỚC khi sửa, làm đúng theo đặc tả đó.
+Tài liệu Google (Docs / Sheets / Drive — SRS, đặc tả) có link trong ticket đã tải vào {run_dir}/ticket/gdocs/ (xem mục
+"Tài liệu Google" của ticket.md): đọc phần liên quan trước khi sửa; tài liệu không tải được thì mục đó ghi lý do.
+{spec_block}Có mục "Thiết kế Figma" trong ticket.md thì xem ảnh frame ({run_dir}/ticket/figma/) và làm ĐÚNG thông số ghi kèm (kích thước,
 khoảng cách, màu, font) — dùng token / biến có sẵn của dự án gần nhất với giá trị đó, không hard-code nếu đã có token tương ứng.
 Đọc hết comment: ticket Reopened thì comment gần nhất của tester là yêu cầu cần làm.
 Nếu đã có comment **[Cần duyệt]** (autofix lần trước nêu các phương án) và SAU đó có comment của {assignee}
@@ -181,6 +186,9 @@ QUYẾT ĐỊNH: làm theo như bug thường, không giải đáp lại.
 Chỉ sửa trong {n_repos} thư mục này. Không tạo nhánh / worktree khác, không checkout, không fetch/pull/push.
 
 ## Làm
+0. Có mục "ĐẶC TẢ — BẮT BUỘC ĐỌC" ở trên thì đọc xong các phần đó TRƯỚC (bằng Read), ghi lại mọi yêu cầu chi tiết
+   (loại ô nhập, placeholder, giá trị mặc định, bắt buộc / không, câu báo lỗi, quy tắc xử lý) rồi mới sửa. Đặc tả là
+   chuẩn: mô tả ticket chỉ tóm tắt; code hiện có khác đặc tả thì làm theo đặc tả (chỗ mâu thuẫn rõ → ghi Cần quyết định).
 1. Tìm nguyên nhân gốc trong code (không đoán). Ticket nhắc tới API/màn hình nào thì tìm đúng chỗ đó.
 2. Sửa tối thiểu, đúng phạm vi ticket, theo phong cách code xung quanh{repo_rules}.
 3. Kiểm tra: {repo_checks}.
@@ -221,6 +229,9 @@ Ghi {run_dir}/report.md bằng tiếng Việt:
   `## Kiểm tra hồi quy` — các chỗ dùng đã rà (file / màn hình / API → còn đúng / đã sửa theo / cần quyết định) và test
   đã chạy cho phần bị ảnh hưởng (lệnh + kết quả);
   Cần quyết định / rủi ro;
+  `## Tài liệu đã đối chiếu` — BẮT BUỘC khi có mục ĐẶC TẢ: từng tài liệu + mục / dòng đã đọc (vd `SRS 2.20, dòng
+  14725–15252`), rồi từng yêu cầu chi tiết của đặc tả liên quan tới ticket → đã đáp ứng / chưa (lý do). Không có
+  đặc tả thì ghi "Không có".
 {decider_rules}
   `## Comment cho tester` — đoạn này được đăng nguyên văn lên ticket cho TESTER (không phải dev) đọc: tiếng Việt, ngắn,
   nói theo màn hình / thao tác / kết quả nhìn thấy. Dòng đầu bắt buộc `**Nguyên nhân lỗi:** …` (1–2 câu: vì sao bị lỗi,
@@ -634,8 +645,94 @@ def any_fix(acfg, run_dir):
     return any(fix_commits(d, r["branch"]) for r, d in R.trees(acfg, run_dir) if os.path.isdir(d))
 
 
-def fetch_ticket(api, wp_id, out_dir, figma_designs=True):
-    """Mô tả + toàn bộ comment/thay đổi + ảnh đính kèm, để Claude đọc offline."""
+ATT_MAX = 30 * 1024 * 1024  # file đính kèm lớn hơn thì không tải
+
+
+def _att_ctype(a):
+    return a.get("contentType") if isinstance(a.get("contentType"), str) else ""
+
+
+def download_attachments(api, wp_id, att_dir, text_dir, atts=None, max_size=ATT_MAX):
+    """Tải file đính kèm KHÔNG phải ảnh của WP vào att_dir, trích chữ (html / zip / tar / xlsx / docx / text) vào
+    text_dir. Lỗi tải / đọc từng file chỉ ghi lại, không ném. Trả [{file_name, name, ctype, size, path, texts:
+    [(đường dẫn, tên bên trong, số ký tự)], notes, skipped, error}] (path / name None nếu không tải)."""
+    import tg_requests
+    import task_create
+    if atts is None:
+        atts = (api.get("/api/v3/work_packages/%s/attachments" % wp_id).get("_embedded") or {}).get("elements") or []
+    os.makedirs(att_dir, exist_ok=True)
+    os.makedirs(text_dir, exist_ok=True)
+    out, used = [], set()
+    for a in atts:
+        ctype, size = _att_ctype(a), a.get("fileSize") or 0
+        rec = {"file_name": a.get("fileName") or "file", "name": None, "ctype": ctype or "?", "size": size,
+               "path": None, "texts": [], "notes": [], "skipped": None, "error": None}
+        out.append(rec)
+        if ctype.startswith("image/"):
+            rec["skipped"] = "ảnh"
+            continue
+        if size > max_size:
+            rec["skipped"] = "quá %d MB" % (max_size // 1024 // 1024)
+            continue
+        name = task_create.safe_name(rec["file_name"], used)
+        path = os.path.join(att_dir, name)
+        rec["name"] = name
+        if not (os.path.isfile(path) and size and os.path.getsize(path) == size):  # tải lại ticket: file đã có thì giữ
+            req = op_watch.urllib.request.Request(api.url + "/api/v3/attachments/%s/content" % a["id"],
+                                                  headers=api.headers)
+            try:
+                with op_watch.urllib.request.urlopen(req, timeout=120) as resp, open(path, "wb") as f:
+                    shutil.copyfileobj(resp, f)
+            except (op_watch.urllib.error.URLError, OSError) as ex:
+                rec["error"] = "không tải được (%s)" % ex
+                log("không tải được file đính kèm %s: %s" % (name, ex))
+                continue
+        rec["path"] = path
+        try:
+            docs, notes = tg_requests.extract_docs(path)
+        except Exception as ex:  # noqa: BLE001 — file hỏng / lạ: vẫn giữ bản gốc
+            docs, notes = [], ["không trích được chữ: %s" % str(ex)[:160]]
+        rec["notes"] = notes
+        for i, x in enumerate(docs):
+            tp = os.path.join(text_dir, "%s__%02d__%s.txt" % (name, i, re.sub(r"[^\w.-]+", "_", x["name"])[-80:]))
+            try:
+                with open(tp, "w", encoding="utf-8") as f:
+                    f.write(x["text"])
+                rec["texts"].append((tp, x["name"], len(x["text"])))
+            except OSError as ex:
+                rec["notes"].append("không ghi được %s: %s" % (tp, ex))
+    return out
+
+
+def attachments_section(recs, base):
+    """Mục "## File đính kèm" cho ticket.md (đường dẫn tương đối so với base = thư mục ticket)."""
+    rel = lambda p: os.path.relpath(p, base)  # noqa: E731
+    lines = ["", "## File đính kèm", "",
+             "Bản gốc trong attachments/, chữ đã trích trong attachments/text/ (đường dẫn dưới đây tính từ thư mục "
+             "chứa ticket.md). Đọc các file liên quan (đặc tả, SRS, file mẫu) trước khi sửa.", ""]
+    for r in recs:
+        head = "- **%s** (%s, %s byte)" % (r["file_name"], r["ctype"], r["size"])
+        if r["skipped"] == "ảnh":
+            lines.append(head + " — ảnh: %s" % (r.get("image") or "chưa tải"))
+            continue
+        if r["skipped"]:
+            lines.append(head + " — bỏ qua: %s" % r["skipped"])
+            continue
+        if r["error"]:
+            lines.append(head + " — %s" % r["error"])
+            continue
+        lines.append(head + " → `%s`" % rel(r["path"]))
+        for tp, inner, n in r["texts"]:
+            lines.append("  - chữ%s: `%s` (%d ký tự)" % ("" if inner == r["name"] else " của " + inner, rel(tp), n))
+        if not r["texts"]:
+            lines.append("  - (không trích được chữ — định dạng chưa hỗ trợ, đọc bản gốc nếu cần)")
+        lines += ["  - (%s)" % n for n in r["notes"][:5]]
+    return lines
+
+
+def fetch_ticket(api, wp_id, out_dir, figma_designs=True, attachments=True, google_docs=True):
+    """Mô tả + toàn bộ comment/thay đổi + ảnh + file đính kèm (bản gốc + chữ trích ra) + tài liệu Google có link trong
+    ticket, để Claude đọc offline."""
     os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
     wp = api.get("/api/v3/work_packages/%s" % wp_id)
     acts = api.activities(wp_id)
@@ -673,6 +770,36 @@ def fetch_ticket(api, wp_id, out_dir, figma_designs=True):
             log("%s: đã đọc thiết kế Figma (%d link)" % (wp.get("displayId"), len(figma.find_links(raw))))
     except Exception as ex:  # noqa: BLE001 — Figma lỗi không chặn lượt sửa
         log("đọc Figma lỗi: %s" % ex)
+    # Link Google Docs / Sheets / Slides / Drive (SRS, đặc tả) → tải bằng tài khoản Google đã kết nối (gdocs.py) vào
+    # gdocs/; chưa cấp quyền / không có quyền thì mục ghi lý do.
+    try:
+        import gdocs
+        sec = gdocs.ticket_section(raw, out_dir) if google_docs else ""
+        if sec:
+            lines.append(sec)
+            log("%s: tài liệu Google — %d link, %d file chữ" % (wp.get("displayId"), len(gdocs.find_links(raw)),
+                                                                len(gdocs.text_files(out_dir))))
+    except Exception as ex:  # noqa: BLE001 — Google lỗi không chặn lượt sửa
+        log("đọc tài liệu Google lỗi: %s" % ex)
+    # File đính kèm không phải ảnh (đặc tả HTML, SRS docx/xlsx, file mẫu…): tải + trích chữ; lỗi chỉ ghi log.
+    if attachments:
+        try:
+            atts = (api.get("/api/v3/work_packages/%s/attachments" % wp["id"]).get("_embedded") or {}) \
+                .get("elements") or []
+            recs = download_attachments(api, wp["id"], os.path.join(out_dir, "attachments"),
+                                        os.path.join(out_dir, "attachments", "text"), atts=atts)
+            for a, r in zip(atts, recs):
+                if r["skipped"] == "ảnh":  # ảnh đính kèm (kể cả không chèn vào mô tả) → images/<id>.png
+                    if (a.get("fileSize") or 0) <= ATT_MAX:
+                        image_ids.add(str(a["id"]))
+                        r["image"] = "images/%s.png" % a["id"]
+            if recs:
+                lines += attachments_section(recs, out_dir)
+                n = sum(1 for r in recs if r["path"])
+                if n:
+                    log("%s: đã tải %d file đính kèm" % (wp.get("displayId"), n))
+        except Exception as ex:  # noqa: BLE001 — file đính kèm lỗi không chặn lượt sửa
+            log("tải file đính kèm lỗi: %s" % ex)
     with open(os.path.join(out_dir, "ticket.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -1324,10 +1451,10 @@ def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir
     if acfg.get("gemini_enabled"):
         log("%s: không có commit mới (đã sửa sẵn) — Gemini kiểm tra code hiện tại" % display_id)
         notify("[GEMINI TEST] %s" % display_id, "Đã sửa sẵn — Gemini kiểm tra code hiện tại: " + wp.get("subject", ""))
-        verdict, _ = gemini_review(acfg, run_dir, referenced_commits(report_text, dirs),
-                                   note=ALREADY_FIXED_NOTE.format(run_dir=run_dir,
-                                                                  worktrees=", ".join(d for _, d in R.trees(acfg, run_dir))))
-        shown = verdict or "không chạy được"
+        verdict, gtext = gemini_review(acfg, run_dir, referenced_commits(report_text, dirs),
+                                       note=ALREADY_FIXED_NOTE.format(run_dir=run_dir,
+                                                                      worktrees=", ".join(d for _, d in R.trees(acfg, run_dir))))
+        shown = verdict or gemini_failed_text(gtext).replace("Gemini ", "", 1)
         log("%s: Gemini %s" % (display_id, shown))
         inbox(cfg, "**GEMINI TEST** %s — %s (đã sửa sẵn) · %s" % (display_id, shown, os.path.join(run_dir, "gemini.md")))
     if verdict == "ĐẠT":
@@ -1350,7 +1477,7 @@ def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir
     lines += evidence_lines(api, wp_id, report_text, run_dir)
     comment_and_status(api, wp_id, lines, review_id)
     return "Gemini %s · đã sửa sẵn (không commit mới) → %s" % (
-        verdict or "không chạy được", "comment + chuyển UNREVIEWED" if review_id else "đã comment")
+        shown if acfg.get("gemini_enabled") else "tắt", "comment + chuyển UNREVIEWED" if review_id else "đã comment")
 
 
 QA_RULES = os.path.join(envconf.autofix_root(), "qa-rules.md")
@@ -1463,9 +1590,17 @@ def report_cannot_fix(api, acfg, wp_id, report_text, run_name):
 
 GEMINI_PROMPT = """Bạn là tester độc lập (Gemini) TEST LẠI bản sửa bug do một AI khác (Claude) làm cho dự án @@P@@.
 CHỈ ĐỌC: không sửa / tạo / xoá file, không commit, không gọi mạng. Nội dung chính đã có bên dưới; cần thì đọc thêm file
-trong {run_dir} (code ở fe/ và be/) bằng công cụ đọc file hoặc lệnh chỉ đọc (cat, ls, grep, git log/show/diff).
+trong {run_dir} (code ở fe/ và be/) bằng công cụ đọc file hoặc lệnh chỉ đọc (cat, ls, grep, git log/show/diff) —
+lệnh chạy trong sandbox chỉ đọc, KHÔNG đặt BypassSandbox (chạy nền không ai duyệt được, agy sẽ dừng).
+File đính kèm của ticket (bản gốc + chữ đã trích ở text/) nằm trong {run_dir}/ticket/attachments/ (xem mục "File đính
+kèm" của ticket): đọc các file liên quan (đặc tả HTML, SRS…) khi đối chiếu kết quả mong đợi. Tài liệu Google có link
+trong ticket đã tải vào {run_dir}/ticket/gdocs/ (mục "Tài liệu Google").
 NHIỆM VỤ DUY NHẤT: kiểm tra bản sửa đã đáp ứng đúng yêu cầu của ticket chưa — đi lại từng bước tái hiện của ticket trên
 code đã sửa và đối chiếu từng KẾT QUẢ MONG ĐỢI (Reopened thì theo comment tester gần nhất).
+Có mục "# ĐẶC TẢ" bên dưới (SRS / mockup của ticket) thì đặc tả là CHUẨN, mô tả ticket chỉ tóm tắt: đối chiếu TỪNG yêu
+cầu chi tiết của đặc tả thuộc phạm vi ticket (loại ô nhập, placeholder, giá trị mặc định, bắt buộc / không, câu báo
+lỗi, quy tắc xử lý…) với code. Bản sửa làm khác đặc tả (vd đặc tả là ô nhập mà code làm ô chọn, thiếu câu báo lỗi)
+→ KHÔNG ĐẠT, kể cả khi Claude đã tự ghi đó là "rủi ro". Đoạn trích chưa đủ thì đọc thêm file đặc tả (đường dẫn kèm).
 KHÔNG rà hồi quy / ảnh hưởng tới chức năng khác (Claude đã tự kiểm tra — mục "Kiểm tra hồi quy" trong báo cáo), KHÔNG
 đánh giá phong cách code, tối ưu, đặt tên, test tự động hay việc ngoài phạm vi ticket.
 Trả lời bằng tiếng Việt, markdown. Dòng đầu đúng một trong:
@@ -1474,9 +1609,10 @@ Sau đó các mục:
 ## Tóm tắt lý do (chỉ khi KHÔNG ĐẠT / CẦN XEM: 1–3 gạch đầu dòng ngắn, đăng lên ticket cho TESTER đọc — nói theo màn
 hình / thao tác / kết quả nhìn thấy; KHÔNG tên file, class, hàm, biến, commit)
 ## Đối chiếu kết quả mong đợi (từng ý của ticket → đạt / chưa đạt, dẫn chứng file:dòng)
+## Đối chiếu đặc tả (chỉ khi có mục # ĐẶC TẢ: từng yêu cầu chi tiết → đạt / chưa đạt, dẫn chứng mục đặc tả + file:dòng)
 ## Lỗi (chỉ các ý của ticket CHƯA đạt: 1. <ý> — mức độ — hậu quả)
 ## Ca kiểm thử tester nên chạy lại (bước + kết quả mong đợi)
-KHÔNG ĐẠT chỉ khi có ít nhất một kết quả mong đợi của ticket chưa đạt (hoặc luồng của ticket bị hỏng rõ ràng). Không
+KHÔNG ĐẠT chỉ khi có ít nhất một kết quả mong đợi của ticket / yêu cầu của đặc tả chưa đạt (hoặc luồng của ticket bị hỏng rõ ràng). Không
 xác nhận được từ code (cần dữ liệu / môi trường thật) thì CẦN XEM. Còn lại ĐẠT.
 """
 
@@ -1491,8 +1627,66 @@ def worktree_snapshot(dirs):
     return out
 
 
+# ---- Gọi Gemini (agy) chạy nền, chỉ đọc — dùng chung cho gemini_review (op_autofix) và gemini_qa (deploy_qa) ----------
+# Đã thử trực tiếp với agy 1.5.5 (11/2026):
+# - read_file(<thư mục>/**) làm sandbox lỗi "readonly …/**: globs not supported" → mọi run_command hỏng, Gemini chỉ còn
+#   read_file; read_file(<thư mục>) (không glob) cho đọc cả cây con, kể cả .git/ và .git/worktrees/… của repo gốc.
+# - command(*) cho phép cả chạy NGOÀI sandbox (Gemini tự đặt BypassSandbox khi sandbox lỗi): có thể ghi file / push.
+#   toolPermission "proceed-in-sandbox" thay cho command(*): lệnh tự chạy trong sandbox (hệ thống file chỉ đọc), xin
+#   chạy ngoài sandbox thì chạy nền không duyệt được → agy dừng (không ra kết luận, coi là Gemini lỗi, không push).
+# - deny write_file(/) làm hỏng sandbox ("sbox: exec /proc/self/exe") → chỉ chặn ghi trên các thư mục cụ thể; chế độ
+#   plan vẫn cho write_file trong thư mục làm việc (cwd) nếu không chặn.
+# - Luật deny bị vi phạm thì chỉ lỗi công cụ đó (Gemini chạy tiếp); thiếu quyền khác (đọc file ngoài danh sách…) thì
+#   headless không hỏi được → agy dừng hẳn ("permission that headless mode cannot prompt for").
+GEMINI_DENIED = "permission that headless mode cannot prompt for"
+GEMINI_AUTH_RX = re.compile(r"not logged in|not signed in|sign[- ]in (again|update needed)|/logout|UNAUTHENTICATED|"
+                            r"login required|invalid_grant|token (has been )?(expired|revoked)", re.I)
+GEMINI_NO_LOGIN = "Gemini chưa đăng nhập (chạy agy để đăng nhập lại)"
+
+
+def gemini_cmd(acfg, prompt, readable, commands=True, extra=(), timeout_s=None, model=None):
+    """
+    Lệnh agy chạy nền chỉ đọc: --mode plan, đọc được các thư mục `readable` (cả cây con), không ghi được vào chúng.
+    commands=True: chạy lệnh chỉ đọc trong sandbox (git log/show, grep, ls…); False: chặn hẳn lệnh (QA: mọi request
+    lên server phải đi qua công cụ để kiểm tra luật chỉ đọc).
+    """
+    dirs = []
+    for d in readable:
+        d = os.path.realpath(os.path.expanduser(d))
+        if d and d != "/" and d not in dirs:
+            dirs.append(d)
+    perms = {"allow": ["read_file(%s)" % d for d in dirs], "deny": ["write_file(%s)" % d for d in dirs]}
+    settings = {"permissions": perms}
+    cmd = [os.path.expanduser(acfg["gemini_cmd"]), "-p", prompt, "--mode", "plan"]
+    if commands:
+        settings["toolPermission"] = "proceed-in-sandbox"
+        cmd.append("--sandbox")
+    else:
+        perms["deny"].append("command(*)")
+    cmd += ["--settings", json.dumps(settings)] + list(extra)
+    if timeout_s:
+        cmd += ["--print-timeout", "%ds" % timeout_s]
+    if model or acfg.get("gemini_model"):
+        cmd += ["--model", model or acfg["gemini_model"]]
+    return cmd
+
+
+def gemini_fail_reason(out):
+    """Lý do ngắn khi Gemini không ra kết luận (để ghi trạng thái / thông báo)."""
+    if GEMINI_AUTH_RX.search(out or ""):
+        return GEMINI_NO_LOGIN
+    if GEMINI_DENIED in (out or ""):
+        return "Gemini bị từ chối quyền (chạy nền không hỏi được)"
+    if re.search(r"print timeout|DEADLINE_EXCEEDED|TimeoutExpired|timed out", out or "", re.I):
+        return "Gemini quá thời gian"
+    if re.search(r"quota|rate limit|RESOURCE_EXHAUSTED|Too Many Requests", out or "", re.I):
+        return "Gemini hết hạn mức"
+    return "Gemini không chạy được"
+
+
 def gemini_review(acfg, run_dir, items, note=""):
-    """Gemini xem lại bản sửa (chỉ đọc). Trả (kết luận, nội dung); kết luận rỗng nếu Gemini không chạy được."""
+    """Gemini xem lại bản sửa (chỉ đọc). Trả (kết luận, nội dung); kết luận rỗng nếu Gemini không chạy được — khi đó
+    nội dung bắt đầu bằng "Gemini không trả kết luận: <lý do>" (gemini_fail_reason)."""
     parts = [GEMINI_PROMPT.replace("@@P@@", P.name(acfg)).format(run_dir=run_dir) + note]
     for title, path in (("TICKET", "ticket/ticket.md"), ("BÁO CÁO CỦA CLAUDE", "report.md"),
                         ("KẾT QUẢ BUILD / TEST TỰ ĐỘNG", "verify.log")):
@@ -1500,41 +1694,89 @@ def gemini_review(acfg, run_dir, items, note=""):
         if os.path.exists(full):
             with open(full, encoding="utf-8", errors="replace") as f:
                 parts += ["", "# " + title, f.read()[-30000:]]
+        if title == "TICKET":
+            spec = spec_excerpts(run_dir, 40000)
+            if spec:
+                parts += ["", spec]
     parts += ["", "# DIFF"]
     for label, repo_dir, commits in items:
         for commit in commits:
             parts += ["## " + label, run(["git", "show", commit], cwd=repo_dir, check=False)[:60000]]
     out_path = os.path.join(run_dir, "gemini.md")
-    # Chạy nền không hỏi được quyền: thiếu quyền là agy dừng, không ra kết luận. Cho đọc file trong thư mục lượt chạy
-    # và chạy lệnh (Gemini hay dùng git log / ls / head để xem code) nhưng trong sandbox; worktree được kiểm tra lại
-    # sau khi Gemini xong (worktree_snapshot), có thay đổi thì không push.
     # Worktree fe/ be/ không có .git riêng (dữ liệu git ở <repo gốc>/.git/worktrees/…) và node_modules là symlink về
-    # repo gốc, nên phải cho đọc cả hai repo gốc, không chỉ thư mục lượt chạy.
-    readable = [run_dir] + [os.path.realpath(r["path"]) for r in R.repos(acfg)]
-    perms = {"permissions": {"allow": ["read_file(%s/**)" % d for d in readable] + ["command(*)"]}}
-    cmd = [os.path.expanduser(acfg["gemini_cmd"]), "-p", "\n".join(parts), "--mode", "plan", "--sandbox",
-           "--settings", json.dumps(perms), "--print-timeout", "%ds" % (acfg["gemini_timeout"] - 30)]
-    if acfg.get("gemini_model"):
-        cmd += ["--model", acfg["gemini_model"]]
+    # repo gốc, nên phải cho đọc cả hai repo gốc, không chỉ thư mục lượt chạy. Worktree được kiểm tra lại sau khi
+    # Gemini xong (worktree_snapshot), có thay đổi thì không push.
+    readable = [run_dir] + [r["path"] for r in R.repos(acfg)]
+    timeout_s = acfg["gemini_timeout"] - 30
+    prompt = "\n".join(parts)
+    text, err = "", ""
     for attempt in range(2):
+        cmd = gemini_cmd(acfg, prompt, readable, timeout_s=timeout_s)
         try:
             res = subprocess.run(cmd, cwd=run_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 stdin=subprocess.DEVNULL, universal_newlines=True, timeout=acfg["gemini_timeout"])
+                                 stdin=subprocess.DEVNULL, universal_newlines=True, errors="replace",
+                                 timeout=acfg["gemini_timeout"])
             text, err = res.stdout.strip(), res.stderr.strip()
         except (OSError, subprocess.TimeoutExpired) as ex:
             text, err = "", str(ex)
-        # Bị từ chối quyền (đọc file ngoài các thư mục cho phép…) thì agy dừng hẳn: chạy lại một lần, nhắc giới hạn.
-        if attempt or "permission that headless mode cannot prompt for" not in (text + err):
+        # Bị từ chối quyền (đọc file ngoài các thư mục cho phép, xin chạy ngoài sandbox…) thì agy dừng hẳn: chạy lại
+        # một lần, nhắc giới hạn. Chưa đăng nhập thì chạy lại cũng vô ích.
+        if attempt or GEMINI_DENIED not in (text + err) or GEMINI_AUTH_RX.search(text + err):
             break
         log("Gemini bị từ chối quyền, chạy lại: %s" % (text + err)[-200:].replace("\n", " "))
-        cmd[2] = "\n".join(parts) + "\n\nLƯU Ý: chỉ được đọc file trong các thư mục: %s. Không đọc file ở nơi khác." % (
-            ", ".join(readable))
+        prompt = "\n".join(parts) + (
+            "\n\nLƯU Ý: chỉ được đọc file trong các thư mục: %s. Không đọc file ở nơi khác, không ghi file, lệnh chỉ "
+            "chạy trong sandbox (không đặt BypassSandbox)." % ", ".join(readable))
     m = re.search(r"KẾT LUẬN:\s*(KHÔNG ĐẠT|ĐẠT|CẦN XEM)", text[:500])
     if not m:
-        text = "Gemini không trả kết luận.\n\n```\n%s\n```\n\n%s" % (err[-1500:], text[:3000])
+        text = "Gemini không trả kết luận: %s\n\n```\n%s\n```\n\n%s" % (
+            gemini_fail_reason(text[-3000:] + "\n" + err), err[-1500:], text[:3000])
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(text)
     return (m.group(1) if m else ""), text
+
+
+def gemini_failed_text(text):
+    """Lý do Gemini không ra kết luận, đọc từ dòng đầu gemini.md (gemini_review ghi)."""
+    m = re.match(r"Gemini không trả kết luận: ([^\n]+)", text or "")
+    return m.group(1).strip() if m else "Gemini không chạy được"
+
+
+# Lượt sửa mới có commit nhưng Gemini không ra kết luận → không push; file này đánh dấu để "Test lại" (--review) chạy
+# lại kiểm tra + Gemini + push trên đúng worktree đó (ship_run) thay vì test lại bản đã push trên nhánh.
+GEMINI_PENDING = ".gemini-pending"
+
+
+def gemini_pending_run(acfg, display_id):
+    """Tên lượt chạy mới nhất của ticket đang chờ Gemini (có dấu GEMINI_PENDING và còn commit chưa push), hoặc ""."""
+    root = os.path.expanduser(acfg["root"])
+    try:
+        names = [d for d in os.listdir(root) if d.startswith(display_id + "-")
+                 and os.path.exists(os.path.join(root, d, GEMINI_PENDING))]
+    except OSError:
+        return ""
+    for name in sorted(names, key=lambda d: os.path.getmtime(os.path.join(root, d, GEMINI_PENDING)), reverse=True):
+        run_dir = os.path.join(root, name)
+        try:
+            if any_fix(acfg, run_dir):
+                return name
+        except Exception:  # noqa: BLE001 — worktree hỏng / đã dọn: bỏ qua
+            pass
+    return ""
+
+
+def gemini_hold(run_dir, display_id, reason):
+    """Ghi dấu chờ Gemini cho lượt (xem GEMINI_PENDING)."""
+    with open(os.path.join(run_dir, GEMINI_PENDING), "w", encoding="utf-8") as f:
+        json.dump({"display_id": display_id, "reason": reason,
+                   "at": datetime.now().isoformat(timespec="seconds")}, f, ensure_ascii=False)
+
+
+def gemini_release(run_dir):
+    try:
+        os.remove(os.path.join(run_dir, GEMINI_PENDING))
+    except OSError:
+        pass
 
 
 FOLLOWUP_PROMPT = """Bạn là Claude, đã (hoặc AI trước đã) sửa bug {display_id} — {subject}. Chạy nền, không có người theo dõi.
@@ -1670,6 +1912,180 @@ def run_claude(acfg, prompt, run_dir, fe_dir=None, be_dir=None, append=False):
     return code
 
 
+# ---- đặc tả (SRS Google Docs / file đính kèm): bắt Claude đọc trước khi sửa ------------------------------------------
+
+SPEC_PROMPT = """Bạn là Claude, vừa xử lý ticket {display_id} — {subject} trong lượt chạy {run_dir}. Chạy nền.
+Tool kiểm tra nhật ký thao tác: bạn CHƯA ĐỌC tài liệu đặc tả của ticket{no_section} — bắt buộc đọc trước khi giao:
+{docs}
+
+## Làm
+1. Đọc các phần trên bằng Read (tài liệu dài: Read với offset / limit theo số dòng; mục lục ở file .muc-luc.md).
+2. Liệt kê mọi yêu cầu chi tiết của đặc tả liên quan tới ticket (loại ô nhập, placeholder, giá trị mặc định, bắt
+   buộc / không, câu báo lỗi, quy tắc xử lý…) và đối chiếu với bản sửa hiện tại (`git -C <worktree> log` / `show`).
+   Worktree: {worktrees}.
+3. Chỗ chưa đúng đặc tả, trong phạm vi ticket → sửa, kiểm tra ({repo_checks_short}), commit bằng `git -C <worktree>
+   add …` + `git -C <worktree> commit …`, message `[{display_id}] - {subject}` + dòng trống + "Bo sung theo dac ta: …"
+   + dòng trống + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Mâu thuẫn rõ giữa đặc tả và ticket /
+   comment → không tự chọn, ghi Cần quyết định.
+4. CẬP NHẬT {run_dir}/report.md (giữ định dạng, dòng đầu `KẾT QUẢ: …` đúng với kết quả sau khi đối chiếu): thêm /
+   sửa mục `## Tài liệu đã đối chiếu` (tài liệu + mục / dòng đã đọc; từng yêu cầu → đã đáp ứng / đã sửa thêm / chưa
+   và lý do); cập nhật Đã sửa, Commit, Kiểm tra, `## Comment cho tester` nếu có sửa thêm.
+KHÔNG dùng `cd … && …`; git luôn `git -C`, Maven `-f`. Không push, không fetch/pull/checkout, không gọi mạng.
+{bash_rules}
+"""
+
+
+def spec_docs(run_dir):
+    """Tài liệu đặc tả của ticket: chữ của tài liệu Google (ticket/gdocs) + chữ trích từ file đính kèm. Mỗi mục:
+    {path, label, toc, sections}."""
+    tdir = os.path.join(run_dir, "ticket")
+    out = []
+    try:
+        import gdocs
+        try:
+            with open(os.path.join(tdir, "gdocs", gdocs.SECTIONS_FILE), encoding="utf-8") as f:
+                secs = json.load(f)
+        except (OSError, ValueError):
+            secs = {}
+        for p in gdocs.text_files(tdir):
+            info = secs.get(os.path.relpath(p, tdir)) or {}
+            out.append({"path": p, "label": "Tài liệu Google", "toc": info.get("toc"),
+                        "sections": info.get("sections") or []})
+    except Exception as ex:  # noqa: BLE001
+        log("đọc danh sách tài liệu Google lỗi: %s" % ex)
+    tx = os.path.join(tdir, "attachments", "text")
+    for n in sorted(os.listdir(tx)) if os.path.isdir(tx) else []:
+        if n.endswith(".txt"):
+            out.append({"path": os.path.join(tx, n), "label": "File đính kèm", "toc": None, "sections": []})
+    return out
+
+
+def _doc_lines(docs):
+    lines = []
+    for d in docs:
+        lines.append("- %s: %s" % (d["label"], d["path"]))
+        if d["sections"]:
+            lines.append("  Tài liệu dài — mục liên quan (tool tự dò, tự kiểm tra lại; mục lục đầy đủ: %s):" % d["toc"])
+            lines += ["    - %s %s — dòng %d–%d" % (x["num"], x["title"], x["start"], x["end"]) for x in d["sections"]]
+    return lines
+
+
+def spec_block(run_dir):
+    docs = spec_docs(run_dir)
+    if not docs:
+        return ""
+    return ("\n## ĐẶC TẢ — BẮT BUỘC ĐỌC TRƯỚC KHI SỬA\n"
+            "Ticket có tài liệu đặc tả (SRS / mockup) — tool kiểm tra nhật ký: chưa Read các file này thì lượt chạy bị "
+            "bắt đọc lại và đối chiếu trước khi giao. File đính kèm gốc (HTML…) trong {d}/ticket/attachments/.\n"
+            .format(d=run_dir) + "\n".join(_doc_lines(docs)) + "\n\n")
+
+
+def spec_excerpts(base, limit=40000):
+    """Đoạn đặc tả để đưa thẳng vào prompt Gemini (test lại / QA): tài liệu dài → mục liên quan nhất (tool tự dò) + mục
+    tiếp theo nếu còn chỗ; tài liệu ngắn (mockup HTML…) → toàn bộ. base = thư mục chứa ticket/. "" nếu không có."""
+    docs = spec_docs(base)
+    if not docs:
+        return ""
+    # Tài liệu ngắn trước (mockup thường ngắn và sát ticket), rồi mục liên quan của tài liệu dài.
+    short = [d for d in docs if not d["sections"]]
+    long_ = [d for d in docs if d["sections"]]
+    parts, left = [], limit
+    for d in short + long_:
+        if left <= 500:
+            parts.append("\n(đã đủ %d ký tự — còn: %s)" % (limit, d["path"]))
+            continue
+        try:
+            with open(d["path"], encoding="utf-8", errors="replace") as f:
+                text = f.read() if not d["sections"] else None
+                lines = None
+                if text is None:
+                    f.seek(0)
+                    lines = f.read().split("\n")
+        except OSError:
+            continue
+        if lines is not None:
+            for x in d["sections"][:2]:
+                chunk = "\n".join(lines[x["start"] - 1:x["end"]])
+                cut = chunk[:left]
+                parts.append("\n## %s — mục %s %s (dòng %d–%d, file %s)\n%s%s" % (
+                    d["label"], x["num"], x["title"], x["start"], x["end"], d["path"], cut,
+                    "\n(… cắt bớt, đọc tiếp trong file)" if len(chunk) > left else ""))
+                left -= len(cut)
+                if left <= 500:
+                    break
+        else:
+            cut = text[:left]
+            parts.append("\n## %s — %s\n%s%s" % (d["label"], d["path"], cut,
+                                                 "\n(… cắt bớt)" if len(text) > left else ""))
+            left -= len(cut)
+    return ("# ĐẶC TẢ (SRS / mockup của ticket — chuẩn để đối chiếu; mục của tài liệu dài do tool tự dò)" +
+            "\n".join(parts)) if parts else ""
+
+
+def _read_paths(run_dir):
+    """Đường dẫn file Claude đã Read (cả phiên bị ngắt trước đó)."""
+    seen = set()
+    for name in ("claude.jsonl", "claude.jsonl.interrupted"):
+        for e in read_events(os.path.join(run_dir, name)):
+            content = (e.get("message") or {}).get("content")
+            for c in content if isinstance(content, list) else []:
+                if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "Read":
+                    fp = (c.get("input") or {}).get("file_path")
+                    if fp:
+                        seen.add(os.path.realpath(fp))
+    return seen
+
+
+def spec_unread(run_dir, docs=None):
+    """Tài liệu đặc tả Claude chưa Read. File đính kèm: đọc bản gốc (vd HTML) cũng tính."""
+    docs = spec_docs(run_dir) if docs is None else docs
+    seen = _read_paths(run_dir)
+    att = os.path.join(run_dir, "ticket", "attachments")
+    miss = []
+    for d in docs:
+        alt = set()
+        if d["label"] == "File đính kèm":  # <tên gốc>__00__….txt → attachments/<tên gốc>
+            alt.add(os.path.realpath(os.path.join(att, os.path.basename(d["path"]).split("__")[0])))
+        if os.path.realpath(d["path"]) not in seen and not (alt & seen):
+            miss.append(d)
+    return miss
+
+
+def enforce_spec(acfg, cfg, display_id, wp, run_dir, fe_dir, be_dir, report):
+    """Claude chưa đọc đặc tả / báo cáo thiếu "Tài liệu đã đối chiếu" → một lượt Claude bắt đọc + đối chiếu + sửa thêm.
+    Mỗi lượt chạy làm tối đa một lần. Trả ghi chú ("" nếu không cần)."""
+    done = os.path.join(run_dir, "spec-check.done")
+    docs = spec_docs(run_dir)
+    if not docs or not os.path.exists(report) or os.path.exists(done):
+        return ""
+    with open(report, encoding="utf-8") as f:
+        text = f.read()
+    miss = spec_unread(run_dir, docs)
+    has_section = bool(re.search(r"^##\s*Tài liệu đã đối chiếu", text, re.M))
+    if not miss and has_section:
+        return ""
+    open(done, "w").close()
+    what = ", ".join(os.path.basename(d["path"]) for d in miss) or "(đã đọc, thiếu mục Tài liệu đã đối chiếu)"
+    log("%s: Claude chưa đọc đặc tả (%s) → bắt đọc + đối chiếu" % (display_id, what))
+    inbox(cfg, "**AUTOFIX ĐỐI CHIẾU ĐẶC TẢ** %s — Claude chưa đọc: %s" % (display_id, what))
+    prompt = SPEC_PROMPT.format(
+        display_id=display_id, subject=wp.get("subject", ""), run_dir=run_dir,
+        no_section="" if miss else " (hoặc báo cáo thiếu mục Tài liệu đã đối chiếu)",
+        docs="\n".join(_doc_lines(miss or docs)), bash_rules=BASH_RULES.format(run_dir=run_dir),
+        **R.prompt_kwargs(acfg, run_dir))
+    with open(os.path.join(run_dir, "spec-prompt.md"), "w", encoding="utf-8") as f:
+        f.write(prompt)
+    run_claude(acfg, prompt, run_dir, fe_dir, be_dir, append=True)
+    still = spec_unread(run_dir, docs)
+    if still:
+        note = "Claude vẫn chưa đọc đặc tả: %s" % ", ".join(os.path.basename(d["path"]) for d in still)
+        log("%s: %s" % (display_id, note))
+        with open(report, "a", encoding="utf-8") as f:
+            f.write("\n\n> ⚠ Tool: %s — cần dev đối chiếu đặc tả trước khi giao.\n" % note)
+        return note
+    return "đã bắt Claude đọc + đối chiếu đặc tả"
+
+
 def claude_followup(acfg, display_id, wp, run_dir, fe_dir, be_dir, gemini_verdict, items):
     """Claude xem lại nhận xét của Gemini và tự quyết. Trả (quyết định, nội dung followup.md)."""
     commits = "; ".join("%s %s" % (label, ", ".join(c[:8] for c in cs)) for label, _, cs in items)
@@ -1788,17 +2204,26 @@ def _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, rep
         log("%s: Gemini test lại" % display_id)
         notify("[GEMINI TEST] %s" % display_id, "Build/test đã qua — Gemini đang test lại bản sửa: " + subject)
         before = worktree_snapshot(dirs)
-        gemini_verdict, _ = gemini_review(acfg, run_dir, current())
+        gemini_verdict, gemini_text = gemini_review(acfg, run_dir, current())
         changed = [label for label, snap in worktree_snapshot(dirs).items() if before.get(label) != snap]
         if changed:
             msg = "Gemini đã thay đổi worktree %s (chỉ được đọc) — kiểm tra tay %s" % (", ".join(changed), run_dir)
             inbox(cfg, "**GEMINI CẢNH BÁO** %s — %s" % (display_id, msg))
             return False, "chưa push: " + msg
-        shown = gemini_verdict or "không chạy được"
-        notes.append("Gemini " + shown)
-        log("%s: Gemini %s" % (display_id, shown))
+        shown = ("Gemini " + gemini_verdict) if gemini_verdict else gemini_failed_text(gemini_text)
+        notes.append(shown)
+        log("%s: %s" % (display_id, shown))
         notify("[GEMINI TEST] %s: %s" % (display_id, shown), subject)
         inbox(cfg, "**GEMINI TEST** %s — %s · %s" % (display_id, shown, os.path.join(run_dir, "gemini.md")))
+        if not gemini_verdict:
+            # Gemini không ra kết luận (lỗi / chưa đăng nhập / bị từ chối quyền / quá giờ): KHÔNG push, không đổi trạng
+            # thái ticket. Lượt sửa mới: giữ commit trong worktree + đánh dấu chờ — "Test lại" (--review) chạy lại kiểm
+            # tra + Gemini trên đúng worktree này (ship_run) và push nếu Gemini qua.
+            if review_of is None:
+                gemini_hold(run_dir, display_id, shown)
+                return False, " · ".join(notes) + " · CHƯA push, chờ xem lại (bấm Test lại khi Gemini chạy được)"
+            return False, " · ".join(notes) + " · chưa test lại được, bấm Test lại sau"
+        gemini_release(run_dir)
 
     root = os.path.expanduser(acfg["root"])
     skip, queued = "", False
@@ -1918,6 +2343,7 @@ def _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, rep
     # Comment viết cho tester (không phải dev): chỉ nội dung "Comment cho tester" của Claude, không commit / nguyên
     # nhân trong code / hạn mức. Chi tiết kỹ thuật nằm trong report.md + báo cáo tổng hợp.
     log("%s: push %s" % (display_id, commit_line))
+    gemini_release(run_dir)
     if review_of is None:
         lines = ["**[Autofix] Đã sửa** — đã qua kiểm tra tự động (build, test, AI kiểm tra lại)."]
         sections = ((report_text, ("Comment cho tester", "Đề xuất"), ""),
@@ -2701,7 +3127,8 @@ def ship_run(cfg, acfg, run_name, profile=None):
                                             report_text)
         except Exception as ex:  # noqa: BLE001
             shipped, ship_msg = False, "ship lỗi: %s" % str(ex).splitlines()[0][:200]
-        manual = has_fix and not shipped and "UNREVIEWED" not in ship_msg and kind != "GIẢI ĐÁP"
+        manual = has_fix and not shipped and "UNREVIEWED" not in ship_msg and kind != "GIẢI ĐÁP" \
+            and "chờ xem lại" not in ship_msg
         verdict = kind + " → " + ship_msg + (" (sửa tay rồi push)" if manual else "")
         set_status(root, display_id, state="done", verdict=verdict)
         inbox(cfg, "**AUTOFIX** %s — giao lại %s: %s" % (display_id, run_name, verdict))
@@ -2812,7 +3239,8 @@ def gather_assist(api, acfg, wp, run_dir, report_text, note=""):
     for rid in related[:int(acfg.get("assist_max_related") or 8)]:
         try:
             w = api.get("/api/v3/work_packages/%s" % rid)
-            fetch_ticket(api, w["id"], os.path.join(rel_dir, rid), figma_designs=False)
+            fetch_ticket(api, w["id"], os.path.join(rel_dir, rid), figma_designs=False, attachments=False,
+                         google_docs=False)
             lines.append("- Ticket liên quan %s — %s: %s/ticket.md" % (rid, w.get("subject", ""),
                                                                     os.path.join(rel_dir, rid)))
         except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
@@ -3364,6 +3792,16 @@ def main():
         os.makedirs(root, exist_ok=True)
         api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
         for ref in args.review:
+            # Lượt sửa mới bị giữ vì Gemini không chạy được (chưa push): kiểm tra + Gemini lại trên đúng worktree đó,
+            # qua thì push + chuyển Resolved như lượt thường (ship_run). Không có thì test lại bản đã push.
+            pending = gemini_pending_run(acfg, ref) if re.match(r"^[A-Z][A-Z0-9]*-\d+$", ref) else ""
+            if pending:
+                log("%s: lượt %s chưa push vì Gemini không chạy được — kiểm tra + Gemini lại rồi push" % (ref, pending))
+                try:
+                    ship_run(cfg, acfg, pending, args.profile)
+                except SystemExit as ex:  # ship_run dừng bằng sys.exit (đang xử lý / không có lượt…)
+                    log("%s: %s" % (ref, ex))
+                continue
             review_ticket(api, cfg, acfg, ref, args.profile)
         return
     if args.follow is not None:
@@ -3483,7 +3921,8 @@ def main():
                 project_name=P.name(acfg), assignee=assignee_name(api),
                 bash_rules=BASH_RULES.format(run_dir=run_dir), decider_rules=DECIDER_RULES,
                 display_id=display_id, wp_id=wp_id, status=wp["_links"]["status"].get("title"), event=event,
-                subject=wp.get("subject", ""), run_dir=run_dir, merge_note=merge_note, **R.prompt_kwargs(acfg, run_dir, branch))
+                subject=wp.get("subject", ""), run_dir=run_dir, merge_note=merge_note, spec_block=spec_block(run_dir),
+                **R.prompt_kwargs(acfg, run_dir, branch))
             if proj.get("context"):
                 prompt += "\n\n## Bối cảnh dự án %s (do dev khai báo)\n%s\n" % (proj["name"], proj["context"])
             if args.qa_report and os.path.exists(args.qa_report):
@@ -3557,6 +3996,10 @@ def main():
             set_status(root, display_id, profile=nxt["name"])
             code = run_claude(acfg, prompt + RESUME_NOTE, run_dir, fe_dir, be_dir, append=True)
 
+        try:  # chưa đọc SRS / đặc tả đính kèm → bắt đọc + đối chiếu (một lần) trước khi giao
+            enforce_spec(acfg, cfg, display_id, wp, run_dir, fe_dir, be_dir, report)
+        except Exception as ex:  # noqa: BLE001 — bước kiểm tra lỗi không chặn lượt chạy
+            log("%s: kiểm tra đọc đặc tả lỗi: %s" % (display_id, ex))
         if dev_t0:
             log_time(api, acfg, wp_id, time.time() - dev_t0, "dev",
                      "[Autofix] Claude sửa (%s%s)" % (run_name, ", làm tiếp lượt bị ngắt" if resume_dir else ""))
@@ -3599,7 +4042,7 @@ def main():
             except Exception as ex:  # noqa: BLE001 — ghi lại, vẫn báo kết quả sửa
                 shipped, ship_msg = False, "ship lỗi: %s" % str(ex).splitlines()[0][:200]
             verdict += " → " + ship_msg
-            if not shipped and "UNREVIEWED" not in ship_msg:
+            if not shipped and "UNREVIEWED" not in ship_msg and "chờ xem lại" not in ship_msg:
                 verdict += " (sửa tay rồi push)"
         elif verdict.startswith("ĐÃ SỬA") and not has_fix and acfg.get("auto_ship"):
             # Lỗi đã được sửa sẵn (không commit mới): Gemini kiểm tra code hiện tại rồi mới cập nhật ticket.

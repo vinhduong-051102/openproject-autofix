@@ -184,10 +184,11 @@ SKIP_FILE = ".merge-skip.json"    # {"until": "YYYY-MM-DD"} — trang theo dõi 
 FORCE_FILE = ".merge-force"       # trang theo dõi bấm "Chạy ngay": lượt này chạy dù đang hoãn
 
 
-def skipped_today(root):
+def skipped_today(root, scheduled=False):
     """
-    Lượt chạy theo lịch (systemd) mà đang hoãn → trả lý do; chạy tay (dòng lệnh) hoặc "Chạy ngay" trên trang thì không
-    hoãn. "Chạy ngay" để lại FORCE_FILE (dùng một lần, có hiệu lực 10 phút).
+    Lượt chạy theo lịch (op-merge.service chạy với --scheduled) mà đang hoãn → trả lý do; chạy tay (dòng lệnh, không
+    --scheduled) hoặc "Chạy ngay" trên trang thì không hoãn. "Chạy ngay" để lại FORCE_FILE (dùng một lần, có hiệu lực
+    10 phút). Không dựa vào INVOCATION_ID: terminal mở dưới systemd cũng có biến này → chạy tay bị hoãn nhầm.
     """
     force = os.path.join(root, FORCE_FILE)
     if os.path.exists(force):
@@ -195,7 +196,7 @@ def skipped_today(root):
         os.remove(force)
         if fresh:
             return ""
-    if not os.environ.get("INVOCATION_ID"):  # không chạy dưới systemd = chạy tay
+    if not scheduled:  # chạy tay
         return ""
     try:
         with open(os.path.join(root, SKIP_FILE), encoding="utf-8") as f:
@@ -214,6 +215,8 @@ def main():
     parser.add_argument("--only", metavar="REPO", help="chỉ một repo (nhãn hoặc key, vd FE / be)")
     parser.add_argument("--project", help="chỉ repo của dự án này (mã hoặc tiền tố)")
     parser.add_argument("--no-deploy", action="store_true", help="không deploy + QA lên server 86 sau khi merge")
+    parser.add_argument("--scheduled", action="store_true",
+                        help="lượt chạy theo lịch (op-merge.service): tôn trọng hoãn chạy tự động (.merge-skip.json)")
     args = parser.parse_args()
 
     cfg = op_watch.load_config(argparse.Namespace(config=None, interval=None, on_change=None, no_notify=False))
@@ -229,7 +232,7 @@ def main():
         acfg = P.all_repos(acfg, cfg)
     os.makedirs(os.path.expanduser(acfg["root"]), exist_ok=True)
 
-    why = skipped_today(os.path.expanduser(acfg["root"]))
+    why = skipped_today(os.path.expanduser(acfg["root"]), args.scheduled)
     if why:
         log(why)
         af.inbox(cfg, "**MERGE DEV HOÃN** " + why)

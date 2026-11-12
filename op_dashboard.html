@@ -575,7 +575,26 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
 .view[data-view="projects"].on { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; max-width: none;
   grid-template-rows: minmax(0, 1fr); }
 .view[data-view="config"].on { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; max-width: 1100px;
-  grid-template-rows: minmax(0, 1fr); margin: 0 auto; width: 100%; }
+  grid-template-rows: auto minmax(0, 1fr); margin: 0 auto; width: 100%; }
+/* Google Docs (gdocs.py): tài khoản Google để tải tài liệu có link trong ticket */
+#gdocsBox { margin-bottom: 0; }
+#gdocsBox h2 .p-name::before { content: "📄 "; }
+.gd-body { padding: 12px 16px; display: grid; gap: 10px; font-size: 13px; }
+.gd-body .cfg-grid { max-width: 760px; }
+.gd-body .p-actions { margin-top: 0; align-items: center; }
+.gd-body .muted { color: var(--text-3); font-size: 12px; }
+.gd-body a { color: var(--accent); }
+@media (max-width: 960px) { #gdocsBox h2 .sum { display: none; } }
+.gd-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.gd-row input { flex: 1 1 320px; min-width: 0; }
+.gd-warn { color: var(--warn); } .gd-err { color: var(--crit); } .gd-ok { color: var(--ok); }
+.gd-res { font-size: 12.5px; }
+.gd-res pre { white-space: pre-wrap; margin: 6px 0 0; padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 6px; font: 12px var(--mono); max-height: 160px; overflow: auto; }
+.gd-body details > summary { cursor: pointer; color: var(--text-2); font-size: 12.5px; }
+.gd-body details ol { margin: 6px 0 0 18px; padding: 0; color: var(--text-2); font-size: 12.5px; line-height: 1.55; }
+.gd-body details[open] > .gd-row, .gd-body details[open] > p { margin-top: 6px; }
+.gd-body code { font: 12px var(--mono); overflow-wrap: anywhere; }
 #cfgProjBox h2 .apply-btn { margin-left: 8px; }
 #cfgProjBox, #cfgRepoBox, #cfgEnvBox { min-height: 0; }
 .cfg-repo .hd { flex-wrap: wrap; } .cfg-repo .hd > span:last-child { white-space: nowrap; }
@@ -752,6 +771,11 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
     </section>
   </div>
   <div class="view" data-view="config">
+    <section id="gdocsBox">
+      <h2><span class="p-name">Google Docs</span> <span class="sum muted" id="gdSum">tải SRS / đặc tả có link trong ticket</span>
+        <span class="right"><span class="badge" id="gdBadge">—</span></span></h2>
+      <div class="gd-body" id="gdBody"><div class="empty">Đang tải…</div></div>
+    </section>
     <section id="cfgEnvBox">
       <h2>Biến cấu hình (.env) <span class="right muted" id="cfgEnvSum"></span></h2>
       <div class="op-bar"><input type="search" id="cfgQ" placeholder="Tìm theo tên biến / ghi chú…">
@@ -1505,7 +1529,7 @@ function renderDetail() {
       ${live || r.state === "stale" ? `<button class="danger" id="cancelRun" title="Dừng lượt này (Claude, Gemini, build…). Worktree giữ nguyên, không đụng OpenProject; bấm Chạy lại autofix để làm lại">■ Huỷ chạy</button>` : ""}
       ${["cancelled", "stale"].includes(r.state) ? `<button class="primary" id="resumeRun" title="Làm tiếp trên đúng worktree cũ: Claude xem phần đã sửa / commit dở rồi làm tiếp, không làm lại từ đầu">▶ Làm tiếp</button>` : ""}
       <button class="${["cancelled", "stale"].includes(r.state) ? "" : "primary"}" id="rerun" ${live ? "disabled" : ""} title="Lượt mới từ code mới nhất của nhánh — bỏ phần sửa dở của lượt này">Chạy lại autofix</button>
-      <button id="review" ${live ? "disabled" : ""} title="Gemini test lại bản đã push, Claude xem lại các ý chưa đạt">Test lại</button>
+      <button id="review" ${live ? "disabled" : ""} title="Gemini test lại bản đã push, Claude xem lại các ý chưa đạt. Lượt chưa push vì Gemini không chạy được: kiểm tra + Gemini lại trên đúng worktree đó, qua thì push">Test lại</button>
       ${ASSIST_RX.test(r.verdict || "") ? `<button id="assist" ${live ? "disabled" : ""} title="Claude gỡ vướng trên đúng lượt này: tải file đính kèm, ticket liên quan, gọi GET API server test; nhập thêm ghi chú hướng dẫn nếu cần">🤝 Claude hỗ trợ</button>` : ""}
       <label class="force" title="Chạy dù gói đã quá ngưỡng 5 giờ / 7 ngày tự đặt. Gói đã hết hạn mức thật thì vẫn không chạy được.">
         <input type="checkbox" id="ignoreLimits"> Bỏ qua ngưỡng hạn mức</label>
@@ -2875,6 +2899,7 @@ function showView(v) {
   if (v === "ticket" && typeof loadOP === "function") loadOP();
   if (v === "todo") renderTodo();
   if (v === "config" || v === "projects") loadConfig();
+  if (v === "config") gdLoad();
   if (v === "stats") loadStats();
   document.querySelectorAll(".view.on .scroll-reset").forEach((el) => { el.scrollTop = 0; });
 }
@@ -3414,6 +3439,82 @@ $("cfgApply").onclick = async () => {
   const r = await post({action: "config_apply", changed: CFG.applied});
   if (r) { CFG.applied = []; cfgShowApply(false); setTimeout(() => location.reload(), 4000); }
 };
+// ---- Google Docs (gdocs.py): kết nối tài khoản Google của bạn để tải tài liệu có link trong ticket ----
+const GD = {st: null, test: null, link: ""};
+async function gdLoad() {
+  try { GD.st = await tgFetch("/api/google/status"); gdRender(); }
+  catch (e) { $("gdBody").innerHTML = `<div class="empty">Không tải được: ${esc(e.message)}</div>`; }
+}
+function gdRender() {
+  const s = GD.st; if (!s) return;
+  const [cls, label] = s.connected ? ["ok", "Đã kết nối"] : s.configured ? ["warn", "Chưa kết nối"] : ["", "Chưa cấu hình"];
+  $("gdBadge").className = "badge " + cls; $("gdBadge").textContent = label;
+  const keep = (id) => ($(id) ? $(id).value : null);
+  const v = {email: keep("gdEmail") ?? s.email, cid: keep("gdCid") ?? s.client_id, sec: keep("gdSecret") ?? ""};
+  const when = s.connected_at ? s.connected_at.replace("T", " ").slice(0, 16) : "";
+  const notes = [];
+  if (s.connected) notes.push(`<span class="gd-ok">Đã kết nối bằng <b>${esc(s.connected_email)}</b>${when ? " · lúc " + esc(when) : ""}</span> — lượt autofix / QA / tách việc tự tải tài liệu Google có link trong ticket vào <code>ticket/gdocs/</code>.`);
+  else notes.push(s.configured ? "Đã có Client ID / secret — bấm <b>Kết nối Google</b> và đăng nhập bằng tài khoản được chia sẻ tài liệu."
+    : "Tài liệu Google trong ticket thường không công khai. Tạo OAuth client (xem hướng dẫn bên dưới), nhập Client ID / secret, bấm Lưu rồi Kết nối Google. Chưa kết nối thì tool chỉ tải được tài liệu công khai, mục \"Tài liệu Google\" trong ticket ghi lý do.");
+  if (s.mismatch) notes.push(`<span class="gd-warn">⚠ Tài khoản đã kết nối (${esc(s.connected_email)}) khác email đã nhập (${esc(s.email)}) — tài liệu chia sẻ cho ${esc(s.email)} có thể không đọc được. Bấm Kết nối lại và chọn đúng tài khoản.</span>`);
+  if (s.connected && !s.drive_scope) notes.push(`<span class="gd-warn">⚠ Chưa cấp quyền xem file Google Drive (ô đó bị bỏ tích ở màn hình đồng ý) — bấm Kết nối lại và tích ô.</span>`);
+  if (s.last_error) notes.push(`<span class="gd-err">Lỗi gần nhất: ${esc(s.last_error)}</span>`);
+  const t = GD.test;
+  $("gdBody").innerHTML = `<div>${notes.join("<br>")}</div>
+    <div class="cfg-grid">
+      <label for="gdEmail">Email</label><input id="gdEmail" type="email" autocomplete="off" placeholder="tài khoản Google được chia sẻ tài liệu (gợi ý đăng nhập)" value="${esc(v.email)}">
+      <label for="gdCid">Client ID</label><input id="gdCid" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com" value="${esc(v.cid)}">
+      <label for="gdSecret">Client secret</label><input id="gdSecret" type="password" autocomplete="new-password" placeholder="${s.secret_set ? "••••••• đã lưu — để trống nếu giữ nguyên" : "GOCSPX-…"}" value="${esc(v.sec)}">
+    </div>
+    <div class="p-actions">
+      <button id="gdSave">Lưu</button>
+      <button id="gdConnect" class="${s.configured && !s.connected ? "primary" : ""}" ${s.configured ? "" : "disabled title=\"Nhập Client ID / secret và bấm Lưu trước\""}>${s.connected ? "Kết nối lại" : "Kết nối Google"}</button>
+      ${s.connected ? `<button id="gdDisc">Ngắt kết nối</button>` : ""}
+      <span class="muted" style="font-size:12px">Lưu ở <code>${esc(s.config_path)}</code> (quyền 600) · secret / token không hiện lại trên trang</span>
+    </div>
+    <div id="gdAuth" class="gd-res"></div>
+    <div class="gd-row"><input id="gdLink" type="url" placeholder="Dán link Google Docs / Sheets / Drive để thử đọc" value="${esc(GD.link)}"><button id="gdTest">Kiểm tra link</button></div>
+    ${t ? `<div class="gd-res">${t.ok ? `<span class="gd-ok">✓ ${esc(t.title)}</span> · ${t.chars} ký tự${(t.notes || []).length ? ` <span class="muted">· ${esc(t.notes.join(" · "))}</span>` : ""}<pre>${esc(t.preview || "")}${(t.chars || 0) > 300 ? "…" : ""}</pre>` : `<span class="gd-err">✗ ${esc(t.message)}</span>`}</div>` : ""}
+    <details><summary>Trình duyệt ở máy khác (mở trang qua Tailscale / IP khác 127.0.0.1)?</summary>
+      <p class="muted">Sau khi đồng ý, Google chuyển tới <code>${esc(s.redirect)}</code> — trên máy khác trang đó không mở được, nhưng thanh địa chỉ vẫn có mã. Chép nguyên URL đó dán vào đây (trong 10 phút):</p>
+      <div class="gd-row"><input id="gdPaste" autocomplete="off" placeholder="http://127.0.0.1:…/api/google/callback?state=…&code=…"><button id="gdFinish">Hoàn tất kết nối</button></div>
+    </details>
+    <details><summary>Cách tạo OAuth client (một lần, ~5 phút)</summary>
+      <ol>
+        <li>Mở <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a> bằng tài khoản Google của bạn → tạo / chọn một project.</li>
+        <li><b>APIs &amp; Services → Library</b> → tìm <b>Google Drive API</b> → <b>Enable</b>.</li>
+        <li><b>APIs &amp; Services → OAuth consent screen</b> (Google Auth Platform): User type <b>Internal</b> nếu email là tài khoản Google Workspace của công ty và được tạo project trong tổ chức; không thì <b>External</b> → thêm chính email của bạn vào <b>Test users</b>. Ở chế độ <i>Testing</i>, quyền chỉ sống 7 ngày — muốn dùng lâu dài thì bấm <b>Publish app</b> (In production; dùng cá nhân không cần Google xác minh, màn hình đồng ý sẽ báo "Google chưa xác minh ứng dụng" → <i>Nâng cao → Tiếp tục</i>).</li>
+        <li><b>APIs &amp; Services → Credentials → Create credentials → OAuth client ID</b> → Application type <b>Desktop app</b> → Create. Client loại Desktop chấp nhận mọi redirect <code>http://127.0.0.1:&lt;cổng&gt;</code>, không cần khai báo redirect URI.</li>
+        <li>Chép <b>Client ID</b> và <b>Client secret</b> vào ô trên, nhập Email, bấm <b>Lưu</b> → <b>Kết nối Google</b> → đăng nhập đúng tài khoản, tích ô cho phép <i>xem tất cả tệp trên Google Drive</i> → tab báo "Đã kết nối".</li>
+        <li>Thử: dán link một tài liệu trong ticket vào ô Kiểm tra link.</li>
+      </ol>
+      <p class="muted">Quyền xin: <code>drive.readonly</code> (chỉ đọc) + email. Thu hồi bất cứ lúc nào bằng Ngắt kết nối hoặc ở myaccount.google.com/permissions.</p>
+    </details>`;
+  const fields = () => ({email: $("gdEmail").value.trim(), client_id: $("gdCid").value.trim(), client_secret: $("gdSecret").value.trim()});
+  const after = (r) => { if (r) { GD.st = {...GD.st, ...r}; $("gdSecret").value = ""; gdRender(); } };
+  $("gdSave").onclick = async (e) => after(await post({action: "gdocs_save", ...fields()}, e.target));
+  $("gdConnect").onclick = async (e) => {
+    // Mở tab ngay trong lúc bấm (không bị chặn popup), rồi chuyển tới trang đồng ý khi có URL.
+    const w = window.open("about:blank", "_blank"); if (w) w.opener = null;
+    const r = await post({action: "gdocs_auth_url"}, e.target);
+    if (!r) { if (w) w.close(); return; }
+    if (w) w.location.href = r.url;
+    $("gdAuth").innerHTML = `${w ? "Đã mở trang đăng nhập Google ở tab mới." : "Trình duyệt chặn tab mới —"} <a href="${esc(r.url)}" target="_blank" rel="noopener">Mở trang đăng nhập Google</a> · xong thì quay lại đây (trang tự cập nhật). Redirect: <code>${esc(r.redirect)}</code>`;
+  };
+  if ($("gdDisc")) $("gdDisc").onclick = async (e) => {
+    if (!confirm(`Ngắt kết nối Google (${s.connected_email})? Quyền sẽ bị thu hồi ở Google, token trên máy bị xoá.`)) return;
+    after(await post({action: "gdocs_disconnect"}, e.target));
+  };
+  $("gdLink").oninput = () => { GD.link = $("gdLink").value; };
+  $("gdTest").onclick = async (e) => {
+    GD.link = $("gdLink").value.trim(); if (!GD.link) return;
+    const r = await post({action: "gdocs_test", url: GD.link}, e.target);
+    if (r) { GD.test = r; gdRender(); }
+  };
+  $("gdFinish").onclick = async (e) => { const r = await post({action: "gdocs_finish", url: $("gdPaste").value}, e.target); if (r) after(r); };
+}
+// Quay lại tab sau khi đồng ý ở Google → cập nhật trạng thái.
+window.addEventListener("focus", () => { if (document.querySelector('.view.on[data-view="config"]')) gdLoad(); });
 (function () { let v = "todo"; try { v = localStorage.getItem("view") || "todo"; } catch (e) {} showView(v); })();
 loadTodoExtra(); setInterval(loadTodoExtra, 15000);
 </script>

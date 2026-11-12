@@ -5,4 +5,4 @@ Description=merge_to_dev - dua nhanh ca nhan vao nhanh chung qua PR Gitea, deplo
 Type=oneshot
 WorkingDirectory=@TOOL_DIR@
 Environment=PATH=@EXTRA_PATH@:/usr/local/bin:/usr/bin:/bin
-ExecStart=@PYTHON@ -u @TOOL_DIR@/merge_to_dev.py
+ExecStart=@PYTHON@ -u @TOOL_DIR@/merge_to_dev.py --scheduled
