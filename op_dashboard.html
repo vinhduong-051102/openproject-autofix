@@ -275,6 +275,8 @@ html { scroll-behavior: smooth; }
 .op-row .subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .op-row .tags { grid-column: 2 / 3; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--text-2); }
 .op-row .when { color: var(--text-3); font-size: 12px; text-align: right; white-space: nowrap; }
+.op-row .op-run { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+.op-row .op-run button:disabled { opacity: .55; cursor: not-allowed; }
 .op-foot { display: flex; gap: 10px; align-items: center; justify-content: flex-end; padding: 8px 16px; font-size: 12px; color: var(--text-3); }
 .op-row { cursor: pointer; }
 .op-row .ext { color: var(--text-3); text-decoration: none; padding: 0 2px; }
@@ -475,8 +477,11 @@ header { flex-wrap: wrap; min-width: 0; }
 .st-table th.n { text-align: right; }
 .st-table td.nw, .st-table td:first-child { white-space: nowrap; }
 .st-table td.n { text-align: right; font-variant-numeric: tabular-nums; }
-.st-table .subj { color: var(--text-2); }
-.st-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; background: var(--panel); }
+.assist-mark { margin-left: 6px; white-space: nowrap; font-weight: 600; }
+.op-row .tags > .assist-mark { margin-left: 0; }
+.st-table .subj { color: var(--text-2); overflow-wrap: anywhere; }
+.st-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; background: var(--panel); overflow-x: auto; }
+#stBody { padding: 0 16px 16px; }
 .st-card h3 { margin: 0 0 6px; font-size: 14px; display: flex; gap: 8px; align-items: center; }
 .st-card .more { margin-top: 6px; }
 .tg-chart { padding: 6px 16px 0; } .tg-chart svg { width: 100%; height: 130px; display: block; }
@@ -534,6 +539,15 @@ table.tg-chats select { max-width: 220px; }
 #reviewList { flex: 1 1 auto; min-height: 0; overflow-y: auto; flex-shrink: 1 !important; }
 .view.split.on { display: grid; grid-template-rows: minmax(0, 1fr); }
 .rightcol { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+/* Tab Ticket gộp cả Autofix: trạng thái lượt chạy + nút thao tác nằm trên từng dòng ticket; báo cáo / log mở
+   trong hộp thoại #runModal (khung #detail dùng chung với mọi nơi gọi select / selectOther). */
+#runModal { overflow: hidden; align-items: center; padding: 2vh 16px; }
+#runModal .modal-box { width: min(1100px, 100%); height: 96vh; display: flex; flex-direction: column; padding: 10px 16px 16px; overflow: hidden; }
+#runModal .rc-bar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+#runModal > .modal-box > #detail { flex: 1 1 auto; min-height: 0; }
+.op-row .run-badge { cursor: pointer; }
+.op-row .run-badge:hover { filter: brightness(1.2); }
+.op-row .run-note { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }
 #detail { flex: 1 1 auto; min-height: 0; margin-bottom: 0; display: flex; flex-direction: column; overflow: hidden; }
 #detail > .log, #detail > #otherLog { flex: 1 1 auto !important; height: auto; min-height: 0; flex-shrink: 1 !important; overscroll-behavior: contain; }
 #detail > .empty { flex: 1 1 auto; }
@@ -574,8 +588,11 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
 /* Tab Dự án: dự án | repo của dự án đang chọn — hai cột cạnh nhau. Tab Cấu hình: biến .env. */
 .view[data-view="projects"].on { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; max-width: none;
   grid-template-rows: minmax(0, 1fr); }
-.view[data-view="config"].on { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; max-width: 1100px;
-  grid-template-rows: auto minmax(0, 1fr); margin: 0 auto; width: 100%; }
+/* Cấu hình: Google Docs · Biến .env xếp dọc, cả tab cuộn; khung .env cao cố định, cuộn bên trong. */
+.view[data-view="config"].on { display: flex; flex-direction: column; gap: 20px; max-width: 1100px;
+  margin: 0 auto; width: 100%; overflow-y: auto; overscroll-behavior: contain; }
+.view[data-view="config"].on > section { margin-bottom: 0; flex: 0 0 auto; }
+.view[data-view="config"].on > #cfgEnvBox { height: max(520px, 75vh); }
 /* Google Docs (gdocs.py): tài khoản Google để tải tài liệu có link trong ticket */
 #gdocsBox { margin-bottom: 0; }
 #gdocsBox h2 .p-name::before { content: "📄 "; }
@@ -663,8 +680,7 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
   <h1>Autofix</h1>
   <nav class="views" id="views" aria-label="Trang">
     <button data-view="todo">Cần xử lý <span class="vbadge" id="todoN"></span></button>
-    <button data-view="autofix">Autofix <span class="vbadge live" id="liveN"></span></button>
-    <button data-view="ticket">Ticket</button>
+    <button data-view="ticket">Ticket <span class="vbadge live" id="liveN"></span></button>
     <button data-view="stats">Thống kê</button>
     <button data-view="telegram">Telegram <span class="vbadge" id="tgN"></span></button>
     <button data-view="system">Hệ thống <span class="vbadge crit" id="sysN"></span></button>
@@ -694,35 +710,6 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
       <div id="todo"><div class="empty">Đang tải…</div></div>
     </section>
   </div>
-  <div class="view split" data-view="autofix">
-    <div class="leftcol">
-    <section id="pendingBox" hidden>
-      <h2>Chờ Claude xem lại <span class="right" id="pendingCount"></span></h2>
-      <div class="hint" id="pendingReady"></div>
-      <div id="pending"></div>
-    </section>
-    <section id="actBox">
-      <h2>Hoạt động <span class="right" id="actCount"></span></h2>
-      <div class="filters" id="filters"></div>
-      <div class="acts" id="acts"></div>
-    </section>
-    </div>
-    <div class="rightcol">
-    <section id="detail"><div class="empty">Chọn một mục để xem chi tiết</div></section>
-    </div>
-  </div>
-  <div class="view" data-view="stats">
-    <section id="statsBox">
-      <h2>Thống kê task hoàn thành / bị reopen <span class="sum" id="stSum"></span></h2>
-      <div class="op-bar">
-        <div class="seg" id="stDays"><button data-v="7">7 ngày</button><button data-v="30" class="on">30 ngày</button><button data-v="90">90 ngày</button></div>
-        <div class="seg" id="stScope"><button data-v="mine" class="on" title="Ticket tôi chuyển hoàn thành, hoặc Dev / người được giao là tôi">Của tôi</button><button data-v="all">Cả dự án</button></div>
-        <select id="stProj" title="Dự án"></select>
-        <button id="stRefresh" title="Tải lại từ OpenProject (số liệu cache 10 phút)">↻</button>
-      </div>
-      <div id="stBody"><div class="empty">Đang tải…</div></div>
-    </section>
-  </div>
   <div class="view" data-view="ticket">
     <section id="reviewBox">
       <h2>Chờ QA trên server <span class="right" id="reviewCount"></span></h2>
@@ -741,6 +728,38 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
       </div>
       <div class="op-list" id="opList"><div class="empty">Đang tải…</div></div>
       <div class="op-foot" id="opFoot"></div>
+    </section>
+    <!-- Danh sách hoạt động / chờ xem lại của autofix: không hiển thị (trạng thái gắn vào từng dòng ticket),
+         giữ trong DOM để các hàm render dùng chung vẫn chạy. -->
+    <div hidden>
+    <section id="pendingBox" hidden>
+      <h2>Chờ Claude xem lại <span class="right" id="pendingCount"></span></h2>
+      <div class="hint" id="pendingReady"></div>
+      <div id="pending"></div>
+    </section>
+    <section id="actBox">
+      <h2>Hoạt động <span class="right" id="actCount"></span></h2>
+      <div class="filters" id="filters"></div>
+      <div class="acts" id="acts"></div>
+    </section>
+    </div>
+  </div>
+<div class="modal" id="runModal" hidden role="dialog" aria-modal="true" aria-label="Chi tiết lượt autofix">
+  <div class="modal-box" id="runBox">
+    <div class="rc-bar"><span class="muted" id="runModalSum"></span><button class="link ico" id="backList" title="Đóng (Esc)" aria-label="Đóng">✕</button></div>
+    <section id="detail"><div class="empty">Chọn một mục để xem chi tiết</div></section>
+  </div>
+</div>
+  <div class="view" data-view="stats">
+    <section id="statsBox">
+      <h2>Thống kê task hoàn thành / bị reopen <span class="sum" id="stSum"></span></h2>
+      <div class="op-bar">
+        <div class="seg" id="stDays"><button data-v="7">7 ngày</button><button data-v="30" class="on">30 ngày</button><button data-v="90">90 ngày</button></div>
+        <div class="seg" id="stScope"><button data-v="mine" class="on" title="Ticket tôi chuyển hoàn thành, hoặc Dev / người được giao là tôi">Của tôi</button><button data-v="all">Cả dự án</button></div>
+        <select id="stProj" title="Dự án"></select>
+        <button id="stRefresh" title="Tải lại từ OpenProject (số liệu cache 10 phút)">↻</button>
+      </div>
+      <div id="stBody"><div class="empty">Đang tải…</div></div>
     </section>
   </div>
   <div class="view" data-view="telegram">
@@ -1254,7 +1273,7 @@ function activities() {
   S.runs.forEach((r) => {
     const [label, cls] = STATE_LABEL[r.state] || [r.state, ""];
     const live = ["queued", "preparing", "running", "shipping"].includes(r.state);
-    out.push({kind: "run", key: r.display_id, id: r.display_id, badge: label, cls, live,
+    out.push({kind: "run", key: r.display_id, id: r.display_id, badge: live && r.event === "ASSIST" ? "🤝 Đang hỗ trợ" : label, cls, live,
       at: ts(r.updated_at || r.started_at), when: live ? ago(r.started_at) : when(ts(r.updated_at || r.started_at)),
       sub: r.verdict || r.event || "", extra: r.profile || ""});
   });
@@ -1345,7 +1364,7 @@ function renderChips() {
     const st = jobState(j);
     return `<button class="chip ${st.ok ? "" : "bad"}" data-job="${j.key}" title="${esc(j.desc)} — bấm xem log"><span><i class="dot ${st.running ? "busy" : st.ok ? "on" : "off"}"></i><b>${esc(j.name)}</b></span><small>${esc(st.note)}</small></button>`;
   }).join("");
-  document.querySelectorAll("[data-job]").forEach((el) => el.onclick = () => { selectOther("job", el.dataset.job); showView("autofix"); });
+  document.querySelectorAll("[data-job]").forEach((el) => el.onclick = () => { selectOther("job", el.dataset.job); showView("ticket"); });
   const bad = jobs.filter((j) => !jobState(j).ok), busy = jobs.filter((j) => jobState(j).running);
   const tgw = (TG.data && TG.data.watcher) || {};
   const tgBad = TG.data && !(tgw.at && Date.now() - new Date(tgw.at).getTime() < 90000 && !tgw.error);
@@ -1358,7 +1377,7 @@ function renderChips() {
   $("svcSum").textContent = n ? `${n} dịch vụ cần xem` : "tất cả đang chạy bình thường";
 }
 function selectOther(kind, key) {
-  selKind = kind; selKey = key; sel = null; otherText = ""; otherKey = "";
+  selKind = kind; selKey = key; sel = null; otherText = ""; otherKey = ""; showRight("detail");
   renderActs(); renderChips(); renderOther(true);
 }
 async function renderOther(reload) {
@@ -1720,7 +1739,13 @@ async function loadTab(reset) {
   }
   paintLog();
 }
-function select(id) { sel = id; selKind = "run"; selKey = id; tab = null; renderActs(); renderChips(); renderDetail(); loadTab(true); }
+function showRight(mode) {
+  const was = !$("runModal").hidden;
+  $("runModal").hidden = mode !== "detail";
+  document.documentElement.classList.toggle("modal-open", mode === "detail" || !$("wpModal").hidden);
+  if (mode === "list" && was && typeof markRunBtns === "function") markRunBtns(true);
+}
+function select(id) { sel = id; selKind = "run"; selKey = id; tab = null; showRight("detail"); renderActs(); renderChips(); renderDetail(); loadTab(true); }
 
 
 let parDirty = false;
@@ -1743,6 +1768,97 @@ function renderAgents() {
     <div class="p-actions"><button id="probeGemini" ${g.busy ? "disabled" : ""}>Cập nhật hạn mức</button></div>`;
   $("probeGemini").onclick = () => { post({action: "probe_gemini"}); setTimeout(refresh, 6000); };
 }
+// Dấu "🤝 Claude hỗ trợ" cạnh mã ticket ở Cần xử lý, Chờ QA, OpenProject (cột Hoạt động: badge "🤝 Đang hỗ trợ") khi đang có
+// lượt Claude hỗ trợ chạy. Gắn sau mỗi lần vẽ lại danh sách và mỗi lần tải trạng thái.
+function markAssist() {
+  const on = new Map(((S && S.runs) || []).filter((r) => r.event === "ASSIST" && ["queued", "preparing", "running", "shipping"].includes(r.state))
+    .map((r) => [r.display_id, r]));
+  document.querySelectorAll("#todo .id, #reviewList .id").forEach((el) => {
+    const id = (el.textContent.match(/[A-Z][A-Z0-9]*-\d+/) || [])[0], r = id && on.get(id);
+    // Dòng OpenProject là lưới cố định: dấu nằm đầu dòng nhãn (trạng thái · loại…); nơi khác: ngay sau mã ticket.
+    const tags = el.closest(".op-row") && el.closest(".op-row").querySelector(".tags");
+    let mk = tags ? tags.querySelector(":scope > .assist-mark")
+      : el.nextElementSibling && el.nextElementSibling.classList.contains("assist-mark") ? el.nextElementSibling : null;
+    if (!r) { if (mk) mk.remove(); return; }
+    if (!mk) {
+      mk = document.createElement("span");
+      mk.className = "badge accent assist-mark";
+      mk.textContent = "🤝 Claude hỗ trợ";
+      if (tags) tags.prepend(mk); else el.insertAdjacentElement("afterend", mk);
+    }
+    mk.setAttribute("aria-label", "Claude đang hỗ trợ");
+    mk.title = (r.verdict || "Claude đang hỗ trợ") + (r.started_at ? " · từ " + r.started_at.slice(11, 16) : "");
+  });
+}
+const RUN_STATE_VI = {queued: "đang xếp hàng (chưa có agent trống)", preparing: "đang chuẩn bị", running: "đang chạy", shipping: "đang kiểm tra / push"};
+// Nút ▶ Chạy / ■ Huỷ ở từng dòng ticket OpenProject. Ticket đang chạy hoặc đang xếp hàng (hết suất agent): khoá nút
+// Chạy, hiện nút Huỷ. Lượt chạy từ đây là MANUAL nên không bị chặn bởi ngưỡng mã ticket nhỏ (min_ticket_number).
+const LIVE_STATES = ["queued", "preparing", "running", "shipping"];
+function markRunBtns(force) {
+  // Lượt mới nhất của mỗi ticket (S.runs đã sắp theo thời gian, lượt đang chạy trước).
+  const latest = new Map();
+  for (const r of (S && S.runs) || []) if (!latest.has(r.display_id)) latest.set(r.display_id, r);
+  document.querySelectorAll("#opList .op-run").forEach((el) => {
+    const id = el.dataset.opRun, r = latest.get(id), live = r && LIVE_STATES.includes(r.state);
+    const key = r ? r.state + ":" + (r.event || "") + ":" + (r.verdict || "") : "idle";
+    if (!force && el.dataset.key === key) return;
+    el.dataset.key = key;
+    const what = r && r.event === "ASSIST" ? "Claude hỗ trợ" : "autofix";
+    const btns = live
+      ? `<button class="link ico" disabled title="${esc(id)} ${esc(RUN_STATE_VI[r.state] || r.state)} (${what})">${r.state === "queued" ? "⏳" : "▶"}</button>
+         <button class="link ico act-cancel" data-op-cancel="${esc(id)}" title="Huỷ lượt ${what} ${esc(RUN_STATE_VI[r.state] || r.state)}" aria-label="Huỷ ${esc(id)}">■</button>`
+      : `<button class="link ico" data-op-start="${esc(id)}" data-wpid="${esc(el.dataset.wpid)}" title="Chạy autofix cho ${esc(id)} (lượt thủ công, không áp ngưỡng mã ticket)">▶</button>`;
+    el.innerHTML = (r ? `<button class="link ico" data-op-detail="${esc(id)}" title="Báo cáo / log / thao tác của lượt ${esc(r.run_name || "")}" aria-label="Chi tiết lượt chạy ${esc(id)}">📋</button>` : "") + btns;
+    // Huy hiệu trạng thái + kết luận ngắn ở hàng nhãn (sau trạng thái OpenProject).
+    const tags = el.closest(".op-row").querySelector(".tags");
+    let b = tags.querySelector(":scope > .run-badge"), n = tags.querySelector(":scope > .run-note");
+    if (!r) { if (b) b.remove(); if (n) n.remove(); return; }
+    const [label, cls] = STATE_LABEL[r.state] || [r.state, ""];
+    if (!b) { b = document.createElement("span"); b.className = "badge run-badge"; b.dataset.opDetail = id; tags.insertBefore(b, tags.children[1] || null); }
+    b.className = "badge run-badge " + cls;
+    b.textContent = (r.event === "ASSIST" ? "🤝 " : "🤖 ") + label;
+    b.title = "Autofix " + (RUN_STATE_VI[r.state] || label.toLowerCase()) + (r.started_at ? " · " + r.started_at.slice(5, 16).replace("T", " ") : "") + (r.profile ? " · " + r.profile : "") + " — bấm xem chi tiết";
+    const note = (r.verdict || "").replace(/\s+/g, " ").trim();
+    if (note) {
+      if (!n) { n = document.createElement("span"); n.className = "run-note"; n.dataset.opDetail = id; b.insertAdjacentElement("afterend", n); }
+      n.textContent = note.length > 90 ? note.slice(0, 88) + "…" : note; n.title = note;
+    } else if (n) n.remove();
+  });
+  markQaBadges();
+}
+// Huy hiệu QA trên server test cho từng dòng ticket: 🧪 đang QA (Gemini đang test trên 86), kết luận QA gần nhất
+// (ĐẠT / KHÔNG ĐẠT / …), hoặc vị trí trong hàng chờ QA (Chờ QA / Chưa deploy / Chưa merge). Bấm → báo cáo QA.
+function markQaBadges() {
+  const qa = new Map();
+  for (const r of (S && S.qa_runs) || []) if (!qa.has(r.display_id)) qa.set(r.display_id, r);
+  const rq = new Map((((S && S.review_queue) || {}).items || []).map((x) => [x.display_id, x]));
+  document.querySelectorAll("#opList .op-run").forEach((el) => {
+    const id = el.dataset.opRun, r = qa.get(id), q = rq.get(id);
+    const tags = el.closest(".op-row").querySelector(".tags");
+    let b = tags.querySelector(":scope > .qa-badge");
+    let text = "", cls = "", title = "", key = "";
+    if (r && (r.state === "running" || (q && q.state === "done") || !q)) {
+      const short = r.verdict.split(" → ")[0].replace(/\s*\(.*\)\s*$/, "");
+      text = r.state === "running" ? "🧪 Đang QA server" : r.state === "stale" ? "🧪 QA bị ngắt" : "🧪 QA " + short;
+      cls = qaCls(r); key = r.name;
+      title = (r.state === "running" ? "Gemini đang test trên server 86" : "QA server: " + r.verdict)
+        + (r.rounds ? " · " + r.rounds + " vòng" : "") + " · " + new Date(r.at * 1000).toLocaleString("vi-VN", {hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit"})
+        + " — bấm xem báo cáo QA";
+    } else if (q) {
+      const [label, c] = RQ[q.state] || [q.state, ""];
+      text = "🧪 " + label; cls = c; title = "Hàng chờ QA trên server: " + label + (q.note ? " · " + q.note : "");
+    }
+    if (!text) { if (b) b.remove(); return; }
+    if (!b) {
+      b = document.createElement("span"); b.className = "badge qa-badge";
+      const after = tags.querySelector(":scope > .run-note") || tags.querySelector(":scope > .run-badge") || tags.children[0];
+      after ? after.insertAdjacentElement("afterend", b) : tags.prepend(b);
+    }
+    b.className = "badge qa-badge " + cls + (key ? " run-badge" : "");
+    b.textContent = text; b.title = title;
+    if (key) b.dataset.opQa = key; else delete b.dataset.opQa;
+  });
+}
 async function refresh() {
   try {
     S = await (await fetch("/api/state")).json();
@@ -1750,6 +1866,7 @@ async function refresh() {
     $("updated").textContent = "Cập nhật " + new Date().toLocaleTimeString("vi-VN");
     renderChips(); renderAgents(); renderProfiles(); renderSummaries(); renderPending(); renderReview(); renderActs(); renderInbox();
     renderTodo();
+    markAssist(); markRunBtns();
     // Tiến trình nền (autofix push / chuyển trạng thái, QA trên server, gỡ xung đột) vừa xong một lượt → dữ liệu
     // OpenProject đã đổi: tải lại (lần đầu chỉ ghi nhận).
     const sig = (S.runs || []).map((r) => r.display_id + ":" + r.state + ":" + r.updated_at).join("|") + "#" +
@@ -1759,7 +1876,8 @@ async function refresh() {
     const live = (S.runs || []).filter((r) => ["queued", "preparing", "running", "shipping"].includes(r.state)).length;
     $("liveN").textContent = live || "";
     if (selKind !== "run") { renderOther(true); return; }
-    if (!sel) { const f = activities()[0]; if (f) { if (f.kind === "run") select(f.key); else selectOther(f.kind, f.key); } return; }
+    // Tự chọn mục đầu để khung chi tiết sẵn sàng, nhưng không tự rời danh sách ticket (chỉ người dùng bấm mới chuyển).
+    if (!sel) { const f = activities()[0]; if (f) { const keep = !$("runModal").hidden; if (f.kind === "run") select(f.key); else selectOther(f.kind, f.key); if (!keep) showRight("list"); } return; }
     const r = current(), head = document.querySelector(".detail-head .badge");
     // Chỉ dựng lại khung chi tiết khi trạng thái đổi, để không mất vị trí cuộn / ô đang chọn.
     if (r && (!head || renderDetail.key !== r.state + r.verdict + (r.files || []).join())) {
@@ -2017,10 +2135,11 @@ async function loadOP(refresh) {
       <a class="op-row" href="#wp-${esc(w.id)}" data-wp="${esc(w.id)}" title="Xem chi tiết ${esc(w.display_id)}">
         <span class="id">${esc(w.display_id)} <span class="ext" data-ext="${esc(w.url)}" title="Mở trên OpenProject (cần vào được op.cytech.ai)">↗</span></span>
         <span class="subj">${esc(w.subject)}</span>
-        <span class="when">${esc((w.updated || "").slice(5, 16).replace("T", " "))}</span>
+        <span class="when">${esc((w.updated || "").slice(5, 16).replace("T", " "))}<span class="op-run" data-op-run="${esc(w.display_id)}" data-wpid="${esc(w.id)}"></span></span>
         <span class="tags"><span class="badge ${opBadge(w.status)}">${esc(w.status)}</span>
           ${OP.project === "all" && w.project ? `<span>${esc(w.project)}</span>·` : ""}<span>${esc(w.type)}</span>·<span>${esc(w.priority)}</span>${w.assignee ? `·<span>${esc(w.assignee)}</span>` : ""}</span>
       </a>`).join("") : '<div class="empty">Không có work package nào</div>';
+    markAssist(); markRunBtns();
     const pages = Math.max(1, Math.ceil(d.total / d.page_size));
     $("opFoot").innerHTML = pages > 1 ? `<button class="link" id="opPrev" ${OP.page <= 1 ? "disabled" : ""}>‹ Trước</button>
       Trang ${OP.page}/${pages}<button class="link" id="opNext" ${OP.page >= pages ? "disabled" : ""}>Sau ›</button>` : "";
@@ -2066,7 +2185,7 @@ const wpFmt = (t) => t ? new Date(t).toLocaleString("vi-VN", {hour12: false, day
 const wpSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
 let wpReq = 0, WP_CUR = null;
 // Thao tác ghi lên OpenProject (từ trang này, hoặc tiến trình nền vừa cập nhật) → tải lại mọi chỗ hiện dữ liệu OP.
-const OP_WRITE = new Set(["task_create", "rerun", "assist", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
+const OP_WRITE = new Set(["task_create", "rerun", "run_wp", "cancel_run", "assist", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
   "tg_approve", "tg_link", "tg_retry", "tg_ask_reopen", "tg_ask_resolve", "tg_triage"]);
 let opChangedT = null;
 function opChanged(fromBackground, skipWp) {
@@ -2157,7 +2276,7 @@ async function openWP(id, opts) {
   $("wpAssigneeBtn").onclick = () => wpAssigneePicker(w);
   $("wpSplit").onclick = () => openSplit(w.display_id, w.subject);
   if ($("wpAssist")) $("wpAssist").onclick = () => runAssist(w.display_id, null);
-  if ($("wpRunLive")) $("wpRunLive").onclick = () => { closeWP(); select(w.display_id); tab = "Thao tác"; showView("autofix"); renderDetail(); loadTab(true); };
+  if ($("wpRunLive")) $("wpRunLive").onclick = () => { closeWP(); select(w.display_id); tab = "Thao tác"; showView("ticket"); renderDetail(); loadTab(true); };
   if (opts && "focusAct" in opts) {
     const el = (opts.focusAct != null && $("wpa-" + opts.focusAct)) || [...document.querySelectorAll("#wpChat .wp-msg.mine")].pop();
     if (el) { el.scrollIntoView({block: "center"}); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1800); }
@@ -2385,11 +2504,31 @@ $("imgZoom").onclick = () => { $("imgZoom").hidden = true; };
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("splitModal").hidden) { closeSplit(); return; }
+  if (!$("runModal").hidden) { showRight("list"); return; }
   if (!$("imgZoom").hidden) $("imgZoom").hidden = true; else if (!$("wpModal").hidden) closeWP();
 });
 document.addEventListener("click", (e) => {
   const ext = e.target.closest("[data-ext]");
   if (ext) { e.preventDefault(); e.stopPropagation(); window.open(ext.dataset.ext, "_blank", "noopener"); return; }
+  const qb = e.target.closest("[data-op-qa]");
+  if (qb) { e.preventDefault(); e.stopPropagation(); showView("ticket"); selectOther("qa", qb.dataset.opQa); return; }
+  const dt = e.target.closest("[data-op-detail]");
+  if (dt) { e.preventDefault(); e.stopPropagation(); showView("ticket"); select(dt.dataset.opDetail); return; }
+  const st = e.target.closest("[data-op-start]");
+  if (st) {
+    e.preventDefault(); e.stopPropagation();
+    if (st.disabled) return;
+    const prof = ((S && S.profiles) || []).find((p) => p.active) || {};
+    if (confirm(`Chạy autofix cho ${st.dataset.opStart}${prof.name ? " bằng " + prof.name : ""}?`))
+      post({action: "run_wp", display_id: st.dataset.opStart, wp_id: st.dataset.wpid, profile: prof.name}, st);
+    return;
+  }
+  const cn = e.target.closest("[data-op-cancel]");
+  if (cn) {
+    e.preventDefault(); e.stopPropagation();
+    if (confirm(`Huỷ lượt đang chạy của ${cn.dataset.opCancel}?`)) post({action: "cancel_run", display_id: cn.dataset.opCancel}, cn);
+    return;
+  }
   const a = e.target.closest('a[href^="#wp-"]');
   if (a) { e.preventDefault(); openWP(a.getAttribute("href").slice(4)); }
 });
@@ -2889,8 +3028,9 @@ $("tgBox").querySelector("h2").addEventListener("click", () => setTimeout(tgLoad
 tgLoad(); setInterval(tgLoad, 15000);
 
 // ---- Trang (nav trên header / đáy màn hình trên điện thoại) ----
-const VIEWS = ["todo", "autofix", "ticket", "stats", "telegram", "system", "projects", "config"];
+const VIEWS = ["todo", "ticket", "stats", "telegram", "system", "projects", "config"];
 function showView(v) {
+  if (v === "autofix") v = "ticket";  // tab Autofix đã gộp vào Ticket (localStorage cũ)
   if (!VIEWS.includes(v)) v = "todo";
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("on", el.dataset.view === v));
   document.querySelectorAll("nav.views [data-view]").forEach((b) => b.classList.toggle("on", b.dataset.view === v));
@@ -2904,6 +3044,8 @@ function showView(v) {
   document.querySelectorAll(".view.on .scroll-reset").forEach((el) => { el.scrollTop = 0; });
 }
 document.querySelectorAll("nav.views [data-view]").forEach((b) => b.onclick = () => showView(b.dataset.view));
+$("backList").onclick = () => showRight("list");
+$("runModal").addEventListener("click", (e) => { if (e.target === $("runModal")) showRight("list"); });
 $("health").onclick = () => showView("system");
 document.addEventListener("click", (e) => { const m = $("menu"); if (m.open && !e.target.closest("#menu")) m.open = false; });
 
@@ -3103,7 +3245,7 @@ function renderTodo() {
   $$("[data-treopen]", (b) => confirm("Chuyển ticket sang Reopened để autofix làm theo trả lời của tester?") && post({action: "tg_ask_reopen", id: +b.dataset.treopen}).then(loadTodoExtra));
   $$("[data-tscan]", () => post({action: "tg_ask_scan"}).then(() => setTimeout(loadTodoExtra, 25000)));
   $$("[data-ttg]", (b) => tgOpen(+b.dataset.ttg));
-  $$("[data-trun]", (b) => { select(b.dataset.trun); showView("autofix"); });
+  $$("[data-trun]", (b) => { select(b.dataset.trun); showView("ticket"); });
   $$("[data-trerun]", (b) => confirm(`Chạy lại autofix cho ${b.dataset.trerun}?`) && post({action: "rerun", display_id: b.dataset.trerun, profile: (S.profiles.find((p) => p.active) || {}).name}));
   $$("[data-trerunall]", async (b) => { const ids = b.dataset.trerunall.split(",");
     if (!confirm(`Chạy lại autofix cho ${ids.length} ticket?\n${ids.join(", ")}`)) return;
@@ -3112,8 +3254,8 @@ function renderTodo() {
     toast(`Đã xếp hàng ${ids.length} lượt chạy lại`); });
   $$("[data-tproj]", async (b) => { showView("projects"); await loadConfig(); CFG.proj = b.dataset.tproj; await loadCfgRepos();
     $("cfgRepoBox").scrollIntoView({behavior: "smooth"}); });
-  $$("[data-tjob]", (b) => { selectOther("job", b.dataset.tjob); showView("autofix"); });
-  $$("[data-tconf]", (b) => { selectOther("conf", b.dataset.tconf); showView("autofix"); });
+  $$("[data-tjob]", (b) => { selectOther("job", b.dataset.tjob); showView("ticket"); });
+  $$("[data-tconf]", (b) => { selectOther("conf", b.dataset.tconf); showView("ticket"); });
   if ($("todoUnhide")) $("todoUnhide").onclick = () => { try { localStorage.removeItem("todoHidden"); } catch (e) {} renderTodo(); };
 }
 
@@ -3515,6 +3657,11 @@ function gdRender() {
 }
 // Quay lại tab sau khi đồng ý ở Google → cập nhật trạng thái.
 window.addEventListener("focus", () => { if (document.querySelector('.view.on[data-view="config"]')) gdLoad(); });
+// Vẽ lại một danh sách (đổi bộ lọc, chuyển tab…) cũng gắn lại dấu Claude hỗ trợ.
+["renderActs", "renderReview", "renderTodo"].forEach((n) => {
+  const f = window[n];
+  window[n] = function () { const out = f.apply(this, arguments); markAssist(); return out; };
+});
 (function () { let v = "todo"; try { v = localStorage.getItem("view") || "todo"; } catch (e) {} showView(v); })();
 loadTodoExtra(); setInterval(loadTodoExtra, 15000);
 </script>

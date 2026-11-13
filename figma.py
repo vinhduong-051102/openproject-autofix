@@ -84,7 +84,9 @@ def _get(path, tok):
         if ex.code in (401, 403):
             raise RuntimeError("Figma từ chối (%s): token sai / hết hạn hoặc không có quyền xem file này" % ex.code)
         if ex.code == 404:
-            raise RuntimeError("Figma: không thấy file / node (404)")
+            # Figma trả 404 cả khi file tồn tại nhưng tài khoản của token chưa được chia sẻ.
+            raise RuntimeError("Figma: không thấy file / node (404) — thường do file chưa chia sẻ cho tài khoản Figma của "
+                               "FIGMA_TOKEN (nhờ người gửi mời email đó vào file, quyền xem là đủ), hoặc node-id sai")
         if ex.code == 429:
             # Retry-After có thể tới vài ngày (ghế View/Collab: x-figma-rate-limit-type=low) → nhớ để không gọi lại.
             try:

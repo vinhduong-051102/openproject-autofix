@@ -2056,10 +2056,11 @@ def be_tokens(diff_text):
                "repositories", "controller", "controllers", "config", "configuration", "util", "utils", "common",
                "model", "models", "mapper", "mappers", "java", "main", "src", "com", "soar", "cyai", "exception",
                "exceptions", "job", "jobs", "enums", "enum", "constant", "constants", "security", "advice", "api",
-               "v1", "v2", "domain", "core", "base", "helper", "helpers", "scheduler", "client", "resources"}
-    suffix = re.compile(r"(ServiceImpl|Service|ControllerImpl|Controller|Request|Response|Repository|Repo|Entity|"
-                        r"Dto|DTO|Mapper|Impl|Processor|Matcher|Job|Config|Helper|Utils?|Handler|Listener|Converter|"
-                        r"Validator|Spec|Specification)+$")
+               "v1", "v2", "domain", "core", "base", "helper", "helpers", "scheduler", "client", "resources",
+               "facade", "facades", "manager", "managers", "component", "components"}
+    suffix = re.compile(r"(FacadeServiceImpl|FacadeService|Facade|ServiceImpl|Service|ControllerImpl|Controller|"
+                        r"Request|Response|Repository|Repo|Entity|Dto|DTO|Mapper|Impl|Processor|Matcher|Job|Config|"
+                        r"Helper|Utils?|Handler|Listener|Converter|Validator|Spec|Specification|Manager|Component)+$")
     touched, tokens = False, set()
     section = None
     for line in diff_text.splitlines():
@@ -2069,12 +2070,19 @@ def be_tokens(diff_text):
             continue
         if section != "BE":
             continue
+        # Đường dẫn API thật trong code bị sửa (@RequestMapping("/api/v1/histories"), @GetMapping("{id}/histories")…):
+        # bằng chứng chắc hơn tên class, vì tên class (TenancyFacadeServiceImpl) không bao giờ nằm trong URL.
+        for mp in re.finditer(r"@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*|path\s*=\s*)?"
+                              r"[\"']([^\"']+)[\"']", line):
+            tokens.add("/" + mp.group(1).strip("/").lower())
         m = re.match(r"^diff --git a/(\S+) b/", line)
         if not m:
             continue
-        touched = True
         path = m.group(1)
-        if not path.endswith(".java") or "/test/" in path:
+        if "/test/" in path or "/src/test/" in path:
+            continue  # chỉ sửa unit test → không đổi hành vi BE, không đòi bằng chứng BE chạy
+        touched = True
+        if not path.endswith(".java"):
             continue
         parts = path.split("/")
         name = suffix.sub("", parts[-1][:-5])
@@ -2087,9 +2095,70 @@ def be_tokens(diff_text):
     return touched, tokens
 
 
+def _stem(w):
+    """Gốc từ thô để so số ít / số nhiều: tenancies→tenanc(y), histories→histor(y), rules→rule, cases→case."""
+    w = w.lower()
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith("ses") or w.endswith("xes") or w.endswith("ches") or w.endswith("shes"):
+        return w[:-2]
+    if w.endswith("s") and not w.endswith("ss") and len(w) > 3:
+        return w[:-1]
+    return w
+
+
 def _related(target, tokens):
-    t = target.split("?")[0].lower().replace("_", "-")
-    return not tokens or any(k in t or k.replace("-", "") in t.replace("-", "") for k in tokens)
+    """URL request có liên quan tới phần BE bị sửa không. tokens gồm: đường dẫn API ("/api/v1/histories",
+    "{id}/histories" — khớp theo đoạn, {x} là ký tự đại diện) và từ khoá tên class / package ("tenancy",
+    "common-history") — khớp theo gốc từ với từng đoạn URL, nên "tenancy" khớp /tenancies/, "history" khớp /histories."""
+    if not tokens:
+        return True
+    path = target.split("?")[0].lower().replace("_", "-")
+    segs = [x for x in path.split("/") if x]
+    stems = [_stem(x) for x in segs]
+    for k in tokens:
+        if k.startswith("/"):
+            want = [x for x in k.split("/") if x]
+            for i in range(len(segs) - len(want) + 1):
+                if all(w.startswith("{") or w == segs[i + j] or _stem(w) == stems[i + j] for j, w in enumerate(want)):
+                    return True
+            continue
+        words = [w for w in k.split("-") if len(w) >= 4]
+        if not words:
+            continue
+        if any(all(_stem(w) == st or (len(w) >= 5 and _stem(w) in st) for w in words) for st in stems):
+            return True  # cả cụm nằm trong một đoạn URL (correlation-rule ↔ /correlation-rules)
+        if all(any(_stem(w) == st or (len(w) >= 5 and _stem(w) in st) for st in stems) for w in words[-1:]):
+            return True  # từ cuối cùng (danh từ chính: history của common-history) khớp một đoạn URL
+        # Tên class ghép nhiều từ nhưng URL viết liền: HealthCheckAlert → health-check-alert ↔ /healthchecks/
+        for n in range(len(words), 0, -1):
+            joined = "".join(words[:n])
+            if len(joined) >= 8 and any(_stem(joined) == st or joined in st for st in stems):
+                return True
+    return False
+
+
+def ticket_api_paths(qa_dir):
+    """Đường dẫn /api/... tester ghi trong ticket (mô tả / comment) — ticket nêu endpoint nào thì request 2xx trên
+    endpoint đó là bằng chứng BE chạy, kể cả khi tên class trong commit không gợi ra URL."""
+    path = os.path.join(qa_dir, "ticket", "ticket.md")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return set()
+    out = set()
+    skip = {"auth", "login", "logout", "otp", "validate-otp", "token", "refresh", "me", "health", "version"}
+    for m in re.finditer(r"(/api/v\d+/[A-Za-z0-9_{}./-]+)", text):
+        p = re.sub(r"\{[^}]*\}", "{id}", m.group(1).rstrip("./-").lower())
+        # Ticket ghi id cụ thể (báo cáo 153, tệp 9ea1a536-…) nhưng QA tự tạo dữ liệu mới → so theo mẫu đường dẫn.
+        segs = ["{id}" if re.fullmatch(r"\d+|[0-9a-f]{8}(-[0-9a-f]*)*|[0-9a-f]{16,}", x) else x for x in p.split("/")]
+        p = "/".join(segs)
+        # Bỏ: bước đăng nhập / OTP (ticket nào cũng ghi, 200 ở đó không chứng minh gì), link OpenProject (/api/v3/...).
+        if p.count("/") < 3 or p.startswith("/api/v3/") or skip & set(segs):
+            continue
+        out.add(p)
+    return out
 
 
 def be_log_errors(dcfg, start, end, limit=20, width=300):
@@ -2218,6 +2287,7 @@ def verify_pass(text, qa_dir, dcfg=None, start=None, end=None, read_log=None):
         with open(diff_path, encoding="utf-8", errors="replace") as f:
             diff_text = f.read()
     has_be, tokens = be_tokens(diff_text)
+    tokens |= ticket_api_paths(qa_dir)
     if has_be and not verdict:
         ok = [r for r in reqs if r["method"] in API_METHODS and r["status"] and 200 <= r["status"] < 300
               and "/api/" in r["target"] and _related(r["target"], tokens)]

@@ -3192,6 +3192,27 @@ def _safe_name(name):
     return name[:120]
 
 
+def refresh_qa_copy(root, display_id, run_dir):
+    """Chép báo cáo QA server MỚI NHẤT của ticket (<root>/<MÃ>-qa-*/qa.md + gemini-rounds + deploy-check) vào run_dir
+    (qa-server.md, qa-rounds.jsonl, qa-deploy-check.md) nếu mới hơn bản đang có. Sự cố SOAR-2927: bước Claude hỗ trợ
+    phân tích bản QA cũ (lúc autofix chạy) trong khi đã có lần QA mới sau khi push. Trả tên thư mục QA đã dùng hoặc ""."""
+    cands = sorted((d for d in os.listdir(root) if d.startswith(display_id + "-qa-")
+                    and os.path.isfile(os.path.join(root, d, "qa.md"))),
+                   key=lambda d: os.path.getmtime(os.path.join(root, d, "qa.md")))
+    if not cands:
+        return ""
+    src = os.path.join(root, cands[-1], "qa.md")
+    dst = os.path.join(run_dir, "qa-server.md")
+    if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+        return ""
+    for name, dest in (("qa.md", "qa-server.md"), ("gemini-rounds.jsonl", "qa-rounds.jsonl"),
+                       ("deploy-check.md", "qa-deploy-check.md")):
+        sp = os.path.join(root, cands[-1], name)
+        if os.path.exists(sp):
+            shutil.copy(sp, os.path.join(run_dir, dest))
+    return cands[-1]
+
+
 def gather_assist(api, acfg, wp, run_dir, report_text, note=""):
     """Tài liệu cho bước Claude hỗ trợ (công cụ có mạng, Claude thì không): mọi file đính kèm + ticket liên quan.
     Trả danh sách dòng mô tả (đưa vào prompt)."""
@@ -3325,6 +3346,15 @@ def assist_run(cfg, acfg, run_name, note="", profile=None):
             run_name = runs[-1]
     run_dir = os.path.join(root, run_name)
     m = re.match(r"^(%s)-" % envconf.TICKET_RX, run_name)
+    if m and os.path.isdir(run_dir) and not os.path.isfile(os.path.join(run_dir, "prompt.md")):
+        # Lượt "test lại" (--review) không ghi prompt.md: mượn prompt.md của lượt sửa gần nhất cùng ticket, giữ báo cáo
+        # và worktree của lượt test lại (code mới nhất).
+        base = sorted((d for d in os.listdir(root) if d.startswith(m.group(1) + "-") and d != run_name
+                       and os.path.isfile(os.path.join(root, d, "prompt.md"))),
+                      key=lambda d: os.path.getmtime(os.path.join(root, d, "prompt.md")))
+        if base:
+            shutil.copyfile(os.path.join(root, base[-1], "prompt.md"), os.path.join(run_dir, "prompt.md"))
+            log("%s: lượt %s không có prompt.md → dùng prompt của %s" % (m.group(1), run_name, base[-1]))
     if not m or not os.path.isfile(os.path.join(run_dir, "prompt.md")):
         sys.exit("không có lượt chạy %s" % run_name)
     display_id = m.group(1)
@@ -3361,6 +3391,9 @@ def assist_run(cfg, acfg, run_name, note="", profile=None):
                verdict="🤝 Claude đang hỗ trợ%s" % ((": " + note.strip()[:120]) if note and note.strip() else ""))
     try:
         fetch_ticket(api, wp_id, os.path.join(run_dir, "ticket"))  # comment mới nhất (vd hướng dẫn của dev)
+        used = refresh_qa_copy(root, display_id, run_dir)
+        if used:
+            log("%s: dùng báo cáo QA mới nhất %s cho bước hỗ trợ" % (display_id, used))
         report_text, _old = report_verdict(os.path.join(run_dir, "report.md"))
         report_text, verdict = assist_step(api, cfg, acfg, wp, run_dir, report_text, note)
     except Exception as ex:  # noqa: BLE001

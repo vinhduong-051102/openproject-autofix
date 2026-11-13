@@ -667,8 +667,20 @@ def spawn(args, tag):
     with open(log_path, "a", encoding="utf-8") as out:
         out.write("\n[%s] %s\n" % (datetime.now().isoformat(timespec="seconds"), " ".join(args)))
         out.flush()
-        subprocess.Popen([sys.executable, os.path.join(HERE, "op_autofix.py")] + args, cwd=HERE, stdout=out,
-                         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        start = out.tell()
+        proc = subprocess.Popen([sys.executable, os.path.join(HERE, "op_autofix.py")] + args, cwd=HERE, stdout=out,
+                                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+    # Lỗi kiểm tra đầu vào (không có lượt chạy, ticket đang xử lý…) làm tiến trình thoát ngay: báo lên trang thay vì
+    # trả "đang chạy" rồi im lặng.
+    try:
+        code = proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        return log_path
+    if code:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            f.seek(start)
+            lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
+        raise ValueError((lines[-1] if lines else "tiến trình thoát mã %d" % code)[:300])
     return log_path
 
 
@@ -1244,6 +1256,22 @@ def action(body):
         if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):
             raise ValueError("mã ticket không hợp lệ")
         return cancel_run(root, display_id)
+    if kind == "run_wp":
+        # Nút "Chạy" ở danh sách ticket OpenProject: lượt MANUAL cho work package bất kỳ (kể cả mã nhỏ hơn
+        # min_ticket_number — ngưỡng đó chỉ áp cho lượt tự động). Đang chạy / đang xếp hàng thì từ chối.
+        display_id = body.get("display_id") or ""
+        wp_id = str(body.get("wp_id") or "")
+        if not re.match(r"^%s$" % envconf.TICKET_RX, display_id) or not wp_id.isdigit():
+            raise ValueError("mã ticket / id work package không hợp lệ")
+        s = find_run(root, display_id) or {}
+        if s.get("state") in ACTIVE_STATES and af.status_alive(s):
+            raise ValueError("%s đang %s" % (display_id, "xếp hàng" if s.get("state") == "queued" else "chạy"))
+        extra = ["--profile", body["profile"]] if body.get("profile") in names else []
+        prof, why = af.choose_profile(root, acfg, body.get("profile"))
+        if prof is None:
+            raise ValueError("không có gói dùng được: " + why + ("" if force else " — tick \"Bỏ qua ngưỡng\" để chạy"))
+        spawn(["--wp", wp_id, "--event", "MANUAL"] + extra + force, display_id)
+        return "Đã xếp %s vào hàng chạy autofix%s" % (display_id, (" bằng " + body["profile"]) if extra else "")
     if kind in ("rerun", "review"):
         display_id = body.get("display_id") or ""
         if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):

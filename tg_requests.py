@@ -847,24 +847,108 @@ def extract_docs(path):
     return docs, notes
 
 
+URL_RX = re.compile(r"https?://[^\s<>\"')\]]+")
+LINK_MAX = 60 * 1024   # chữ đọc từ một link (trang web / tài liệu Google / thông số Figma)
+
+
+def _html_text(body):
+    import html as _h
+    body = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", body)
+    body = re.sub(r"(?i)<br\s*/?>|</(p|div|li|tr|h[1-6])>", "\n", body)
+    body = _h.unescape(re.sub(r"<[^>]+>", " ", body))
+    return "\n".join(ln.strip() for ln in re.sub(r"[ \t]+", " ", body).splitlines() if ln.strip())
+
+
+def _fetch_page(url):
+    """Trang web công khai (GET, 15s, ≤2MB, chỉ chữ) → (tiêu đề, nội dung) hoặc ném lỗi có lý do dễ hiểu."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (op-watch link reader)", "Accept": "text/html,text/plain,application/json,*/*;q=0.5"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        if not re.search(r"text/|json|xml|markdown", ctype):
+            raise ValueError("không phải trang chữ (%s)" % (ctype.split(";")[0] or "không rõ loại"))
+        body = r.read(2 * 1024 * 1024).decode(r.headers.get_content_charset() or "utf-8", "replace")
+    title = (re.search(r"(?is)<title[^>]*>(.*?)</title>", body) or [None, ""])[1].strip()
+    text = _html_text(body) if "html" in ctype else body
+    if re.search(r"(?i)just a moment|performing security verification|enable javascript and cookies|cf-challenge", body[:20000]):
+        raise ValueError("trang chặn trình duyệt tự động (Cloudflare / cần đăng nhập)")
+    if len(text.split()) < 15:
+        raise ValueError("trang không có nội dung chữ khi tải không đăng nhập (trang dựng bằng JavaScript hoặc cần đăng nhập)")
+    return title, text
+
+
+def link_docs(m):
+    """Đọc link trong chữ của một tin: Figma (Figma API), Google Docs/Sheets/Slides/Drive (tài khoản Google đã kết nối),
+    trang web công khai. Link không đọc được (vd artifact claude.ai: Cloudflare + đăng nhập) → ghi lý do vào notes để AI
+    hỏi lại tester gửi nội dung thay vì đoán. Trả {"docs": [{name, text, link: True}], "notes": [...]}."""
+    text = m.get("text") or ""
+    urls = list(dict.fromkeys(u.rstrip(".,;") for u in URL_RX.findall(text)))
+    docs, notes = [], []
+    if not urls:
+        return {"docs": docs, "notes": notes}
+    out_dir = os.path.join(data_dir(), "links", str(m.get("id") or "x"))
+    done = set()
+    try:
+        import figma
+        fl = figma.find_links(text)
+        if fl:
+            sec = figma.ticket_section(text, out_dir)
+            docs.append({"name": "Figma: " + ", ".join(u for _, _, u in fl)[:300], "text": sec.strip()[:LINK_MAX], "link": True})
+            done.update(u for _, _, u in fl)
+    except Exception as ex:  # noqa: BLE001
+        notes.append("không đọc được link Figma: %s" % str(ex)[:160])
+    try:
+        import gdocs
+        gl = gdocs.find_links(text)
+        if gl:
+            sec = gdocs.ticket_section(text, out_dir)
+            body = [sec.strip()]
+            for f in gdocs.text_files(out_dir):
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    body.append("#### %s\n%s" % (os.path.basename(f), fh.read(LINK_MAX)))
+            docs.append({"name": "Google: " + ", ".join(u for _, _, u in gl)[:300], "text": "\n\n".join(body)[:LINK_MAX * 2], "link": True})
+            done.update(u for _, _, u in gl)
+    except Exception as ex:  # noqa: BLE001
+        notes.append("không đọc được link Google: %s" % str(ex)[:160])
+    rest = [u for u in urls if not any(u.startswith(d.split("?")[0]) or d.startswith(u) for d in done)
+            and not re.match(r"https?://((www\.)?figma\.com|(docs|drive)\.google\.com)/", u)]  # Figma/Google: ở trên
+    for u in rest:
+        if re.match(r"https?://(www\.)?claude\.ai/", u):
+            notes.append("link %s là artifact / hội thoại claude.ai: chỉ mở được khi đăng nhập đúng tài khoản Claude của người "
+                         "tạo (tải tự động bị Cloudflare chặn) → KHÔNG đọc được nội dung; cần nhờ tester gửi nội dung "
+                         "(chép chữ, hoặc tải file .md / .html / .pdf gửi qua Telegram)" % u)
+            continue
+        try:
+            title, body = _fetch_page(u)
+            docs.append({"name": "Link: %s%s" % (u[:200], " — " + title[:120] if title else ""), "text": body[:LINK_MAX], "link": True})
+        except Exception as ex:  # noqa: BLE001
+            notes.append("không đọc được link %s: %s" % (u[:200], str(ex)[:160]))
+    return {"docs": docs, "notes": notes}
+
+
 def media_docs(m):
-    """Nội dung đọc từ tệp đính kèm của một tin (cache trong messages.media_text)."""
-    if not m.get("media_path"):
-        return {"docs": [], "notes": []}
+    """Nội dung đọc từ tệp đính kèm + link trong chữ của một tin (cache trong messages.media_text; "links": 1 = đã đọc link)."""
+    cached = None
     if m.get("media_text"):
         try:
-            return json.loads(m["media_text"])
+            cached = json.loads(m["media_text"])
         except ValueError:
-            pass
-    p = media_file(m["media_path"])
-    if not p:
-        return {"docs": [], "notes": []}
-    try:
-        docs, notes = extract_docs(p)
-    except Exception as ex:  # noqa: BLE001
-        docs, notes = [], ["không đọc được %s: %s" % (os.path.basename(p), str(ex)[:120])]
-    out = {"docs": docs, "notes": notes}
-    if m.get("id"):
+            cached = None
+    if cached is not None and (cached.get("links") or not URL_RX.search(m.get("text") or "")):
+        return cached
+    if cached is not None:
+        docs, notes = cached.get("docs") or [], cached.get("notes") or []
+    elif m.get("media_path") and media_file(m["media_path"]):
+        try:
+            docs, notes = extract_docs(media_file(m["media_path"]))
+        except Exception as ex:  # noqa: BLE001
+            docs, notes = [], ["không đọc được %s: %s" % (os.path.basename(m["media_path"]), str(ex)[:120])]
+    else:
+        docs, notes = [], []
+    ld = link_docs(m)
+    # Link lỗi (chưa chia sẻ, mạng…) → không đánh dấu "links" để lần sau đọc lại; Figma / Google tự cache bản đọc được.
+    out = {"docs": docs + ld["docs"], "notes": notes + ld["notes"], "links": 0 if ld["notes"] else 1}
+    if m.get("id") and (out["docs"] or out["notes"] or m.get("media_path")):
         db().execute("UPDATE messages SET media_text=? WHERE id=?", (json.dumps(out, ensure_ascii=False), m["id"]))
     return out
 
@@ -883,9 +967,10 @@ def docs_block(msgs, only=None, limit=40000):
     for m in msgs:
         md = media_docs(m)
         for d in md["docs"]:
-            if not _doc_match(d["name"], only):
+            if not d.get("link") and not _doc_match(d["name"], only):
                 continue
-            chunk = "### [%s] %s / %s\n%s" % (m["id"], os.path.basename(m["media_path"]), d["name"], d["text"])
+            chunk = ("### [%s] %s\n%s" % (m["id"], d["name"], d["text"]) if d.get("link") or not m.get("media_path")
+                     else "### [%s] %s / %s\n%s" % (m["id"], os.path.basename(m["media_path"]), d["name"], d["text"]))
             if used + len(chunk) > limit:
                 parts.append("… (còn file, đã cắt vì quá dài)")
                 return "\n\n".join(parts)
@@ -936,7 +1021,7 @@ def _files_for(msgs, only=None):
     if only:
         for m in msgs:
             for d in media_docs(m)["docs"]:
-                if _doc_match(d["name"], only) and len(files) < MAX_ATTACH:
+                if not d.get("link") and _doc_match(d["name"], only) and len(files) < MAX_ATTACH:
                     name = os.path.basename(d["name"])
                     if not name.lower().endswith(TEXT_EXT):
                         name += ".txt"  # xlsx / docx đã đọc thành chữ

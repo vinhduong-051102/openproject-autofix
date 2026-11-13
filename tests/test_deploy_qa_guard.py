@@ -174,3 +174,107 @@ class BeLog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Soar2935(unittest.TestCase):
+    """Sự cố SOAR-2935: QA test đúng (quantri bị 403 ở tenancy khác, 200 ở tenancy mình) nhưng bước chấm hạ xuống
+    KHÔNG TỰ TEST ĐƯỢC vì từ khoá lấy từ tên class (tenancy-facade, common-history-facade) không nằm trong URL, và
+    "tenancy" không khớp "/tenancies/"."""
+    DIFF = """# BE 6833339b
+
+```diff
+diff --git a/SOAR/src/main/java/com/cyai/soar/controller/TenancyController.java b/SOAR/src/main/java/com/cyai/soar/controller/TenancyController.java
+-    roleFacadeService.checkRoleCurrentUserThrowForbidden(TENANCY, VIEW_HISTORY);
++    tenancyFacadeService.checkCanViewTenancyHistory(id);
+diff --git a/SOAR/src/main/java/com/cyai/soar/facade/impl/TenancyFacadeServiceImpl.java b/SOAR/src/main/java/com/cyai/soar/facade/impl/TenancyFacadeServiceImpl.java
++  public void checkCanViewTenancyHistory(Long id) {
+diff --git a/SOAR/src/main/java/com/cyai/soar/facade/impl/CommonHistoryFacadeServiceImpl.java b/SOAR/src/main/java/com/cyai/soar/facade/impl/CommonHistoryFacadeServiceImpl.java
++      tenancyFacadeService.checkCanViewTenancyHistory(objectId);
+diff --git a/SOAR/src/test/java/com/cyai/soar/TenancyHistoryTest.java b/SOAR/src/test/java/com/cyai/soar/TenancyHistoryTest.java
+```
+"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        with open(os.path.join(self.dir, "diff.md"), "w", encoding="utf-8") as f:
+            f.write(self.DIFF)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def test_tokens_drop_facade_and_match_plural(self):
+        has_be, tokens = d.be_tokens(self.DIFF)
+        self.assertTrue(has_be)
+        self.assertEqual(tokens, {"tenancy", "common-history"})
+        self.assertTrue(d._related("/api/v1/tenancies/3/histories", tokens))
+        self.assertTrue(d._related("/api/v1/histories?type=4&object_id=3&page=0&size=10", tokens))
+        self.assertFalse(d._related("/api/v1/users/me", tokens))
+        self.assertFalse(d._related("/api/v1/correlation-rules/filter", tokens))
+
+    def test_isolation_pair_keeps_pass(self):
+        src = qa_md([("GET", "/api/v1/histories?type=4&object_id=5&page=0&size=10", "HTTP 403\n\n{}"),
+                     ("GET", "/api/v1/tenancies/5/histories", "HTTP 403\n\n{}"),
+                     ("GET", "/api/v1/tenancies/3/histories", "HTTP 200\n\n{}")])
+        self.assertEqual(d.verify_pass(src, self.dir, NO_LOG), (src, []))
+
+    def test_mapping_paths_in_diff(self):
+        diff = self.DIFF.replace("+  public void checkCanViewTenancyHistory(Long id) {",
+                                 '+  @GetMapping("{id}/export-report")\n+  public void x() {')
+        _, tokens = d.be_tokens(diff)
+        self.assertIn("/{id}/export-report", tokens)
+        self.assertTrue(d._related("/api/v1/tenancies/7/export-report", tokens))
+
+    def test_ticket_paths_skip_login_and_openproject(self):
+        os.makedirs(os.path.join(self.dir, "ticket"))
+        with open(os.path.join(self.dir, "ticket", "ticket.md"), "w", encoding="utf-8") as f:
+            f.write("Đăng nhập POST /api/v2/auth/login rồi /api/v2/auth/validate-otp.\n"
+                    "Gọi GET /api/v1/reports/{reportId}/download → mong đợi 403.\n"
+                    "Ảnh: https://op.example/api/v3/attachments/84200/content\n")
+        self.assertEqual(d.ticket_api_paths(self.dir), {"/api/v1/reports/{id}/download"})
+        src = qa_md([("POST", "/api/v2/auth/login", "HTTP 200\n\n{}")])
+        text, reasons = d.verify_pass(src, self.dir, NO_LOG)
+        self.assertEqual(reasons, ["BE chưa có bằng chứng"])  # chỉ login 200 → vẫn chưa đủ
+        src = qa_md([("GET", "/api/v1/reports/12/download", "HTTP 200\n\n{}")])
+        self.assertEqual(d.verify_pass(src, self.dir, NO_LOG), (src, []))
+
+
+class Soar2927(unittest.TestCase):
+    """Sự cố SOAR-2927 (QA 16:53): commit QA chỉ thêm unit test; đường dẫn trong ticket có id cụ thể (153, mã tệp)
+    nên request 200 trên báo cáo QA tự tạo (222) bị coi là không liên quan → hạ nhầm KHÔNG TỰ TEST ĐƯỢC."""
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.dir, "ticket"))
+        with open(os.path.join(self.dir, "ticket", "ticket.md"), "w", encoding="utf-8") as f:
+            f.write("GET /api/v1/scheduled-reports/153/files và /api/v1/scheduled-reports/files/download/"
+                    "9ea1a536-df16-4fbf-83cf-e348d0fc6aa6 (mong đợi 404)\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def test_ticket_ids_generalised(self):
+        self.assertEqual(d.ticket_api_paths(self.dir),
+                         {"/api/v1/scheduled-reports/{id}/files", "/api/v1/scheduled-reports/files/download/{id}"})
+        tokens = d.ticket_api_paths(self.dir)
+        self.assertTrue(d._related("/api/v1/scheduled-reports/222/files", tokens))
+        self.assertTrue(d._related("/api/v1/scheduled-reports/files/download/abcdef12-0000-1111-2222-333333333333", tokens))
+        self.assertFalse(d._related("/api/v1/users/me", tokens))
+
+    def test_test_only_be_commit_needs_no_evidence(self):
+        with open(os.path.join(self.dir, "diff.md"), "w", encoding="utf-8") as f:
+            f.write("# BE 7e0bf05d\n\n```diff\ndiff --git a/SOAR/src/test/java/com/cyai/soar/facade/impl/"
+                    "ScheduledReportNotFoundTest.java b/SOAR/src/test/java/x.java\n+  @Test\n```\n")
+        has_be, tokens = d.be_tokens(open(os.path.join(self.dir, "diff.md"), encoding="utf-8").read())
+        self.assertFalse(has_be)
+        src = qa_md([("GET", "/api/v1/scheduled-reports/222/files", "HTTP 200\n\n{}")])
+        self.assertEqual(d.verify_pass(src, self.dir, NO_LOG), (src, []))
+
+
+class Soar2931(unittest.TestCase):
+    """SOAR-2931: class HealthCheckAlert… → từ khoá health-check-*, URL thật là /api/v1/healthchecks/… (viết liền)."""
+    def test_joined_words_match_url(self):
+        tok = {"health-check-alert", "health-check-escalation", "health-check-threshold"}
+        self.assertTrue(d._related("/api/v1/healthchecks/checks/46/acknowledge", tok))
+        self.assertTrue(d._related("/api/v1/healthchecks", tok))
+        self.assertFalse(d._related("/api/v1/notifications?page=0", tok))
+        self.assertFalse(d._related("/api/v1/users/me", tok))
+
