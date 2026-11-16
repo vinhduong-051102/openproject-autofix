@@ -1540,6 +1540,18 @@ def report_manual_test(api, wp_id, report_text, run_name, status_id=None):
     return "đã comment bước test tay%s" % (", chuyển UNREVIEWED" if status_id else "")
 
 
+def _qa_issue(kind, display_id, report_text, run_dir):
+    """Ghi nhật ký sự cố QA (qa_issues.py) khi Claude kết luận QA SAI / CẦN TEST TAY — để cải thiện QA tự động."""
+    try:
+        import qa_issues
+        reason = report_section(report_text, "Nguyên nhân") or report_section(report_text, "Kết quả") or ""
+        rules = report_section(report_text, "Rule cho QA") or ""
+        qa_issues.record(kind, (reason.strip().splitlines() or [kind])[0][:400], ticket=display_id, path=run_dir,
+                         reason=reason[:3000], rules=rules[:2000])
+    except Exception:  # noqa: BLE001 — nhật ký không được làm hỏng lượt autofix
+        pass
+
+
 def report_qa_wrong(api, wp_id, display_id, report_text, run_name):
     """QA SAI (Claude kiểm chứng: QA tự động trên server test sai cách / công cụ gửi sai, code đúng):
     comment hướng dẫn test đúng cho tester lên ticket, rồi xoá kết quả QA của ticket trên bản build hiện tại để
@@ -4088,11 +4100,13 @@ def main():
             except Exception as ex:  # noqa: BLE001
                 verdict += " → cập nhật ticket lỗi: %s" % str(ex).splitlines()[0][:200]
         elif verdict.startswith("CẦN TEST TAY"):
+            _qa_issue("qa_manual", display_id, report_text, run_dir)
             try:
                 verdict += " → " + report_manual_test(api, wp_id, report_text, run_name, acfg.get("review_status_id"))
             except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
                 verdict += " (comment lên ticket lỗi: %s)" % ex
         elif verdict.startswith("QA SAI"):
+            _qa_issue("qa_wrong", display_id, report_text, run_dir)
             try:
                 verdict += " → " + report_qa_wrong(api, wp_id, display_id, report_text, run_name)
             except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:

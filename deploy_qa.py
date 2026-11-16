@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+import traceback
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -44,6 +45,7 @@ import op_watch  # noqa: E402
 
 import envconf  # noqa: E402
 import projects as P  # noqa: E402
+import qa_issues  # noqa: E402
 
 _PROJ = {}  # dự án đang deploy / QA (load ghi) — để ghi tên dự án vào thông báo khi có nhiều dự án
 
@@ -608,6 +610,8 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
                 diag.append({"attempt": attempt, "error": "Gemini không trả lời sau %ds" % call_timeout})
                 if attempt == 1:
                     log("%s: Gemini không trả lời vòng %d sau %ds → thử lại" % (display_id, rnd, call_timeout))
+                    qa_issues.record("gemini_retry", "Gemini không trả lời vòng %d sau %ds → thử lại" % (rnd, call_timeout),
+                                     ticket=display_id, path=qa_dir)
                     continue
                 answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC",
                           "result": "Gemini lỗi: không trả lời sau %ds (vòng %d, đã thử lại)" % (call_timeout, rnd)}
@@ -620,6 +624,9 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
                 break
             if attempt == 1:
                 log("%s: Gemini không trả kết quả vòng %d (mã %s) → thử lại" % (display_id, rnd, diag[-1].get("rc")))
+                qa_issues.record("gemini_retry", "Gemini không trả kết quả vòng %d (mã %s) → thử lại"
+                                 % (rnd, diag[-1].get("rc")), ticket=display_id, path=qa_dir,
+                                 stderr=str(diag[-1].get("stderr") or "")[-1500:])
                 time.sleep(20)
         with open(os.path.join(qa_dir, "gemini-rounds.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps({"round": rnd, "answer": answer, "diag": diag} if diag else
@@ -1180,6 +1187,9 @@ def _part_error(what, ex, logf=None):
     """Ghi rõ phần nào lỗi (FE / BE / rollout / repo tuỳ chỉnh) vào log + file log deploy → chuỗi để báo."""
     line = "%s lỗi: %s" % (what, (str(ex).splitlines() or [repr(ex)])[0][:300])
     log(line)
+    kind = ("deploy_fe" if what.startswith("FE") else "deploy_be" if what.startswith("BE")
+            else "rollout" if what.startswith("rollout") else "deploy_custom")
+    qa_issues.record(kind, line, path=getattr(logf, "name", None), detail=str(ex)[-2000:])
     if logf:
         logf.write("\n### %s\n" % line)
         logf.flush()
@@ -1977,6 +1987,8 @@ def handle_fail(api, acfg, dcfg, wp, display_id, qa_path, qa_text, commits=()):
         deploy_check(acfg, dcfg, commits, os.path.join(os.path.dirname(qa_path), "deploy-check.md"))
     except Exception as ex:  # noqa: BLE001 — thiếu thông tin này vẫn giao Claude
         log("deploy-check lỗi: %s" % ex)
+        qa_issues.record("deploy_check_error", "deploy-check lỗi: %s" % ex, ticket=display_id,
+                         path=os.path.dirname(qa_path))
     n = fail_count(display_id, 1)
     if n <= dcfg["qa_fail_autofix_max"]:
         log_path = os.path.join(os.path.dirname(qa_path), "autofix.log")
@@ -2304,6 +2316,8 @@ def verify_pass(text, qa_dir, dcfg=None, start=None, end=None, read_log=None):
                 datetime.fromtimestamp(end or time.time()).strftime("%H:%M:%S"), "\n".join(lines)))
         elif note:
             log("%s: %s — bỏ qua kiểm tra log BE" % (os.path.basename(qa_dir), note))
+            qa_issues.record("be_log_unreadable", note, ticket=(re.match(r"[A-Z]+-\d+", os.path.basename(qa_dir)) or
+                                                                 [None])[0], path=qa_dir)
             text = _prepend_section(text, "Ghi chú", "_Kiểm tra log BE sau QA: %s_\n\n" % note)
     diff_path = os.path.join(qa_dir, "diff.md")
     diff_text = ""
@@ -2377,10 +2391,14 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
                               prefer=acfg.get("_profile"), cwd=qa_dir)
         except RuntimeError as ex:
             log("%s: %s" % (display_id, ex))
+            qa_issues.record("qa_engine_error", str(ex), ticket=display_id, path=qa_dir, build=deployed)
     path = os.path.join(qa_dir, "qa.md")
     text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
     m = re.search(r"QA:\s*(KHÔNG RÕ YÊU CẦU|KHÔNG ĐẠT|ĐẠT|KHÔNG TỰ TEST ĐƯỢC)", text[:200])
     verdict = m.group(1) if m else "KHÔNG CÓ BÁO CÁO"
+    if not m:
+        qa_issues.record("qa_no_report", "QA không ghi báo cáo qa.md (%s)" % dcfg["qa_engine"], ticket=display_id,
+                         path=qa_dir, build=deployed)
     # Server đổi trong lúc test → kết quả không đáng tin, không comment / không chuyển QA.
     change = guard() if guard else None
     if change:
@@ -2395,6 +2413,8 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
             text = checked
             verdict = re.match(r"QA:\s*(KHÔNG ĐẠT|KHÔNG TỰ TEST ĐƯỢC)", text).group(1)
             log("%s: QA kết luận ĐẠT nhưng %s → hạ thành %s" % (display_id, ", ".join(reasons), verdict))
+            qa_issues.record("qa_false_pass", "QA kết luận ĐẠT nhưng %s → hạ thành %s" % (", ".join(reasons), verdict),
+                             ticket=display_id, path=qa_dir, build=deployed, engine=dcfg["qa_engine"])
         elif checked != text:  # chỉ thêm ghi chú (vd không đọc được log BE)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(checked)
@@ -2419,6 +2439,10 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
         if re.match(r"(Gemini lỗi|Gemini không trả kết quả|Gemini chưa đăng nhập)", result):
             # Lỗi của công cụ QA, không phải ticket: không giao Claude, không ghi qa-history → lượt sau QA lại.
             verdict += " " + QA_TOOL_ERROR
+            kind = ("gemini_no_login" if result.startswith("Gemini chưa đăng nhập") else
+                    "gemini_timeout" if "không trả lời sau" in result else
+                    "gemini_empty" if result.startswith("Gemini không trả kết quả") else "gemini_error")
+            qa_issues.record(kind, result, ticket=display_id, path=qa_dir, build=deployed)
         else:
             # Claude kiểm chứng: QA có thể tự test được không (QA SAI → rule cho lần sau), hay cần tester test tay.
             verdict += handle_fail(api, acfg, dcfg, wp, display_id, path, text, commits)
@@ -2672,6 +2696,11 @@ def run_all(dry_run=False, only=None, auto_only=False, force=False, review=None,
         except Exception as ex:  # noqa: BLE001 — dự án này lỗi vẫn deploy dự án khác
             log("dự án %s: deploy / QA lỗi: %s" % (proj["name"], ex))
             inbox(load(proj)[0], "**DEPLOY 86 LỖI** %s" % str(ex).splitlines()[0][:300])
+            qa_issues.record("merge_conflict" if "xung đột" in str(ex) else "other",
+                             "dự án %s: deploy / QA lỗi: %s" % (proj["name"], (str(ex).splitlines() or [repr(ex)])[0][:300]),
+                             phase="server", traceback=traceback.format_exc())
+    if not dry_run:
+        qa_issues.write_report()  # ~/Downloads/autofix-reports/qa-issues.md (14 ngày)
 
 
 def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review=None):
@@ -2707,6 +2736,8 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
         drift = None if commits.get("FE") else fe_drift(acfg, dcfg)
         if drift:
             log(drift_text(drift) + (" (dry-run: không đổi gì)" if dry_run else ""))
+            if not dry_run:
+                qa_issues.record("fe_drift", drift_text(drift), build=drift.get("running"), latest=drift.get("latest"))
         if dry_run or not (tickets or drift):
             return
     fe_version = None
@@ -2727,6 +2758,7 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
             return
         if not wait_up(dcfg, fe_version):
             msg = "server chưa lên sau %d phút (%s) — chưa QA" % (dcfg["wait_minutes"], ", ".join(deployed_parts))
+            qa_issues.record("server_not_up", msg, build=", ".join(deployed_parts), path=logf.name, tickets=tickets)
             save_pending(tickets, "server chưa lên sau deploy")
             inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
             notify("[DEPLOY 86 LỖI]", msg)
@@ -2741,6 +2773,7 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
     if not deployed_parts and not wait_up(dcfg, None, minutes=dcfg.get("alive_wait_minutes", 5)):
         msg = "server không trả lời (FE %s / API %s) — chưa QA, giữ hàng chờ" % (dcfg["fe_url"], dcfg["api_url"])
         log(msg)
+        qa_issues.record("server_down", msg, tickets=tickets)
         save_pending(tickets, "server không sống")
         inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
         notify("[DEPLOY 86 LỖI]", msg)
@@ -2749,6 +2782,7 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
     if not baseline.get("fe"):
         msg = "không đọc được version FE trên %s — chưa QA, giữ hàng chờ" % dcfg["fe_url"]
         log(msg)
+        qa_issues.record("fe_version_unreadable", msg, tickets=tickets)
         save_pending(tickets, "không đọc được version FE")
         inbox(cfg, "**DEPLOY 86 LỖI** " + msg)
         return
@@ -2861,6 +2895,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
                 else:
                     inbox(cfg, "**QA SERVER LỖI CÔNG CỤ** %s — %d lần trên bản %s, ngừng thử (QA lại ở đợt deploy sau"
                                   " hoặc bấm QA trên server)" % (display_id, n, build))
+                    qa_issues.record("qa_tool_retry_exhausted", "lỗi công cụ QA %d lần trên bản %s, ngừng thử" % (n, build),
+                                     ticket=display_id, build=build, path=path)
         except ServerChanged as ex:
             with mu:
                 if not stop["msg"]:
@@ -2868,6 +2904,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             return
         except Exception as ex:  # noqa: BLE001
             log("%s: QA lỗi %s" % (display_id, ex))
+            qa_issues.record("qa_exception", "QA lỗi: %s" % ex, ticket=display_id, build=build,
+                             traceback=traceback.format_exc())
             inbox(cfg, "**QA SERVER LỖI** %s — %s" % (display_id, str(ex).splitlines()[0][:300]))
         finally:
             if slot:
@@ -2906,6 +2944,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         msg = "server 86 thay đổi trong lúc QA %s — tạm dừng, %d ticket vào hàng chờ: %s" % (
             stop["msg"], len(remaining), ", ".join(remaining))
         log(msg)
+        qa_issues.record("server_changed", msg, build="%s|%s" % (baseline.get("fe"), baseline.get("be")),
+                         tickets=list(remaining))
         save_pending(_merged_pending(waiting, done, remaining, retry), stop["msg"])
         inbox(cfg, "**QA SERVER TẠM DỪNG** " + msg)
         notify("[QA SERVER] tạm dừng", "Server 86 vừa bị cập nhật / restart — QA tiếp ở lần chạy sau")

@@ -201,9 +201,12 @@ class PinnedBuild(Quiet):
         with open(path) as f:
             tags = json.load(f)
         v = tags["SS"]["dev"]["version"].split(".")
-        tags["SS"]["dev"]["version"] = ".".join(v[:-1] + [str(int(v[-1]) + 1)])  # như build-and-deploy.sh
+        # như build-and-deploy.sh: BUILD_VERSION (build lại đúng bản) hoặc tăng số cuối
+        new = (kw.get("env") or {}).get("BUILD_VERSION") or ".".join(v[:-1] + [str(int(v[-1]) + 1)])
+        tags["SS"]["dev"]["version"] = new
         with open(path, "w") as f:
             json.dump(tags, f)
+        open(os.path.join(cwd, "soar-fe-ss-%s.tar" % new), "w").close()  # file tar theo version
         return ""
 
     def run_fe(self, **kw):

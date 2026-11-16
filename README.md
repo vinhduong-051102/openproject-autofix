@@ -330,6 +330,31 @@ docker exec soar-https-nginx nginx -t && docker exec soar-https-nginx nginx -s r
 `nginx -t` lỗi thì trả lại: `cp nginx-config/soar-all-4443.conf.bak-<giờ>-truoc-bluegreen nginx-config/soar-all-4443.conf
 && rm nginx-config/op-watch-upstream-*.conf`. Tắt bluegreen: `DEPLOY_STRATEGY=service` (hoặc `recreate`) trong `.env`.
 
+## Nhật ký sự cố QA test / QA server (qa_issues.py)
+
+Mọi sự cố trong lượt deploy lên server test và lượt QA được ghi thành một dòng JSON trong
+`<AUTOFIX_ROOT>/qa-issues.jsonl` (giữ 180 ngày) để xem lại, tìm lỗi lặp và cải thiện tool:
+
+- **QA server**: merge xung đột, build / deploy FE, BE lỗi, rollout lỗi, server không lên sau deploy, server không trả
+  lời trước khi QA, không đọc được version FE, FE lệch bản mới nhất, server bị đổi / restart giữa lúc QA.
+- **QA test**: Gemini treo / không trả kết quả / chưa đăng nhập / phải thử lại, Claude QA lỗi, không có báo cáo, kết luận
+  ĐẠT bị hạ (HTTP 5xx, lỗi log BE, thiếu request), lỗi công cụ quá số lần thử, lỗi ngoại lệ, không đọc được log BE,
+  Claude kết luận **QA SAI** (kèm rule rút ra) hoặc **CẦN TEST TAY**.
+
+Mỗi dòng có `kind` (loại), `cause` (nguyên nhân đoán từ nội dung: fe_build, be_build, ssh_network, timeout, quota,
+config_missing…), `ticket`, `build`, `path` (log deploy / thư mục QA) và `extra` (traceback, stderr, rule…).
+Ghi nhật ký lỗi không bao giờ làm hỏng deploy / QA; khi chạy unittest không ghi vào file thật.
+
+```bash
+python3 qa_issues.py                 # tổng hợp 14 ngày ra màn hình
+python3 qa_issues.py --days 30 --md  # ghi ~/Downloads/autofix-reports/qa-issues.md
+python3 qa_issues.py --backfill      # nạp sự cố cũ từ inbox + báo cáo autofix (không nạp trùng)
+python3 qa_issues.py --prune         # xoá sự cố cũ hơn 180 ngày
+```
+
+Báo cáo Markdown tự cập nhật sau mỗi lượt deploy / QA: bảng theo loại (số lần, lần cuối, nguyên nhân, ticket) +
+gợi ý cải thiện cho từng loại + các lỗi khác nhau gần nhất.
+
 ## Nhiều gói Claude + trang theo dõi (op_dashboard.py)
 
 Mỗi gói Claude là một thư mục cấu hình đã đăng nhập riêng (`CLAUDE_CONFIG_DIR`). Khai báo trong config op-watch:
