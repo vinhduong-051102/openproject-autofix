@@ -1033,9 +1033,8 @@ def deploy_fe(acfg, dcfg, root, logf, changes=None, pin_version=None, old_image=
         shutil.copy(os.path.join(repo, ".env.deploy"), os.path.join(work, ".env.deploy"))
         tar = os.path.join(work, "%s.tar" % dcfg["fe_image"])
         env = af.build_env(acfg)
-        # Worktree ở HEAD tách rời: báo tên nhánh để script chọn dòng version (otp → 1.x.x, dev-ss → 2.x.x);
-        # mức tăng MAJOR/MINOR/PATCH script tự xét theo commit kể từ "update version" gần nhất.
-        env["BUILD_BRANCH"] = dev
+        # Version do build-and-deploy.sh tự tính: MAJOR ghi cứng trong script của từng nhánh (otp 1, dev-ss 2),
+        # MINOR/PATCH theo commit kể từ "update version" gần nhất.
         if pin_version:
             _pin_version(work, pin_version)
             env["BUILD_VERSION"] = pin_version
