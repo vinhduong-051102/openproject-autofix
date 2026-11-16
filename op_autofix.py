@@ -209,7 +209,9 @@ Chỉ sửa trong {n_repos} thư mục này. Không tạo nhánh / worktree khá
      caller / controller liên quan; FE: `npm run build` + tsc). Test lỗi sẵn từ trước (không do bản sửa) thì ghi rõ.
 5. Commit trên nhánh hiện tại của worktree (`git -C <worktree> add …` rồi `git -C <worktree> commit …`), mỗi ticket một
    commit mỗi repo, message:
-   `[{display_id}] - {subject}` + dòng trống + mô tả ngắn tiếng Việt không dấu + dòng trống +
+   repo FE (soar-fe, theo .claude/skills/commit-convention/SKILL.md): `[{display_id}] <loại>: {subject}` với loại = `fix`
+   nếu ticket là lỗi (tiêu đề có "Lỗi"), `feat` nếu bổ sung tính năng; repo BE: `[{display_id}] - {subject}`;
+   tiếp theo là dòng trống + mô tả ngắn tiếng Việt không dấu + dòng trống +
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
 ## Không được
@@ -1788,7 +1790,7 @@ Worktree: {worktrees}; nhánh hiện tại của worktree đã chứa bản sử
 1. Xét TỪNG ý Gemini nêu (lỗi, rủi ro, test thiếu). Kiểm chứng trong code — Gemini có thể sai, đừng tin mù quáng.
 2. Ý đúng, trong phạm vi ticket, sửa được an toàn → sửa tối thiểu, thêm/sửa test, kiểm tra
    ({repo_checks_short}), rồi commit bằng `git -C <worktree> add …` +
-   `git -C <worktree> commit …`, message `[{display_id}] - {subject}` + dòng trống + mô tả ngắn tiếng Việt không dấu
+   `git -C <worktree> commit …`, message `[{display_id}] <loại>: {subject}` (repo FE soar-fe theo .claude/skills/commit-convention: loại = fix nếu ticket là lỗi, feat nếu bổ sung tính năng; repo BE giữ `[{display_id}] - {subject}`) + dòng trống + mô tả ngắn tiếng Việt không dấu
    (bắt đầu bằng "Bo sung sau review Gemini: ") + dòng trống + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 3. Ý sai / ngoài phạm vi / chỉ là gợi ý không cần thiết → KHÔNG sửa, nêu lý do.
 4. Ý cần người quyết định (đổi hành vi sản phẩm, trái thiết kế người khác cố ý làm, cần dữ liệu môi trường thật) →
@@ -1842,7 +1844,7 @@ Worktree: {worktrees}; nhánh hiện tại đã chứa bản sửa.
    strict stubbing, kỳ vọng sai) thì sửa test cho đúng hành vi ticket yêu cầu; code sai thì sửa code.
    KHÔNG xoá test, KHÔNG @Disabled / bỏ qua test, KHÔNG nới kỳ vọng chỉ để cho qua.
 2. Chạy lại đúng lệnh bị lỗi ({repo_checks_short}). Qua rồi commit bằng
-   `git -C <worktree> add …` + `git -C <worktree> commit …`, message `[{display_id}] - {subject}` + dòng trống +
+   `git -C <worktree> add …` + `git -C <worktree> commit …`, message `[{display_id}] <loại>: {subject}` (repo FE soar-fe theo .claude/skills/commit-convention: loại = fix nếu ticket là lỗi, feat nếu bổ sung tính năng; repo BE giữ `[{display_id}] - {subject}`) + dòng trống +
    mô tả ngắn tiếng Việt không dấu (bắt đầu bằng "Sua loi kiem tra tu dong: ") + dòng trống +
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 3. Lỗi không do lượt này (test cũ lỗi sẵn trên nhánh chung, môi trường / mạng) → KHÔNG sửa, ghi rõ bằng chứng.
@@ -1924,7 +1926,7 @@ Tool kiểm tra nhật ký thao tác: bạn CHƯA ĐỌC tài liệu đặc tả
    buộc / không, câu báo lỗi, quy tắc xử lý…) và đối chiếu với bản sửa hiện tại (`git -C <worktree> log` / `show`).
    Worktree: {worktrees}.
 3. Chỗ chưa đúng đặc tả, trong phạm vi ticket → sửa, kiểm tra ({repo_checks_short}), commit bằng `git -C <worktree>
-   add …` + `git -C <worktree> commit …`, message `[{display_id}] - {subject}` + dòng trống + "Bo sung theo dac ta: …"
+   add …` + `git -C <worktree> commit …`, message `[{display_id}] <loại>: {subject}` (repo FE soar-fe theo .claude/skills/commit-convention: loại = fix nếu ticket là lỗi, feat nếu bổ sung tính năng; repo BE giữ `[{display_id}] - {subject}`) + dòng trống + "Bo sung theo dac ta: …"
    + dòng trống + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Mâu thuẫn rõ giữa đặc tả và ticket /
    comment → không tự chọn, ghi Cần quyết định.
 4. CẬP NHẬT {run_dir}/report.md (giữ định dạng, dòng đầu `KẾT QUẢ: …` đúng với kết quả sau khi đối chiếu): thêm /
