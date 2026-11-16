@@ -452,6 +452,9 @@ header { flex-wrap: wrap; min-width: 0; }
 :root[data-theme="dark"] { --s1: #3987e5; --s2: #d95926; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme]) { --s1: #3987e5; --s2: #d95926; } }
 .view[data-view="stats"].on { display: block; overflow: auto; }
+.view[data-view="qaissue"].on { display: block; overflow: auto; }
+#qiBox { max-width: 1280px; margin: 0 auto; }
+#qiTiles .tg-tile { cursor: pointer; text-align: left; }
 #statsBox { max-width: 1280px; margin: 0 auto; }
 .st-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 12px 0; }
 .st-tile { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; background: var(--panel); }
@@ -694,6 +697,7 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
     <button data-view="todo">Cần xử lý <span class="vbadge" id="todoN"></span></button>
     <button data-view="ticket">Ticket <span class="vbadge live" id="liveN"></span></button>
     <button data-view="stats">Thống kê</button>
+    <button data-view="qaissue" title="Lỗi khi QA test và khi deploy lên server QA (~/autofix/qa-issues.jsonl)">Sự cố QA <span class="vbadge crit" id="qiN"></span></button>
     <button data-view="telegram">Telegram <span class="vbadge" id="tgN"></span></button>
     <button data-view="system">Hệ thống <span class="vbadge crit" id="sysN"></span></button>
     <button data-view="projects">Dự án</button>
@@ -778,6 +782,18 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
         <button id="stRefresh" title="Tải lại từ OpenProject (số liệu cache 10 phút)">↻</button>
       </div>
       <div id="stBody"><div class="empty">Đang tải…</div></div>
+    </section>
+  </div>
+  <div class="view" data-view="qaissue">
+    <section id="qiBox">
+      <h2>Sự cố QA test / QA server <span class="sum" id="qiSum"></span></h2>
+      <div class="hint">Ghi tự động khi deploy lên server 86 lỗi, Gemini/Claude QA lỗi, QA chấm sai, phải test tay… Bấm một dòng để xem chi tiết + gợi ý cải thiện. Báo cáo đầy đủ: <code>~/Downloads/autofix-reports/qa-issues.md</code></div>
+      <div class="tg-tiles" id="qiTiles"></div>
+      <div class="op-bar">
+        <div class="seg" id="qiPhase"><button data-v="all" class="on">Tất cả</button><button data-v="server">QA server</button><button data-v="qa">QA test</button></div>
+        <input id="qiQ" type="search" placeholder="Tìm ticket / lỗi / nguyên nhân…">
+      </div>
+      <div class="acts" id="qiList"><div class="empty">Đang tải…</div></div>
     </section>
   </div>
   <div class="view" data-view="telegram">
@@ -1344,6 +1360,36 @@ function renderActs() {
   });
 }
 function renderRuns() { renderActs(); }
+let qiPhase = "all", qiKind = "";
+function renderQaIssues() {
+  const items = S.qa_issues || [];
+  const day = Date.now() / 1000 - 86400;
+  const recent = items.filter((x) => x.at >= day).length;
+  $("qiN").textContent = recent || "";
+  if (!document.querySelector('.view.on[data-view="qaissue"]')) return;
+  const srv = items.filter((x) => x.phase === "server").length;
+  $("qiSum").textContent = `${items.length} sự cố / 30 ngày · ${srv} server · ${items.length - srv} QA test · ${recent} trong 24 giờ`;
+  const by = {};
+  items.forEach((x) => { const k = x.kind; (by[k] = by[k] || {label: x.label, phase: x.phase, n: 0}).n++; });
+  $("qiTiles").innerHTML = Object.entries(by).sort((a, b) => b[1].n - a[1].n).map(([k, v]) =>
+    `<button class="tg-tile ${qiKind === k ? "on" : ""}" data-qikind="${esc(k)}" title="Lọc theo loại này"><div class="v" style="color:var(--${v.phase === "server" ? "crit" : "warn"})">${v.n}</div><div class="l">${esc(v.label)}</div></button>`).join("");
+  const q = ($("qiQ").value || "").toLowerCase();
+  const list = items.filter((x) => (qiPhase === "all" || x.phase === qiPhase) && (!qiKind || x.kind === qiKind)
+    && (!q || [x.ticket, x.msg, x.cause, x.label].join(" ").toLowerCase().includes(q)));
+  $("qiList").innerHTML = list.length ? list.map((x) => `
+    <div class="act ${selKind === "issue" && selKey === x.key ? "sel" : ""}" data-qikey="${esc(x.key)}">
+      <span class="kind">${x.phase === "server" ? "Server" : "QA test"}</span>
+      <span class="title"><span class="id">${esc(x.ticket || (x.phase === "server" ? "Server 86" : "QA"))}</span><span class="badge ${x.phase === "server" ? "crit" : "warn"}" title="${esc(x.label)}">${esc(x.label)}</span></span>
+      <span class="when">${esc(when(x.at))}</span>
+      <span class="sub" title="${esc(x.msg)}">${esc([x.msg, x.cause ? "nguyên nhân: " + x.cause : ""].filter(Boolean).join(" · "))}</span>
+    </div>`).join("") : `<div class="empty">${items.length ? "Không có sự cố khớp bộ lọc" : "Chưa ghi nhận sự cố nào trong 30 ngày"}</div>`;
+  document.querySelectorAll("[data-qikey]").forEach((el) => el.onclick = () => selectOther("issue", el.dataset.qikey));
+  document.querySelectorAll("[data-qikind]").forEach((el) => el.onclick = () => { qiKind = qiKind === el.dataset.qikind ? "" : el.dataset.qikind; renderQaIssues(); });
+}
+document.querySelectorAll("#qiPhase button").forEach((b) => b.onclick = () => {
+  qiPhase = b.dataset.v; document.querySelectorAll("#qiPhase button").forEach((x) => x.classList.toggle("on", x === b)); renderQaIssues();
+});
+$("qiQ").oninput = () => renderQaIssues();
 const ddmm = (d) => d ? d.slice(8, 10) + "/" + d.slice(5, 7) : "";
 const todayIso = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 function scheduleBox(j) {
@@ -2013,7 +2059,7 @@ async function refresh() {
     S = await (await fetch("/api/state")).json();
     if (projList().length > 1 && $("opProj").hidden) { opProjects(); OP.page = 1; loadOP(); }  // có nhiều dự án: hiện ô chọn dự án ở tab OpenProject
     $("updated").textContent = "Cập nhật " + new Date().toLocaleTimeString("vi-VN");
-    renderChips(); renderAgents(); renderProfiles(); renderSummaries(); renderPending(); renderReview(); renderActs(); renderInbox();
+    renderChips(); renderAgents(); renderProfiles(); renderSummaries(); renderPending(); renderReview(); renderActs(); renderQaIssues(); renderInbox();
     renderTodo();
     markAssist(); markRunBtns(); notifyPicks();
     if (sel && selKind === "run" && !$("runModal").hidden) renderPicks(sel);
@@ -3183,7 +3229,7 @@ $("tgBox").querySelector("h2").addEventListener("click", () => setTimeout(tgLoad
 tgLoad(); setInterval(tgLoad, 15000);
 
 // ---- Trang (nav trên header / đáy màn hình trên điện thoại) ----
-const VIEWS = ["todo", "ticket", "stats", "telegram", "system", "projects", "config"];
+const VIEWS = ["todo", "ticket", "stats", "qaissue", "telegram", "system", "projects", "config"];
 function showView(v) {
   if (v === "autofix") v = "ticket";  // tab Autofix đã gộp vào Ticket (localStorage cũ)
   if (!VIEWS.includes(v)) v = "todo";
@@ -3196,6 +3242,7 @@ function showView(v) {
   if (v === "config" || v === "projects") loadConfig();
   if (v === "config") gdLoad();
   if (v === "stats") loadStats();
+  if (v === "qaissue") renderQaIssues();
   document.querySelectorAll(".view.on .scroll-reset").forEach((el) => { el.scrollTop = 0; });
 }
 document.querySelectorAll("nav.views [data-view]").forEach((b) => b.onclick = () => showView(b.dataset.view));
