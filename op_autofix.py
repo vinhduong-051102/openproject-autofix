@@ -1900,9 +1900,9 @@ def claude_cmd(acfg, prompt, run_dir, be_dir=None):
     # Mỗi quy tắc là một tham số riêng (quy tắc có khoảng trắng, không nối chuỗi được). Edit/Write để trống thì ghi
     # được mọi nơi trên máy — chỉ cho trong thư mục của lượt chạy (worktree + report).
     cmd += ["--allowedTools"] + ALLOWED_TOOLS + write_rules(run_dir, acfg) + ["--disallowedTools"] + DISALLOWED_TOOLS
-    if acfg.get("_assist"):  # bước Claude hỗ trợ: được gọi GET API server test (chỉ đọc) qua soar_api.py
+    if acfg.get("_assist"):  # bước Claude hỗ trợ: gọi API server test qua soar_api.py (mọi method, --as) để tự test
         cmd[cmd.index("--disallowedTools"):cmd.index("--disallowedTools")] = [
-            "Bash(python3 %s GET *)" % SOAR_API, "Bash(python3 %s *)" % UI_CHECK]
+            "Bash(python3 %s *)" % SOAR_API, "Bash(python3 %s *)" % UI_CHECK]
     if acfg.get("model"):
         cmd += ["--model", acfg["model"]]
     return cmd
@@ -3168,14 +3168,16 @@ Công cụ ĐÃ lấy sẵn thêm tài liệu cho bạn:
 ## Làm
 1. Đọc lý do bị kẹt trong báo cáo lượt trước, rồi dùng tài liệu trên để gỡ: file đính kèm đúng tên gốc nằm trong
    {run_dir}/assist/attachments/ (svg / ảnh / tài liệu… — đưa vào repo bằng Read rồi Write nếu cần dùng làm asset);
-   ticket liên quan trong {run_dir}/assist/related/<MÃ>/ticket.md; dữ liệu thật trên server test qua GET API.
+   ticket liên quan trong {run_dir}/assist/related/<MÃ>/ticket.md; dữ liệu thật trên server test qua API.
 2. Gỡ được → làm tiếp việc sửa như hướng dẫn ở trên (sửa, tự kiểm tra hồi quy, build / test, commit) và ghi lại
    {run_dir}/report.md với `KẾT QUẢ: ĐÃ SỬA` (ghi rõ trong "Nguyên nhân" đã dùng tài liệu nào để gỡ).
 3. Vẫn cần người quyết (đổi hành vi sản phẩm, thiếu thông tin không có trong tài liệu, ý kiến trái nhau…) → KHÔNG đoán,
    ghi lại report.md `KẾT QUẢ: CẦN QUYẾT ĐỊNH`, mục "Cần quyết định / rủi ro" nói rõ đã thử tài liệu nào và vì sao vẫn
    chưa đủ, câu hỏi cụ thể cho người quyết.
-4. CẦN TEST TAY (QA tự động không kiểm được, vd lỗi giao diện / hover / màu): TỰ TEST trên giao diện server test bằng
-   ui_check theo đúng bước của ticket / hướng dẫn test trong comment (FLOW nhúng trong iframe ở trang Kịch bản: bước
+4. CẦN TEST TAY (QA tự động không kiểm được): TỰ TEST trên server test. Lỗi API / dữ liệu / phân quyền → gọi API theo
+   đúng bước của ticket / comment tester (dựng điều kiện bằng POST / PUT nếu cần, đăng nhập đúng các tài khoản bằng --as,
+   so sánh người được thấy / người không được thấy), rồi trả lại dữ liệu như cũ. Lỗi giao diện / hover / màu → ui_check
+   theo đúng bước của ticket / hướng dẫn test trong comment (FLOW nhúng trong iframe ở trang Kịch bản: bước
    {{"frame": "iframe"}}; hover rồi đọc CSS {{"style": ["css", ["background-color", "cursor"]]}}; giao diện sáng / tối:
    {{"theme": "dark"}} / {{"theme": "light"}} hoặc nút đổi theme trên thanh trên). Chụp ảnh có khoanh vùng.
    Đúng kết quả mong đợi → `KẾT QUẢ: ĐÃ SỬA` (không cần commit mới), mục `## Comment cho tester` nêu đã test gì trên
@@ -3188,9 +3190,17 @@ Công cụ ĐÃ lấy sẵn thêm tài liệu cho bạn:
    ảnh đã đúng (chỉ khi server đã chạy bản có bản sửa). Công cụ tự upload ảnh và chèn vào comment trên ticket.
 """
 
-ASSIST_API_NOTE = """Gọi API server test (CHỈ ĐỌC, tự đăng nhập): `python3 {soar_api} GET /api/v1/...` (một lệnh đơn đúng dạng này;
-file tĩnh FE: `python3 {soar_api} GET {fe_url}/index.html`). Không gọi được POST / PUT / DELETE: cần ghi dữ liệu thì
-ghi vào báo cáo. Server test có thể đang chạy bản cũ hơn code trong worktree.
+ASSIST_API_NOTE = """Gọi API server test (tự đăng nhập; mỗi lần một lệnh đơn): `python3 {soar_api} <METHOD> <đường dẫn> [body JSON | @file]`
+— vd `python3 {soar_api} GET /api/v1/...`, `python3 {soar_api} POST /api/v1/alerts/filter '{{"case_id":1}}'`,
+`python3 {soar_api} PUT /api/v1/... '{{...}}'`; đăng nhập tài khoản khác (người xử lý / người ngoài, phân quyền):
+`python3 {soar_api} --as <tài khoản> [--password '<mật khẩu ghi trong ticket>'] GET ...` (được: tài khoản QA_AUTO_*,
+tài khoản auto_* / tài khoản tester ghi trong ticket; mật khẩu chỉ cần lần đầu); file tĩnh FE:
+`python3 {soar_api} GET {fe_url}/index.html`. Server test có thể đang chạy bản cũ hơn code trong worktree
+(`GET /api/v1/system/version` để biết commit đang chạy).
+AN TOÀN khi ghi (môi trường dùng chung với tester): dữ liệu test mới đặt tên bắt đầu `QA_AUTO_` và dọn sau khi test;
+được TẠM đổi trạng thái dữ liệu có sẵn mà ticket nêu để tái hiện (vd bật hạn chế sự việc, đổi cấu hình) — GET ghi lại
+giá trị cũ trước, test xong TRẢ LẠI ngay và GET kiểm tra đã trả; không xoá dữ liệu không do mình tạo; không đổi mật khẩu /
+thông tin / trạng thái tài khoản tester. Mọi thay đổi + đã trả lại chưa ghi vào report.md (mục "Kiểm tra").
 Test trên GIAO DIỆN thật (trình duyệt, tự đăng nhập bằng tài khoản / OTP ghi trong ticket): ghi các bước bằng Write vào
 {run_dir}/ui/<tên>.json rồi chạy `python3 {ui_check} {run_dir}/ui/<tên>.json` (một lệnh đơn). Ảnh ra
 {run_dir}/ui/<tên>-shots/*.png — xem bằng Read. Bước (mảng JSON): {{"goto": "/duong-dan"}}, {{"click": "text=Lưu"}},
@@ -3324,7 +3334,7 @@ def assist_step(api, cfg, acfg, wp, run_dir, report_text, note=""):
         note=("\n## Ghi chú của dev cho lượt hỗ trợ này (làm theo)\n%s\n" % note.strip()) if note and note.strip() else "")
     with open(os.path.join(run_dir, "assist", "prompt.md"), "w", encoding="utf-8") as f:
         f.write(prompt)
-    log("%s: Claude hỗ trợ (tài liệu thêm + GET API server test)%s" % (display_id, " — có ghi chú" if note else ""))
+    log("%s: Claude hỗ trợ (tài liệu thêm + API server test)%s" % (display_id, " — có ghi chú" if note else ""))
     inbox(cfg, "**AUTOFIX HỖ TRỢ** %s — agent cần hỗ trợ, Claude đang gỡ bằng file đính kèm / ticket liên quan / API "
                "server test" % display_id)
     t0 = time.time()

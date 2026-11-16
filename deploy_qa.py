@@ -237,10 +237,13 @@ Giao diện thật (trình duyệt, tự đăng nhập tài khoản trong ticket
    Thử thêm 1-2 trường hợp lân cận dễ hỏng.
 2. Bug chỉ thấy trên giao diện (màu, focus, nhãn trình đọc màn hình, bố cục…): kiểm tra bundle FE đã deploy
    (index.html → file /assets/*.js liên quan) có đúng thay đổi trong diff không. Không đủ chắc → KHÔNG TỰ TEST ĐƯỢC.
-3. AN TOÀN — môi trường dùng chung với tester: không xoá / sửa dữ liệu không do mình tạo; dữ liệu test đặt tên bắt đầu
-   `QA_AUTO_` và dọn lại nếu API cho phép; đổi cấu hình hệ thống thì trả lại giá trị cũ ngay sau khi test.
+3. AN TOÀN — môi trường dùng chung với tester: không xoá dữ liệu không do mình tạo; dữ liệu test đặt tên bắt đầu
+   `QA_AUTO_` và dọn lại nếu API cho phép. Được TẠM đổi trạng thái dữ liệu có sẵn mà ticket nêu để dựng điều kiện tái hiện
+   (vd bật hạn chế sự việc, đổi cấu hình): GET ghi giá trị cũ trước, test xong trả lại ngay và GET kiểm tra; ghi vào
+   "Ghi chú". Không vì phải dựng điều kiện mà kết luận KHÔNG TỰ TEST ĐƯỢC.
    Không gọi host khác. Tài khoản: mặc định của soar_api; tài khoản test QA_AUTO_* tự tạo; hoặc tài khoản tester ghi
-   trong ticket nếu tên thuộc [{ticket_accounts}] (`--as <tên> --password '<mật khẩu trong ticket>'` lần đầu) — KHÔNG
+   trong ticket nếu tên thuộc [{ticket_accounts}] hoặc bắt đầu `auto_` (`--as <tên> --password '<mật khẩu trong
+   ticket>'` lần đầu) — bug phân quyền phải test bằng cả tài khoản được thấy lẫn không được thấy — KHÔNG
    đổi mật khẩu / thông tin / trạng thái của tài khoản tester, chỉ sửa / xoá dữ liệu do mình tạo.
 
 4. Ticket KHÔNG RÕ RÀNG — đọc cả mô tả, comment, diff mà vẫn không xác định được cần kiểm tra gì: không có bước tái hiện

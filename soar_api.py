@@ -111,7 +111,8 @@ class _Headers(dict):
 
 def credentials(cfg, name, password=None):
     """(username, password): tài khoản trong deploy.json; tài khoản test QA_AUTO_*; hoặc tài khoản tester ghi trong ticket
-    (nằm trong qa_ticket_accounts) — hai loại sau: mật khẩu truyền --password lần đầu, tool nhớ."""
+    (nằm trong qa_ticket_accounts, hoặc tên khớp qa_ticket_account_re — mặc định ^auto_ = persona autotest) — hai loại
+    sau: mật khẩu truyền --password lần đầu, tool nhớ."""
     if not cfg.get("accounts") and not cfg.get("app_user"):
         sys.exit("Chưa có tài khoản đăng nhập app (tab Dự án → Server test → Tài khoản đăng nhập app)")
     accounts = cfg.get("accounts") or {cfg["app_user"]: {"password": cfg.get("app_password") or ""}}
@@ -119,10 +120,12 @@ def credentials(cfg, name, password=None):
     if name in accounts:
         return name, accounts[name]["password"]
     ticket_accounts = set(cfg.get("qa_ticket_accounts") or [])
-    if not name.startswith("QA_AUTO_") and name not in ticket_accounts:
+    account_re = cfg.get("qa_ticket_account_re", r"^auto_")
+    if not name.startswith("QA_AUTO_") and name not in ticket_accounts \
+            and not (account_re and re.search(account_re, name)):
         sys.exit("Tài khoản %s không có trong deploy.json; tài khoản test tự tạo phải tên QA_AUTO_*; tài khoản tester "
-                 "ghi trong ticket phải nằm trong qa_ticket_accounts (%s)"
-                 % (name, ", ".join(sorted(ticket_accounts)) or "đang trống"))
+                 "ghi trong ticket phải nằm trong qa_ticket_accounts (%s) hoặc khớp qa_ticket_account_re (%s)"
+                 % (name, ", ".join(sorted(ticket_accounts)) or "đang trống", account_re or "trống"))
     saved = {}
     if os.path.exists(QA_ACCOUNTS):
         with open(QA_ACCOUNTS, encoding="utf-8") as f:
