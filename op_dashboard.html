@@ -452,8 +452,19 @@ header { flex-wrap: wrap; min-width: 0; }
 :root[data-theme="dark"] { --s1: #3987e5; --s2: #d95926; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme]) { --s1: #3987e5; --s2: #d95926; } }
 .view[data-view="stats"].on { display: block; overflow: auto; }
-.view[data-view="qaissue"].on { display: block; overflow: auto; }
-#qiBox { max-width: 1280px; margin: 0 auto; }
+/* Sự cố QA: khung cố định cao bằng màn hình, chỉ danh sách cuộn (không lồng 2 thanh cuộn). */
+#qiBox { flex: 1 1 auto; min-height: 0; width: 100%; max-width: 1280px; margin: 0 auto; display: flex; flex-direction: column; overflow: hidden; }
+#qiBox > * { flex: 0 0 auto; }
+#qiBox > #qiList { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; overscroll-behavior: contain; }
+@media (max-width: 960px) {
+  /* Màn nhỏ: ô tổng hợp thành 1 hàng cuộn ngang, ẩn dòng giải thích, để danh sách còn chỗ. */
+  #qiTiles { display: flex; overflow-x: auto; gap: 8px; padding: 10px 12px 0; scrollbar-width: none; }
+  #qiTiles .tg-tile { flex: 0 0 auto; max-width: 62vw; padding: 6px 10px; display: flex; align-items: center; gap: 8px; }
+  #qiTiles .tg-tile .v { font-size: 17px; }
+  #qiTiles .tg-tile .l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #qiBox > .hint { display: none; }
+  #qiBox > h2 .sum { display: none; }
+}
 #qiTiles .tg-tile { cursor: pointer; text-align: left; }
 #statsBox { max-width: 1280px; margin: 0 auto; }
 .st-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 12px 0; }
