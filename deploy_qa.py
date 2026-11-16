@@ -5,7 +5,7 @@ Chạy sau mỗi lần merge_to_dev (12h / 18h), hoặc tay: deploy_qa.py [--dry
 
 1. Có gì mới: FE = commit trên origin/dev-ss sau commit "update version" gần nhất; BE = commit của origin/develop-ss
    chưa có trong origin/release-ss/lastest-k8s.
-2. FE: worktree dev-ss → ./build-and-deploy.sh dev → commit "update version <VERSION>" lên dev-ss → soar-fe-ss.tar lên
+2. FE: worktree dev-ss → ./build-and-deploy.sh dev (gắn git tag v<VERSION>) → commit "update version <VERSION>" lên dev-ss → soar-fe-ss-<VERSION>.tar lên
    ~/soar_v2.0/images → docker load → đổi image service soar-fe-nginx trong docker-compose.yml (có backup).
 3. BE: worktree release-ss/lastest-k8s → merge origin/develop-ss, push → docker build soar-be-ss-lastest-k8s:<ngày><a..z>
    → tar lên images → docker load → đổi image service service-product-content (có backup).
@@ -22,6 +22,7 @@ Cấu hình server + tài khoản test: biến DEPLOY_* / QA_* trong .env và/ho
 import argparse
 import fcntl
 import hashlib
+import glob
 import json
 import os
 import re
@@ -1022,6 +1023,18 @@ def _use_fe_image(dcfg, version, logf, changes, old_image=None):
                         "old_image": old_image, "new_image": new_image, "version": version})
 
 
+def _fe_tar(work, dcfg, version=None):
+    """File image tar build-and-deploy.sh tạo: <fe_image>-<version>.tar (từ 11/2026), bản script cũ <fe_image>.tar.
+    Không biết version → file tar mới nhất khớp mẫu. Không có → None."""
+    base = os.path.join(work, dcfg["fe_image"])
+    if version and os.path.exists("%s-%s.tar" % (base, version)):
+        return "%s-%s.tar" % (base, version)
+    found = sorted(glob.glob(base + "-*.tar"), key=os.path.getmtime)
+    if found and not version:
+        return found[-1]
+    return base + ".tar" if os.path.exists(base + ".tar") else None
+
+
 def deploy_fe(acfg, dcfg, root, logf, changes=None, pin_version=None, old_image=None):
     """Build FE từ origin/<fe_upstream>, commit "update version X", docker load lên server, ghi compose (rollout sau).
     pin_version: build lại đúng bản X đã có commit "update version X" (recover_fe) — không tạo commit mới."""
@@ -1031,7 +1044,6 @@ def deploy_fe(acfg, dcfg, root, logf, changes=None, pin_version=None, old_image=
     try:
         os.symlink(os.path.join(repo, "node_modules"), os.path.join(work, "node_modules"))
         shutil.copy(os.path.join(repo, ".env.deploy"), os.path.join(work, ".env.deploy"))
-        tar = os.path.join(work, "%s.tar" % dcfg["fe_image"])
         env = af.build_env(acfg)
         # Version do build-and-deploy.sh tự tính: MAJOR ghi cứng trong script của từng nhánh (otp 1, dev-ss 2),
         # MINOR/PATCH theo commit kể từ "update version" gần nhất.
@@ -1043,11 +1055,14 @@ def deploy_fe(acfg, dcfg, root, logf, changes=None, pin_version=None, old_image=
         except RuntimeError as ex:
             # Bước cuối của script là deploy sang host cũ (.168) bằng ssh key: lỗi ở đó không chặn deploy lên 86
             # nếu image tar + version đã tạo xong.
-            if not os.path.exists(tar):
+            if not _fe_tar(work, dcfg):
                 raise
             log("FE: build-and-deploy.sh lỗi ở bước sau khi tạo image (%s) — vẫn deploy lên 86" % str(ex)[:200])
         with open(os.path.join(work, "build_dev", "version-tags.json"), encoding="utf-8") as f:
             version = json.load(f)["SS"]["dev"]["version"]
+        tar = _fe_tar(work, dcfg, version)
+        if not tar:
+            raise RuntimeError("FE: không thấy file image tar sau khi build bản %s" % version)
         if pin_version:
             if version != pin_version:
                 raise RuntimeError("FE: build lại ra bản %s, không phải %s — không deploy" % (version, pin_version))
