@@ -354,6 +354,8 @@ python3 qa_issues.py --prune         # xoá sự cố cũ hơn 180 ngày
 
 Báo cáo Markdown tự cập nhật sau mỗi lượt deploy / QA: bảng theo loại (số lần, lần cuối, nguyên nhân, ticket) +
 gợi ý cải thiện cho từng loại + các lỗi khác nhau gần nhất.
+Trang theo dõi: tab Ticket → danh sách Hoạt động → bộ lọc **Sự cố QA** (30 ngày); bấm một sự cố để xem chi tiết
+(lỗi, gợi ý, traceback / rule) và bảng tổng hợp 14 ngày bên dưới.
 
 ## Nhiều gói Claude + trang theo dõi (op_dashboard.py)
 

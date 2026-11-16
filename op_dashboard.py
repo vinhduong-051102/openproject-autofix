@@ -35,6 +35,7 @@ import envconf  # noqa: E402
 import op_autofix as af  # noqa: E402
 import op_watch  # noqa: E402
 import cherry  # noqa: E402  gắp commit sang nhánh khác
+import qa_issues  # noqa: E402  nhật ký sự cố QA test / QA server
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACTIVE_STATES = ("queued", "preparing", "running", "shipping")
@@ -283,6 +284,58 @@ def qa_runs(root, cfg, merge_running, n=15):
     return out
 
 
+def qa_issue_list(n=40, days=30):
+    """Sự cố QA test / QA server gần nhất (qa_issues.jsonl), mới nhất trước; key = vị trí dòng trong file."""
+    items = qa_issues.load()
+    since = time.time() - days * 86400
+    out = []
+    for i in range(len(items) - 1, -1, -1):
+        it = items[i]
+        try:
+            at = time.mktime(time.strptime(it.get("at", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            continue
+        if at < since:
+            continue
+        info = qa_issues.KINDS.get(it.get("kind"), qa_issues.KINDS["other"])
+        out.append({"key": str(i), "at": at, "phase": it.get("phase") or info[0], "kind": it.get("kind"),
+                    "label": info[1], "cause": it.get("cause") or "", "ticket": it.get("ticket") or "",
+                    "msg": it.get("msg") or ""})
+        if len(out) >= n:
+            break
+    return out
+
+
+def qa_issue_report(key):
+    """Chi tiết một sự cố (Markdown) + tổng hợp 14 ngày bên dưới."""
+    items = qa_issues.load()
+    if not key.isdigit() or int(key) >= len(items):
+        return "Không tìm thấy sự cố.\n\n---\n\n" + qa_issues.summary_md(14)
+    it = items[int(key)]
+    info = qa_issues.KINDS.get(it.get("kind"), qa_issues.KINDS["other"])
+    lines = ["## %s" % info[1], "",
+             "- Thời điểm: %s" % it.get("at", "").replace("T", " "),
+             "- Nhóm: %s · loại `%s`%s" % ("QA server" if (it.get("phase") or info[0]) == "server" else "QA test",
+                                         it.get("kind"), " · nguyên nhân `%s`" % it["cause"] if it.get("cause") else "")]
+    if it.get("ticket"):
+        lines.append("- Ticket: %s" % it["ticket"])
+    if it.get("build"):
+        lines.append("- Bản build: %s" % it["build"])
+    if it.get("path"):
+        lines.append("- Log / thư mục: `%s`" % it["path"])
+    lines += ["", "**Lỗi:** %s" % it.get("msg", "")]
+    if info[2]:
+        lines += ["", "**Gợi ý cải thiện:** %s" % info[2]]
+    for k, v in (it.get("extra") or {}).items():
+        if k == "source":
+            continue
+        text = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+        names = {"reason": "Nguyên nhân (Claude)", "rules": "Rule cho QA", "traceback": "Traceback", "stderr": "stderr Gemini",
+                 "detail": "Chi tiết lỗi", "tickets": "Ticket bị ảnh hưởng", "latest": "Bản mới nhất", "engine": "Công cụ QA"}
+        lines += ["", "**%s**" % names.get(k, k), "```", text.replace("```", "ˋˋˋ")[-3000:], "```"]
+    return "\n".join(lines) + "\n\n---\n\n" + qa_issues.summary_md(14)
+
+
 def merge_runs(cfg, merge_running, n=12):
     """Các lượt merge + deploy (dòng MERGE DEV trong inbox, kèm các dòng DEPLOY 86 sau nó)."""
     path = os.path.expanduser(cfg.get("inbox") or "")
@@ -366,7 +419,8 @@ def jobs():
         pass
     merge_running = any(j["key"] == "merge" and j["active"] == "activating" for j in out)
     data = {"jobs": out, "qa_pending": qa, "conflicts": conflict_runs(root),
-            "qa_runs": qa_runs(root, cfg, merge_running), "merge_runs": merge_runs(cfg, merge_running)}
+            "qa_runs": qa_runs(root, cfg, merge_running), "merge_runs": merge_runs(cfg, merge_running),
+            "qa_issues": qa_issue_list()}
     _JOB_CACHE.update(at=time.time(), data=data)
     return data
 
@@ -1433,6 +1487,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, compose_log(int(q.get("from", "0") or 0)))
             if url.path == "/api/qa":
                 return self.send(200, {"text": qa_report(q.get("name", ""))})
+            if url.path == "/api/qa_issue":
+                return self.send(200, {"text": qa_issue_report(q.get("key", ""))})
             if url.path == "/api/taskdraft":
                 import task_create
                 if q.get("id"):

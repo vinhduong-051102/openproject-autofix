@@ -1277,7 +1277,7 @@ function renderLimitsBox() {
 }
 // ---- Hoạt động: mọi job (autofix, QA, merge/deploy, gỡ xung đột) trong một danh sách ----
 let filter = "all", selKind = "run", selKey = null, otherText = "", otherKey = "";
-const KIND = {run: "Autofix", qa: "QA 86", merge: "Merge", conf: "Xung đột"};
+const KIND = {run: "Autofix", qa: "QA 86", merge: "Merge", conf: "Xung đột", issue: "Sự cố"};
 const pad = (n) => String(n).padStart(2, "0");
 const when = (t) => { if (!t) return ""; const d = new Date(t * 1000); return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const ts = (s) => typeof s === "number" ? s : s ? Date.parse(s) / 1000 : 0;
@@ -1311,6 +1311,9 @@ function activities() {
   (S.conflicts || []).forEach((c) => out.push({kind: "conf", key: c.name, id: c.name.replace("conflict-", ""),
     badge: /ĐÃ GỠ/.test(c.verdict) ? "Đã gỡ" : "Không gỡ được", cls: /ĐÃ GỠ/.test(c.verdict) ? "ok" : "crit",
     at: c.at, when: when(c.at), sub: c.verdict}));
+  (S.qa_issues || []).forEach((x) => out.push({kind: "issue", key: x.key, id: x.ticket || (x.phase === "server" ? "Server 86" : "QA"),
+    badge: x.label, cls: x.phase === "server" ? "crit" : "warn", at: x.at, when: when(x.at),
+    sub: [x.msg, x.cause ? "nguyên nhân: " + x.cause : ""].filter(Boolean).join(" · ")}));
   return out.sort((a, b) => (b.live - a.live) || (b.at - a.at));
 }
 function renderActs() {
@@ -1319,7 +1322,7 @@ function renderActs() {
   all.forEach((a) => { counts[a.kind] = (counts[a.kind] || 0) + 1; });
   const live = all.filter((a) => a.live).length;
   $("actCount").textContent = live ? `${live} đang chạy` : "không có job đang chạy";
-  $("filters").innerHTML = [["all", "Tất cả"], ["run", "Autofix"], ["qa", "QA 86"], ["merge", "Merge/Deploy"], ["conf", "Xung đột"]]
+  $("filters").innerHTML = [["all", "Tất cả"], ["run", "Autofix"], ["qa", "QA 86"], ["merge", "Merge/Deploy"], ["conf", "Xung đột"], ["issue", "Sự cố QA"]]
     .filter(([k]) => k === "all" || counts[k])
     .map(([k, l]) => `<button class="${filter === k ? "on" : ""}" data-filter="${k}">${l}<small>${counts[k] || 0}</small></button>`).join("");
   const list = all.filter((a) => filter === "all" || a.kind === filter).slice(0, 80);
@@ -1422,6 +1425,11 @@ async function renderOther(reload) {
     head = `<h3>${esc(r.display_id)} <span class="badge ${qaCls(r)}">${esc(r.state === "running" ? "Đang test" : r.verdict)}</span></h3>
       <div class="verdict">QA trên server 86 · ${fmtTime(r.at)}${r.rounds ? ` · ${r.rounds} vòng Gemini` : ""}</div>`;
     url = "/api/qa?name=" + encodeURIComponent(r.name);
+  } else if (selKind === "issue") {
+    const x = (S.qa_issues || []).find((i) => i.key === selKey); if (!x) return;
+    head = `<h3>${esc(x.ticket || (x.phase === "server" ? "Server 86" : "QA"))} <span class="badge ${x.phase === "server" ? "crit" : "warn"}">${esc(x.label)}</span></h3>
+      <div class="verdict">Sự cố ${x.phase === "server" ? "QA server" : "QA test"} · ${fmtTime(x.at)}${x.cause ? " · nguyên nhân " + esc(x.cause) : ""}</div>`;
+    url = "/api/qa_issue?key=" + encodeURIComponent(x.key);
   } else if (selKind === "conf") {
     const c = (S.conflicts || []).find((x) => x.name === selKey); if (!c) return;
     head = `<h3>Gỡ xung đột <span class="badge ${/ĐÃ GỠ/.test(c.verdict) ? "ok" : "crit"}">${esc(c.verdict.replace("KẾT QUẢ: ", ""))}</span></h3>
