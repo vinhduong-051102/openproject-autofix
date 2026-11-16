@@ -968,7 +968,10 @@ def fe_drift(acfg, dcfg, fp=None, fetch=False):
     running = (fp if fp is not None else fingerprint(dcfg)).get("fe")
     if not running or running == latest:
         return None
-    if _vkey(running) and _vkey(latest) and _vkey(running) > _vkey(latest):
+    rk, lk = _vkey(running), _vkey(latest)
+    # Đổi quy tắc version (11/2026): 4 số cũ (2.0.34.133) → SemVer 3 số đánh lại từ 2.0.0 — bản 4 số luôn là bản cũ hơn
+    legacy = rk is not None and lk is not None and len(rk) == 4 and len(lk) == 3
+    if rk and lk and rk > lk and not legacy:
         return None  # server chạy bản mới hơn dev-ss (deploy tay?) — không tự hạ bản
     return {"running": running, "latest": latest, "branch": acfg["fe_upstream"]}
 
@@ -987,7 +990,8 @@ def fresh_worktree(repo, path, ref):
 
 
 def _prev_version(version):
-    """Bản ngay trước version theo cách build-and-deploy.sh tăng số (A.B.C.D → D-1, A.B.C → C-1). Không lùi được → None."""
+    """Bản ngay trước version theo cách tăng số cũ của build-and-deploy.sh (A.B.C.D → D-1, A.B.C → C-1).
+    Chỉ dùng cho script cũ chưa hỗ trợ BUILD_VERSION. Không lùi được → None."""
     parts = (version or "").split(".")
     if len(parts) not in (3, 4) or not all(p.isdigit() for p in parts) or int(parts[-1]) < 1:
         return None
@@ -995,10 +999,11 @@ def _prev_version(version):
 
 
 def _pin_version(work, version):
-    """Ghi bản trước version vào build_dev/version-tags.json của worktree để build-and-deploy.sh tăng ra đúng version."""
+    """Ghi bản trước version vào build_dev/version-tags.json của worktree để build-and-deploy.sh (bản cũ) tăng ra đúng
+    version. Script mới (SemVer 3 số) nhận thẳng env BUILD_VERSION nên lùi không được (vd 2.1.0) thì bỏ qua."""
     prev = _prev_version(version)
     if not prev:
-        raise RuntimeError("FE: không build lại được đúng bản %s (dạng version lạ) — cần deploy FE tay" % version)
+        return
     path = os.path.join(work, "build_dev", "version-tags.json")
     with open(path, encoding="utf-8") as f:
         tags = json.load(f)
@@ -1027,10 +1032,15 @@ def deploy_fe(acfg, dcfg, root, logf, changes=None, pin_version=None, old_image=
         os.symlink(os.path.join(repo, "node_modules"), os.path.join(work, "node_modules"))
         shutil.copy(os.path.join(repo, ".env.deploy"), os.path.join(work, ".env.deploy"))
         tar = os.path.join(work, "%s.tar" % dcfg["fe_image"])
+        env = af.build_env(acfg)
+        # Worktree ở HEAD tách rời: báo tên nhánh để script chọn dòng version (otp → 1.x.x, dev-ss → 2.x.x);
+        # mức tăng MAJOR/MINOR/PATCH script tự xét theo commit kể từ "update version" gần nhất.
+        env["BUILD_BRANCH"] = dev
         if pin_version:
             _pin_version(work, pin_version)
+            env["BUILD_VERSION"] = pin_version
         try:
-            sh(["bash", "./build-and-deploy.sh", "dev"], cwd=work, logf=logf, env=af.build_env(acfg))
+            sh(["bash", "./build-and-deploy.sh", "dev"], cwd=work, logf=logf, env=env)
         except RuntimeError as ex:
             # Bước cuối của script là deploy sang host cũ (.168) bằng ssh key: lỗi ở đó không chặn deploy lên 86
             # nếu image tar + version đã tạo xong.
