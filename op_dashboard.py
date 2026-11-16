@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envconf  # noqa: E402
 import op_autofix as af  # noqa: E402
 import op_watch  # noqa: E402
+import cherry  # noqa: E402  gắp commit sang nhánh khác
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACTIVE_STATES = ("queued", "preparing", "running", "shipping")
@@ -143,6 +144,7 @@ def state():
         "gemini": gemini_usage(), "parallel": parallel_settings(acfg), "review_queue": review_queue(),
         "running_now": sum(1 for r in runs if r["state"] in ("preparing", "running", "shipping")),
         "projects": projects_brief(cfg),
+        "picks": cherry.picks(root),
     }
 
 
@@ -1256,6 +1258,43 @@ def action(body):
         if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):
             raise ValueError("mã ticket không hợp lệ")
         return cancel_run(root, display_id)
+    if kind == "pick_start":
+        # Gắp commit của ticket sang nhánh khác (cherry.py chạy nền; trạng thái trong ~/autofix/.picks).
+        display_id = body.get("display_id") or ""
+        if not re.match(r"^%s$" % envconf.TICKET_RX, display_id):
+            raise ValueError("mã ticket không hợp lệ")
+        branches = [str(b) for b in (body.get("branches") or []) if cherry.BRANCH_RX.match(str(b))]
+        if not branches:
+            raise ValueError("chưa chọn nhánh đích")
+        if len(branches) > cherry.MAX_BRANCHES:
+            raise ValueError("tối đa %d nhánh một lượt" % cherry.MAX_BRANCHES)
+        import repos as R
+        repo = R.find(af.ticket_acfg(acfg, display_id), str(body.get("repo") or ""))
+        if not repo:
+            raise ValueError("repo không hợp lệ")
+        if repo["branch"] in branches:
+            raise ValueError("%s là nhánh làm việc của %s" % (repo["branch"], repo["label"]))
+        for p in cherry.picks(root, 100):
+            if p["display_id"] == display_id and p["state"] == "running":
+                raise ValueError("%s đang có lượt gắp chạy (%s)" % (display_id, p["name"]))
+        s = find_run(root, display_id) or {}
+        wp_id = str(s.get("wp_id") or inbox_wp_ids(cfg).get(display_id) or body.get("wp_id") or "")
+        name = "%s-pick-%s" % (display_id, datetime.now().strftime("%m%d-%H%M%S"))
+        pdir = os.path.join(root, cherry.PICKS, name)
+        os.makedirs(pdir, exist_ok=True)
+        args = [sys.executable, os.path.join(HERE, "cherry.py"), "--ticket", display_id, "--repo", repo["key"],
+                "--branches", ",".join(branches), "--name", name]
+        if wp_id.isdigit():
+            args += ["--wp", wp_id]
+        if not body.get("push", True):
+            args.append("--no-push")
+        if not body.get("comment", True):
+            args.append("--no-comment")
+        with open(os.path.join(pdir, "spawn.log"), "a", encoding="utf-8") as out:
+            subprocess.Popen(args, cwd=HERE, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+        return "Đang gắp %s (%s) sang %s%s" % (display_id, repo["label"], ", ".join(branches),
+                                                "" if body.get("push", True) else " · không push")
     if kind == "run_wp":
         # Nút "Chạy" ở danh sách ticket OpenProject: lượt MANUAL cho work package bất kỳ (kể cả mã nhỏ hơn
         # min_ticket_number — ngưỡng đó chỉ áp cho lượt tự động). Đang chạy / đang xếp hàng thì từ chối.
@@ -1334,6 +1373,25 @@ class Handler(BaseHTTPRequestHandler):
                                                 q.get("project", ""), q.get("refresh") == "1"))
             if url.path == "/api/joblog":
                 return self.send(200, {"text": job_log(q.get("key", ""))})
+            if url.path == "/api/pick/options":
+                tid = q.get("ticket", "")
+                if not re.match(r"^%s$" % envconf.TICKET_RX, tid):
+                    return self.send(400, {"error": "mã ticket không hợp lệ"})
+                _, acfg_, _ = load()
+                try:
+                    return self.send(200, {"repos": cherry.options(af.ticket_acfg(acfg_, tid), tid)})
+                except Exception as e:  # noqa: BLE001
+                    return self.send(500, {"error": str(e)[:300]})
+            if url.path == "/api/pick/log":
+                name = q.get("name", "")
+                if not re.match(r"^%s-pick-[\w-]+$" % envconf.TICKET_RX, name):
+                    return self.send(400, {"error": "tên không hợp lệ"})
+                path = os.path.join(load()[2], cherry.PICKS, name, "log.txt")
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        return self.send(200, f.read()[-200000:], "text/plain; charset=utf-8")
+                except OSError:
+                    return self.send(404, {"error": "chưa có log"})
             if url.path == "/api/op":
                 return self.send(200, op_work_packages(q.get("scope", "mine"), q.get("status", "open"), q.get("q", ""),
                                                        q.get("page", "1") or 1, q.get("refresh") == "1",
@@ -1476,7 +1534,7 @@ _OP_CACHE = {}
 
 # Thao tác từ trang có ghi lên OpenProject → xoá cache đọc OpenProject (danh sách ticket, trạng thái ticket trong mục
 # Telegram / Xin ý kiến) để lần tải ngay sau đó lấy dữ liệu mới.
-OP_WRITE_ACTIONS = {"task_create", "task_split_create", "rerun", "assist", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
+OP_WRITE_ACTIONS = {"task_create", "task_split_create", "pick_start", "rerun", "assist", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
                     "tg_approve", "tg_link", "tg_retry", "tg_ask_reopen", "tg_ask_resolve", "tg_triage"}
 
 

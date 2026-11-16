@@ -545,6 +545,18 @@ table.tg-chats select { max-width: 220px; }
 #runModal .modal-box { width: min(1100px, 100%); height: 96vh; display: flex; flex-direction: column; padding: 10px 16px 16px; overflow: hidden; }
 #runModal .rc-bar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
 #runModal > .modal-box > #detail { flex: 1 1 auto; min-height: 0; }
+#pickModal { z-index: 30; }  /* nổi trên hộp chi tiết lượt chạy */
+#pickModal .modal-box { width: min(760px, 100%); max-height: 92vh; display: flex; flex-direction: column; }
+#pickBody { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.pick-commits { margin: 0; padding-left: 18px; font-size: 13px; max-height: 120px; overflow: auto; }
+.pick-branches { display: flex; flex-direction: column; gap: 4px; max-height: 38vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.pick-branches label { display: flex; gap: 8px; align-items: center; font-size: 13px; cursor: pointer; }
+#pickBody .row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.picks { margin: 6px 0 2px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.picks .hint { margin: 0; }
+.picks .pick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.picks .pick-br { display: flex; gap: 6px; flex-wrap: wrap; }
+.picks .crit { color: var(--crit); }
 .op-row .run-badge { cursor: pointer; }
 .op-row .run-badge:hover { filter: brightness(1.2); }
 .op-row .run-note { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }
@@ -744,6 +756,12 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
     </section>
     </div>
   </div>
+<div class="modal" id="pickModal" hidden role="dialog" aria-modal="true" aria-labelledby="pickTitle">
+  <div class="modal-box">
+    <div class="modal-head"><h3 id="pickTitle">Gắp sang nhánh</h3><button class="link ico" id="pickClose" aria-label="Đóng">✕</button></div>
+    <div id="pickBody"><div class="empty">Đang lấy danh sách nhánh…</div></div>
+  </div>
+</div>
 <div class="modal" id="runModal" hidden role="dialog" aria-modal="true" aria-label="Chi tiết lượt autofix">
   <div class="modal-box" id="runBox">
     <div class="rc-bar"><span class="muted" id="runModalSum"></span><button class="link ico" id="backList" title="Đóng (Esc)" aria-label="Đóng">✕</button></div>
@@ -1552,8 +1570,10 @@ function renderDetail() {
       ${ASSIST_RX.test(r.verdict || "") ? `<button id="assist" ${live ? "disabled" : ""} title="Claude gỡ vướng trên đúng lượt này: tải file đính kèm, ticket liên quan, gọi GET API server test; nhập thêm ghi chú hướng dẫn nếu cần">🤝 Claude hỗ trợ</button>` : ""}
       <label class="force" title="Chạy dù gói đã quá ngưỡng 5 giờ / 7 ngày tự đặt. Gói đã hết hạn mức thật thì vẫn không chạy được.">
         <input type="checkbox" id="ignoreLimits"> Bỏ qua ngưỡng hạn mức</label>
+      <button id="pickBtn" title="Cherry-pick các commit của ticket (theo mã ticket trong message) sang nhánh khác của repo, push và ghi comment lên ticket">Gắp sang nhánh…</button>
       ${r.wp_id ? `<a href="${esc(S.op_url)}/work_packages/${esc(r.wp_id)}" target="_blank" rel="noopener"><button>Mở OpenProject ↗</button></a>` : ""}
     </div>
+    <div class="picks" id="picks"></div>
     ${["cancelled", "stale"].includes(r.state) ? `<div class="wip" id="wip">${wipHtml(r)}</div>` : ""}
     <div class="tabs">${tabs.map((t) => `<button class="${t === tab ? "on" : ""}" data-tab="${esc(t)}">${esc(t === "Thao tác" ? "Log thao tác" : t)}</button>`).join("")}</div>
     <div class="diffline" id="diff"></div>
@@ -1566,6 +1586,8 @@ function renderDetail() {
     && post({action: "resume_run", display_id: r.display_id, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked}, e.target);
   if (["cancelled", "stale"].includes(r.state)) loadWip(r);
   if ($("assist")) $("assist").onclick = () => runAssist(r.display_id, $("runProfile").value, $("ignoreLimits").checked);
+  $("pickBtn").onclick = () => openPick(r.display_id, r.wp_id);
+  renderPicks(r.display_id);
   $("review").onclick = () => confirm(`Test lại ${r.display_id}${forceNote()}?`) && post({action: "review", display_id: r.display_id, profile: $("runProfile").value, ignore_limits: $("ignoreLimits").checked});
   paintLog();
 }
@@ -1794,6 +1816,73 @@ const RUN_STATE_VI = {queued: "đang xếp hàng (chưa có agent trống)", pre
 // Nút ▶ Chạy / ■ Huỷ ở từng dòng ticket OpenProject. Ticket đang chạy hoặc đang xếp hàng (hết suất agent): khoá nút
 // Chạy, hiện nút Huỷ. Lượt chạy từ đây là MANUAL nên không bị chặn bởi ngưỡng mã ticket nhỏ (min_ticket_number).
 const LIVE_STATES = ["queued", "preparing", "running", "shipping"];
+// ---- Gắp commit của ticket sang nhánh khác (cherry.py) ----
+const PICK = {id: "", wp: "", data: null, repo: "", q: ""};
+const PICK_ST = {running: ["Đang gắp", "accent"], done: ["Xong", "ok"], error: ["Lỗi", "crit"], stale: ["Bị ngắt", "crit"]};
+const PICK_BR = {ok: "ok", skip: "", conflict: "crit", error: "crit", running: "accent"};
+function renderPicks(displayId) {
+  const box = $("picks"); if (!box) return;
+  const list = ((S && S.picks) || []).filter((p) => p.display_id === displayId).slice(0, 8);
+  const key = list.map((p) => p.name + p.state + (p.results || []).map((r) => r.state).join()).join("|");
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = list.length ? `<div class="hint">Gắp sang nhánh</div>` + list.map((p) => {
+    const [label, cls] = PICK_ST[p.state] || [p.state, ""];
+    return `<div class="pick"><span class="badge ${cls}">${esc(label)}</span> <b>${esc(p.label || p.repo)}</b>
+      <span class="muted">${esc((p.started_at || "").slice(5, 16).replace("T", " "))}${p.commits && p.commits.length ? ` · ${p.commits.length} commit` : ""}${p.push === false ? " · không push" : ""}</span>
+      <a class="ext" href="/api/pick/log?name=${encodeURIComponent(p.name)}" target="_blank" rel="noopener" title="Log lượt gắp">log ↗</a>
+      <div class="pick-br">${(p.results || []).map((r) => `<span class="badge ${PICK_BR[r.state] || ""}" title="${esc(r.message || r.state)}${r.worktree ? " · worktree " + esc(r.worktree) : ""}">${esc(r.branch)}: ${esc(r.state === "ok" ? "đã gắp" : r.state === "skip" ? "đã có" : r.state === "conflict" ? "xung đột" : r.state === "running" ? "đang gắp" : "lỗi")}${r.picked && r.picked.length ? " " + esc(r.picked.join(", ")) : ""}</span>`).join(" ")}
+      ${p.state === "error" && !(p.results || []).length ? `<span class="crit">${esc(p.verdict || "")}</span>` : ""}
+      ${p.comment_error ? `<span class="crit">comment OpenProject lỗi: ${esc(p.comment_error)}</span>` : ""}</div>`;
+  }).join("") : "";
+}
+async function openPick(displayId, wpId) {
+  PICK.id = displayId; PICK.wp = wpId || ""; PICK.data = null; PICK.q = "";
+  $("pickTitle").textContent = "Gắp " + displayId + " sang nhánh";
+  $("pickBody").innerHTML = '<div class="empty">Đang lấy commit và danh sách nhánh (git fetch)…</div>';
+  $("pickModal").hidden = false;
+  let d;
+  try { d = await (await fetch("/api/pick/options?ticket=" + encodeURIComponent(displayId))).json(); }
+  catch (e) { d = {error: "dashboard mất kết nối"}; }
+  if (d.error) { $("pickBody").innerHTML = `<div class="empty crit">${esc(d.error)}</div>`; return; }
+  PICK.data = d.repos;
+  const withCommits = d.repos.filter((r) => (r.commits || []).length);
+  PICK.repo = (withCommits[0] || d.repos[0] || {}).key || "";
+  renderPickBody();
+}
+function renderPickBody() {
+  const repos = PICK.data || [], cur = repos.find((r) => r.key === PICK.repo) || repos[0] || {};
+  const q = PICK.q.trim().toLowerCase();
+  const brs = (cur.branches || []).filter((b) => !q || b.name.toLowerCase().includes(q)).slice(0, 60);
+  $("pickBody").innerHTML = `
+    <div class="seg" id="pickRepo">${repos.map((r) => `<button data-v="${esc(r.key)}" class="${r.key === cur.key ? "on" : ""}" ${r.error ? "disabled" : ""} title="${esc(r.error || ("nhánh làm việc " + r.branch))}">${esc(r.label)} <small>${r.error ? "lỗi" : (r.commits || []).length + " commit"}</small></button>`).join("")}</div>
+    ${cur.error ? `<div class="crit">${esc(cur.error)}</div>` : ""}
+    <div class="hint">Commit của ${esc(PICK.id)} trên <code>origin/${esc(cur.branch || "")}</code> (gắp theo thứ tự cũ → mới):</div>
+    ${(cur.commits || []).length ? `<ul class="pick-commits">${cur.commits.map((c) => `<li><code>${esc(c.short)}</code> ${esc(c.subject)} <span class="muted">${esc(c.at)}</span></li>`).join("")}</ul>`
+      : `<div class="empty">Không có commit nào mang mã ${esc(PICK.id)} trên nhánh này</div>`}
+    <div class="op-bar"><input id="pickQ" type="search" placeholder="Lọc nhánh đích…" value="${esc(PICK.q)}"><span class="muted">${(cur.branches || []).length} nhánh trên origin</span></div>
+    <div class="pick-branches" id="pickBranches">${brs.map((b) => `<label><input type="checkbox" value="${esc(b.name)}" ${PICK.sel && PICK.sel.has(b.name) ? "checked" : ""}> <code>${esc(b.name)}</code>${b.upstream ? ' <span class="badge">upstream</span>' : ""} <span class="muted">${esc(b.at)}</span></label>`).join("") || '<div class="empty">Không có nhánh khớp</div>'}</div>
+    <div class="row">
+      <label><input type="checkbox" id="pickPush" checked> Push lên origin</label>
+      <label><input type="checkbox" id="pickComment" checked ${PICK.wp ? "" : "disabled"}> Ghi comment lên ticket${PICK.wp ? "" : " (không có id work package)"}</label>
+    </div>
+    <div class="row"><button class="primary" id="pickGo" ${(cur.commits || []).length ? "" : "disabled"}>Gắp</button><button class="link" id="pickNo">Huỷ</button>
+      <span class="muted">Xung đột thì giữ worktree để gỡ tay, không push nhánh đó.</span></div>`;
+  PICK.sel = PICK.sel || new Set();
+  $("pickRepo").querySelectorAll("button").forEach((b) => b.onclick = () => { PICK.repo = b.dataset.v; PICK.sel = new Set(); renderPickBody(); });
+  $("pickQ").oninput = () => { PICK.q = $("pickQ").value; const pos = $("pickQ").selectionStart; renderPickBody(); $("pickQ").focus(); $("pickQ").setSelectionRange(pos, pos); };
+  $("pickBranches").querySelectorAll("input").forEach((i) => i.onchange = () => { if (i.checked) PICK.sel.add(i.value); else PICK.sel.delete(i.value); });
+  $("pickNo").onclick = closePick;
+  $("pickGo").onclick = async (e) => {
+    const branches = [...PICK.sel];
+    if (!branches.length) { toast("Chưa chọn nhánh đích", true); return; }
+    const push = $("pickPush").checked;
+    if (!confirm(`Gắp ${(cur.commits || []).length} commit của ${PICK.id} (${cur.label}) sang: ${branches.join(", ")}${push ? "\nSau đó push lên origin." : "\nKhông push."}`)) return;
+    const r = await post({action: "pick_start", display_id: PICK.id, repo: cur.key, branches, push, comment: $("pickComment").checked, wp_id: PICK.wp}, e.target);
+    if (r) { closePick(); setTimeout(refresh, 1500); setTimeout(refresh, 5000); }
+  };
+}
+function closePick() { $("pickModal").hidden = true; PICK.sel = new Set(); }
 function markRunBtns(force) {
   // Lượt mới nhất của mỗi ticket (S.runs đã sắp theo thời gian, lượt đang chạy trước).
   const latest = new Map();
@@ -1808,7 +1897,8 @@ function markRunBtns(force) {
       ? `<button class="link ico" disabled title="${esc(id)} ${esc(RUN_STATE_VI[r.state] || r.state)} (${what})">${r.state === "queued" ? "⏳" : "▶"}</button>
          <button class="link ico act-cancel" data-op-cancel="${esc(id)}" title="Huỷ lượt ${what} ${esc(RUN_STATE_VI[r.state] || r.state)}" aria-label="Huỷ ${esc(id)}">■</button>`
       : `<button class="link ico" data-op-start="${esc(id)}" data-wpid="${esc(el.dataset.wpid)}" title="Chạy autofix cho ${esc(id)} (lượt thủ công, không áp ngưỡng mã ticket)">▶</button>`;
-    el.innerHTML = (r ? `<button class="link ico" data-op-detail="${esc(id)}" title="Báo cáo / log / thao tác của lượt ${esc(r.run_name || "")}" aria-label="Chi tiết lượt chạy ${esc(id)}">📋</button>` : "") + btns;
+    el.innerHTML = (r ? `<button class="link ico" data-op-detail="${esc(id)}" title="Báo cáo / log / thao tác của lượt ${esc(r.run_name || "")}" aria-label="Chi tiết lượt chạy ${esc(id)}">📋</button>` : "") + btns
+      + `<button class="link ico" data-op-pick="${esc(id)}" data-wpid="${esc(el.dataset.wpid)}" title="Gắp commit của ${esc(id)} sang nhánh khác (cherry-pick + push + comment)" aria-label="Gắp ${esc(id)} sang nhánh">⤴</button>`;
     // Huy hiệu trạng thái + kết luận ngắn ở hàng nhãn (sau trạng thái OpenProject).
     const tags = el.closest(".op-row").querySelector(".tags");
     let b = tags.querySelector(":scope > .run-badge"), n = tags.querySelector(":scope > .run-note");
@@ -1824,7 +1914,58 @@ function markRunBtns(force) {
       n.textContent = note.length > 90 ? note.slice(0, 88) + "…" : note; n.title = note;
     } else if (n) n.remove();
   });
-  markQaBadges();
+  markQaBadges(); markPickBadges();
+}
+// Huy hiệu lượt gắp nhánh mới nhất của ticket: ⤴ đang gắp / đã gắp (nhánh) / xung đột / lỗi. Bấm → kết quả + log.
+function markPickBadges() {
+  const latest = new Map();
+  for (const p of (S && S.picks) || []) if (!latest.has(p.display_id)) latest.set(p.display_id, p);
+  document.querySelectorAll("#opList .op-run").forEach((el) => {
+    const id = el.dataset.opRun, p = latest.get(id);
+    const tags = el.closest(".op-row").querySelector(".tags");
+    let b = tags.querySelector(":scope > .pick-badge");
+    if (!p) { if (b) b.remove(); return; }
+    const [label, cls] = PICK_ST[p.state] || [p.state, ""];
+    const brs = (p.results || []).map((r) => r.branch + (r.state === "ok" ? "" : r.state === "skip" ? " (đã có)" : r.state === "conflict" ? " (xung đột)" : r.state === "running" ? "…" : " (lỗi)"));
+    const text = "⤴ " + (p.state === "running" ? "Đang gắp " : p.state === "done" ? "Đã gắp → " : label + " · ") + (brs.join(", ") || (p.branches || []).join(", "));
+    if (!b) {
+      b = document.createElement("span"); b.className = "badge pick-badge run-badge"; b.dataset.opPickres = p.name;
+      const after = tags.querySelector(":scope > .qa-badge") || tags.querySelector(":scope > .run-note") || tags.querySelector(":scope > .run-badge") || tags.children[0];
+      after ? after.insertAdjacentElement("afterend", b) : tags.prepend(b);
+    }
+    b.className = "badge pick-badge run-badge " + cls; b.dataset.opPickres = p.name;
+    b.textContent = text.length > 70 ? text.slice(0, 68) + "…" : text;
+    b.title = (p.label || p.repo) + " · " + (p.started_at || "").slice(5, 16).replace("T", " ") + " · " + (p.verdict || label) + " — bấm xem kết quả";
+  });
+}
+function notifyPicks() {
+  // Thông báo khi một lượt gắp vừa chuyển từ đang chạy sang xong / lỗi (so với lần làm mới trước).
+  const now = new Map(((S && S.picks) || []).map((p) => [p.name, p.state]));
+  if (notifyPicks.prev) for (const [name, st] of now) {
+    const was = notifyPicks.prev.get(name);
+    if (was === "running" && st !== "running") {
+      const p = S.picks.find((x) => x.name === name);
+      toast(`Gắp ${p.display_id} (${p.label || p.repo}): ${p.verdict || st}`, st !== "done");
+    }
+  }
+  notifyPicks.prev = now;
+}
+async function openPickResult(name) {
+  const p = ((S && S.picks) || []).find((x) => x.name === name);
+  if (!p) return;
+  const [label, cls] = PICK_ST[p.state] || [p.state, ""];
+  $("pickTitle").textContent = "Kết quả gắp " + p.display_id + " (" + (p.label || p.repo) + ")";
+  $("pickBody").innerHTML = `<div class="row"><span class="badge ${cls}">${esc(label)}</span><span class="muted">${esc((p.started_at || "").replace("T", " "))}${p.finished_at ? " → " + esc(p.finished_at.slice(11, 19)) : ""}${p.push === false ? " · không push" : ""}${p.commented ? " · đã comment OpenProject" : ""}</span></div>
+    ${(p.commits || []).length ? `<div class="hint">Commit:</div><ul class="pick-commits">${p.commits.map((c) => `<li><code>${esc(c.short)}</code> ${esc(c.subject)}</li>`).join("")}</ul>` : ""}
+    <div class="hint">Nhánh đích:</div>
+    <div class="pick-branches">${(p.results || []).map((r) => `<div><span class="badge ${PICK_BR[r.state] || ""}">${esc(r.state === "ok" ? "đã gắp" : r.state === "skip" ? "đã có" : r.state === "conflict" ? "xung đột" : r.state === "running" ? "đang gắp" : "lỗi")}</span> <code>${esc(r.branch)}</code> ${r.picked && r.picked.length ? "→ " + esc(r.picked.join(", ")) : ""} <span class="muted">${esc(r.message || "")}</span>${r.worktree ? `<div class="muted">worktree: <code>${esc(r.worktree)}</code></div>` : ""}</div>`).join("") || `<div class="crit">${esc(p.verdict || "")}</div>`}</div>
+    ${p.comment_error ? `<div class="crit">Comment OpenProject lỗi: ${esc(p.comment_error)}</div>` : ""}
+    <pre class="log" id="pickLog" style="max-height:32vh;overflow:auto">Đang tải log…</pre>
+    <div class="row"><button class="link" id="pickNo">Đóng</button><a class="ext" href="/api/pick/log?name=${encodeURIComponent(p.name)}" target="_blank" rel="noopener">Mở log ↗</a></div>`;
+  $("pickModal").hidden = false;
+  $("pickNo").onclick = closePick;
+  try { $("pickLog").textContent = await (await fetch("/api/pick/log?name=" + encodeURIComponent(p.name))).text(); }
+  catch (e) { $("pickLog").textContent = "không tải được log"; }
 }
 // Huy hiệu QA trên server test cho từng dòng ticket: 🧪 đang QA (Gemini đang test trên 86), kết luận QA gần nhất
 // (ĐẠT / KHÔNG ĐẠT / …), hoặc vị trí trong hàng chờ QA (Chờ QA / Chưa deploy / Chưa merge). Bấm → báo cáo QA.
@@ -1866,7 +2007,8 @@ async function refresh() {
     $("updated").textContent = "Cập nhật " + new Date().toLocaleTimeString("vi-VN");
     renderChips(); renderAgents(); renderProfiles(); renderSummaries(); renderPending(); renderReview(); renderActs(); renderInbox();
     renderTodo();
-    markAssist(); markRunBtns();
+    markAssist(); markRunBtns(); notifyPicks();
+    if (sel && selKind === "run" && !$("runModal").hidden) renderPicks(sel);
     // Tiến trình nền (autofix push / chuyển trạng thái, QA trên server, gỡ xung đột) vừa xong một lượt → dữ liệu
     // OpenProject đã đổi: tải lại (lần đầu chỉ ghi nhận).
     const sig = (S.runs || []).map((r) => r.display_id + ":" + r.state + ":" + r.updated_at).join("|") + "#" +
@@ -2504,12 +2646,17 @@ $("imgZoom").onclick = () => { $("imgZoom").hidden = true; };
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("splitModal").hidden) { closeSplit(); return; }
+  if (!$("pickModal").hidden) { closePick(); return; }
   if (!$("runModal").hidden) { showRight("list"); return; }
   if (!$("imgZoom").hidden) $("imgZoom").hidden = true; else if (!$("wpModal").hidden) closeWP();
 });
 document.addEventListener("click", (e) => {
   const ext = e.target.closest("[data-ext]");
   if (ext) { e.preventDefault(); e.stopPropagation(); window.open(ext.dataset.ext, "_blank", "noopener"); return; }
+  const pr = e.target.closest("[data-op-pickres]");
+  if (pr) { e.preventDefault(); e.stopPropagation(); openPickResult(pr.dataset.opPickres); return; }
+  const pk = e.target.closest("[data-op-pick]");
+  if (pk) { e.preventDefault(); e.stopPropagation(); openPick(pk.dataset.opPick, pk.dataset.wpid); return; }
   const qb = e.target.closest("[data-op-qa]");
   if (qb) { e.preventDefault(); e.stopPropagation(); showView("ticket"); selectOther("qa", qb.dataset.opQa); return; }
   const dt = e.target.closest("[data-op-detail]");
@@ -3045,6 +3192,8 @@ function showView(v) {
 }
 document.querySelectorAll("nav.views [data-view]").forEach((b) => b.onclick = () => showView(b.dataset.view));
 $("backList").onclick = () => showRight("list");
+$("pickClose").onclick = closePick;
+$("pickModal").addEventListener("click", (e) => { if (e.target === $("pickModal")) closePick(); });
 $("runModal").addEventListener("click", (e) => { if (e.target === $("runModal")) showRight("list"); });
 $("health").onclick = () => showView("system");
 document.addEventListener("click", (e) => { const m = $("menu"); if (m.open && !e.target.closest("#menu")) m.open = false; });
