@@ -125,7 +125,7 @@ AUTOFIX_DEFAULTS = {
     "auto_switch": True,
     "switch_above_7d": 0.95,
     # CẦN QUYẾT ĐỊNH với NGƯỜI QUYẾT: DEV (agent cần hỗ trợ) → tool tự chạy thêm một lượt "Claude hỗ trợ": tải mọi file
-    # đính kèm, ticket liên quan, cho gọi GET API server test (soar_api.py), rồi Claude gỡ vướng và sửa tiếp. Vẫn kẹt
+    # đính kèm, ticket liên quan, cho gọi API server test (soar_api.py, mọi method), rồi Claude gỡ vướng và sửa tiếp. Vẫn kẹt
     # mới chuyển UNREVIEWED. Trang theo dõi có nút chạy lại bước này kèm ghi chú (op_autofix.py --assist RUN).
     "assist_auto": True,
     "assist_max_related": 8,
@@ -3311,7 +3311,7 @@ def report_verdict(report_path):
 
 
 def assist_step(api, cfg, acfg, wp, run_dir, report_text, note=""):
-    """Một lượt Claude hỗ trợ trên worktree của lượt chạy: tải tài liệu, chạy Claude (thêm quyền GET API server test),
+    """Một lượt Claude hỗ trợ trên worktree của lượt chạy: tải tài liệu, chạy Claude (thêm quyền gọi API server test),
     trả (report_text, verdict) mới. Báo cáo cũ giữ ở report-before-assist.md."""
     display_id = wp.get("displayId") or "WP-%s" % wp["id"]
     report = os.path.join(run_dir, "report.md")
@@ -3766,7 +3766,7 @@ def main():
                              "tại rồi Resolved / UNREVIEWED; KHÔNG SỬA ĐƯỢC → comment + UNREVIEWED")
     parser.add_argument("--assist", metavar="RUN",
                         help="Claude hỗ trợ lượt CẦN QUYẾT ĐỊNH (tên thư mục hoặc mã ticket = lượt mới nhất): tải file "
-                             "đính kèm, ticket liên quan, cho GET API server test, gỡ vướng rồi giao như thường")
+                             "đính kèm, ticket liên quan, gọi API server test, gỡ vướng rồi giao như thường")
     parser.add_argument("--note", default="", help="ghi chú / hướng dẫn của dev cho --assist")
     parser.add_argument("--status", action="store_true", help="xem các lượt đang chờ / đang chạy / vừa xong")
     parser.add_argument("--follow", nargs="?", const="", metavar="TICKET",

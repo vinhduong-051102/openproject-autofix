@@ -1295,7 +1295,7 @@ def action(body):
         if prof is None:
             raise ValueError("không có gói dùng được: " + why + ("" if force else " — tick \"Bỏ qua ngưỡng\" để chạy"))
         spawn(["--assist", run_name] + (["--note", note] if note else []) + extra + force, display_id)
-        return "Claude đang hỗ trợ %s (tải file đính kèm, ticket liên quan, GET API server test)%s" % (
+        return "Claude đang hỗ trợ %s (tải file đính kèm, ticket liên quan, gọi API server test)%s" % (
             display_id, " · có ghi chú" if note else "")
     if kind in ("run_wip", "resume_run"):
         display_id = body.get("display_id") or ""

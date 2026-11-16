@@ -1632,7 +1632,7 @@ function renderDetail() {
       ${["cancelled", "stale"].includes(r.state) ? `<button class="primary" id="resumeRun" title="Làm tiếp trên đúng worktree cũ: Claude xem phần đã sửa / commit dở rồi làm tiếp, không làm lại từ đầu">▶ Làm tiếp</button>` : ""}
       <button class="${["cancelled", "stale"].includes(r.state) ? "" : "primary"}" id="rerun" ${live ? "disabled" : ""} title="Lượt mới từ code mới nhất của nhánh — bỏ phần sửa dở của lượt này">Chạy lại autofix</button>
       <button id="review" ${live ? "disabled" : ""} title="Gemini test lại bản đã push, Claude xem lại các ý chưa đạt. Lượt chưa push vì Gemini không chạy được: kiểm tra + Gemini lại trên đúng worktree đó, qua thì push">Test lại</button>
-      ${ASSIST_RX.test(r.verdict || "") ? `<button id="assist" ${live ? "disabled" : ""} title="Claude gỡ vướng trên đúng lượt này: tải file đính kèm, ticket liên quan, gọi GET API server test; nhập thêm ghi chú hướng dẫn nếu cần">🤝 Claude hỗ trợ</button>` : ""}
+      ${ASSIST_RX.test(r.verdict || "") ? `<button id="assist" ${live ? "disabled" : ""} title="Claude gỡ vướng trên đúng lượt này: tải file đính kèm, ticket liên quan, gọi API server test (tự dựng dữ liệu để test); nhập thêm ghi chú hướng dẫn nếu cần">🤝 Claude hỗ trợ</button>` : ""}
       <label class="force" title="Chạy dù gói đã quá ngưỡng 5 giờ / 7 ngày tự đặt. Gói đã hết hạn mức thật thì vẫn không chạy được.">
         <input type="checkbox" id="ignoreLimits"> Bỏ qua ngưỡng hạn mức</label>
       <button id="pickBtn" title="Cherry-pick các commit của ticket (theo mã ticket trong message) sang nhánh khác của repo, push và ghi comment lên ticket">Gắp sang nhánh…</button>
@@ -2509,7 +2509,7 @@ function wpAssistBtn(displayId, status) {
   const r = assistRun(displayId, status);
   if (!r) return "";
   const live = false;
-  return `<button id="wpAssist" ${live ? "disabled" : ""} title="${esc("Lượt " + (r.run_name || "") + ": " + (r.verdict || ""))} — Claude gỡ vướng: tải file đính kèm, ticket liên quan, gọi GET API server test">🤝 Claude hỗ trợ</button>`;
+  return `<button id="wpAssist" ${live ? "disabled" : ""} title="${esc("Lượt " + (r.run_name || "") + ": " + (r.verdict || ""))} — Claude gỡ vướng: tải file đính kèm, ticket liên quan, gọi API server test (tự dựng dữ liệu để test)">🤝 Claude hỗ trợ</button>`;
 }
 function runAssist(displayId, profile, ignoreLimits) {
   const prof = profile || ((S.profiles || []).find((p) => p.active) || {}).name || "";
