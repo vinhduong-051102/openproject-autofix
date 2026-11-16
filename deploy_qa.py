@@ -174,7 +174,7 @@ QA_RULES = os.path.join(envconf.autofix_root(), "qa-rules.md")
 QA_TOOL_ERROR = "(lỗi công cụ QA — QA lại lượt sau)"
 
 
-def load_qa_rules(limit=6000):
+def load_qa_rules(limit=24000):
     """Nội dung qa-rules.md (giữ phần mới nhất nếu quá dài) để chèn vào prompt QA."""
     try:
         with open(QA_RULES, encoding="utf-8") as f:
@@ -270,6 +270,34 @@ Ghi {qa_dir}/qa.md bằng tiếng Việt. Dòng đầu đúng một trong: `QA: 
 vùng) và `- TRƯỚC: {qa_dir}/ticket/images/<id>.png — <chú thích>` (ảnh gốc của tester, nếu có); tối đa 6, không có thì bỏ.
 """
 
+# Quy tắc chống PASS giả / chấm sai (rút từ bộ QA_KIT của tester + các lần QA SAI); cố định trong code, không bị cắt như
+# qa-rules.md. Chèn vào cả prompt QA Gemini lẫn Claude.
+ANTI_FALSE_PASS = """# QUY TẮC CHỐNG PASS GIẢ / CHẤM SAI (BẮT BUỘC)
+1. Kiểm NỘI DUNG, không chỉ mã HTTP: mọi bước kỳ vọng 4xx/5xx mà response là JSON của BE phải xem `data.code` (chuẩn
+   UPPER_SNAKE_CASE, vd RESTRICTED_CASE_FORBIDDEN) và `data.detail`; response chứa tên class Java nội bộ (`com.cyai.`),
+   chữ `Exception` / stack trace → bước đó SAI (lộ thông tin), ghi rõ trong evidence. Trang lỗi HTML của nginx / gateway
+   (không phải JSON của BE) thì chỉ ghi chú, không áp quy tắc data.code.
+2. Luôn có ĐỐI CHỨNG: mỗi bước phủ định (bị chặn, 4xx, danh sách rỗng) đi kèm ít nhất một request hợp lệ trên CÙNG endpoint
+   trả 2xx (body đúng, tài khoản được phép) — để chứng minh 4xx / rỗng là do bản sửa chứ không do request sai. Bug phân
+   quyền / cách ly: cặp tài khoản được thấy → 200 có dữ liệu, tài khoản không được thấy → 403/404 hoặc rỗng.
+3. Body: dựng theo đúng payload màn hình gửi (SEARCH chỗ FE dựng body); bug validate / payload thì thử thêm `{}`, `null`,
+   sai kiểu cho trường bug nêu — `{}` / `null` chỉ kỳ vọng 400 khi body / trường là bắt buộc; body tuỳ chọn mà trả 200 là
+   đúng (dùng làm đối chứng).
+4. Dữ liệu trong ticket có thể đã đổi: GET trạng thái hiện tại của bản ghi ticket nêu TRƯỚC khi test; đã bị xoá / đổi
+   trạng thái thì tìm bản ghi khác còn đúng ĐIỀU KIỆN BAN ĐẦU hoặc tự tạo QA_AUTO_* đúng điều kiện; dữ liệu sẵn có cho
+   nhóm cần kiểm bằng 0 thì tự tạo dữ liệu dương tính — "200, 0 kết quả" không chứng minh được bản sửa.
+5. Verify độc lập: comment "Đạt" / "đã sửa" của dev hay lần verify cũ không phải bằng chứng; tự tái hiện trong lần QA này.
+6. Thao tác ghi kỳ vọng bị từ chối (4xx): GET xác nhận trạng thái khiến nó bị từ chối trước; nếu server lại trả 2xx (đã
+   ghi thật) → ghi id bản ghi vào notes, trả lại / dọn ngay nếu là dữ liệu QA_AUTO_*.
+7. Thao tác chỉ được làm một lần (duyệt, tiếp nhận, tạo trùng…) → gửi 2 request đồng thời (parallel) và kiểm chỉ 1 thành công.
+8. Thay đổi cấu hình / phân quyền / phê duyệt → kiểm thêm nhật ký hoạt động (`log-actions`) có ghi đúng thao tác.
+9. Phạm vi kết luận: KHÔNG ĐẠT khi còn lỗi trên cùng endpoint / chức năng mà KẾT QUẢ MONG ĐỢI của ticket nêu (kể cả biến thể
+   payload ticket gọi chung như "payload không hợp lệ") hoặc trong phạm vi dev cam kết ở comment. Lỗi 4xx / sai logic ở
+   endpoint / chức năng KHÁC → ghi vào notes dạng `LỖI MỚI NGOÀI PHẠM VI: <endpoint> — <hiện tượng> — <request>` để
+   tester tách bug mới, không làm đổi kết luận (riêng HTTP 5xx vẫn theo quy tắc 5xx ở trên).
+"""
+
+
 GEMINI_QA_PROMPT = """KHÔNG dùng bất kỳ công cụ nào (không chạy lệnh, không đọc file, không gọi mạng). Một chương trình khác gọi
 API giúp bạn và gửi lại kết quả ở vòng sau. Việc của bạn chỉ là trả về JSON đúng schema.
 
@@ -361,6 +389,7 @@ Kết thúc (done=true) khi đã đủ bằng chứng, với verdict ĐẠT | KH
 result (ngắn gọn cho tester: đã test gì, kết quả), evidence (request → mã HTTP + phần response quan trọng),
 notes (dữ liệu đã tạo / chưa kiểm tra được). Chưa xong: done=false, verdict=CHƯA, calls = các request tiếp theo.
 
+{anti_false_pass}
 # RULE TỪ CÁC LẦN QA SAI TRƯỚC (BẮT BUỘC TUÂN THEO)
 {qa_rules}
 
@@ -569,7 +598,7 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
     if spec:
         ticket += "\n\n" + spec
     with open(os.path.join(qa_dir, "diff.md"), encoding="utf-8") as f:
-        diff = f.read()[:30000]
+        diff = f.read()[:60000]  # 30000 cắt mất bản sửa lớn; bằng giới hạn bước Gemini xem lại
     if not diff.strip():
         diff = "(Không có commit sửa nào gắn mã ticket — QA kiểm tra hành vi hiện tại trên server theo mô tả + comment của ticket: đã đúng kết quả mong đợi → ĐẠT, chưa đúng → KHÔNG ĐẠT.)"
     schema = os.path.join(qa_dir, "qa-schema.json")
@@ -586,7 +615,7 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
             display_id=display_id, deployed=deployed, api_url=dcfg["api_url"], fe_url=dcfg["fe_url"],
             max_calls=dcfg["qa_calls_per_round"], delete_allow=", ".join(dcfg.get("qa_delete_allow", [])) or "không",
             ticket_accounts=", ".join(dcfg.get("qa_ticket_accounts") or []) or "trống — không dùng",
-            round=rnd, rounds=rounds, ticket=ticket, diff=diff, qa_rules=load_qa_rules(),
+            round=rnd, rounds=rounds, ticket=ticket, diff=diff, qa_rules=load_qa_rules(), anti_false_pass=ANTI_FALSE_PASS,
             last_round=" ĐÂY LÀ VÒNG CUỐI: phải done=true và kết luận." if last else "",
             transcript="\n\n".join(transcript)[-60000:] or "(chưa gọi gì)")
         prompt = prompt.replace("\x00", "")
@@ -2382,7 +2411,8 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
         prompt = QA_PROMPT.format(display_id=display_id, subject=wp.get("subject", ""), deployed=deployed,
                                   qa_dir=qa_dir, soar_api=SOAR_API, fe_url=dcfg["fe_url"], ui_check=UI_CHECK,
                                   ticket_accounts=", ".join(dcfg.get("qa_ticket_accounts") or []) or "trống — không dùng")
-        prompt += "\n\n# RULE TỪ CÁC LẦN QA SAI TRƯỚC (BẮT BUỘC TUÂN THEO)\n" + load_qa_rules()
+        prompt += "\n\n" + ANTI_FALSE_PASS
+        prompt += "\n# RULE TỪ CÁC LẦN QA SAI TRƯỚC (BẮT BUỘC TUÂN THEO)\n" + load_qa_rules()
         with open(os.path.join(qa_dir, "prompt.md"), "w", encoding="utf-8") as f:
             f.write(prompt)
         scope = "/" + qa_dir + "/**"
