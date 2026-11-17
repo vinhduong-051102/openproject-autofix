@@ -291,6 +291,11 @@ luôn ra KHÔNG TỰ TEST ĐƯỢC vì một lượt QA chỉ vài phút (SOAR-1
 restart — có thì bỏ kết quả như cũ) rồi chạy vòng sau. Prompt mỗi vòng có GIỜ HIỆN TẠI. Giới hạn (deploy.json / mặc
 định): `qa_wait_max_minutes` 30 mỗi lần, `qa_wait_total_minutes` 45 mỗi lượt, vòng chờ cộng thêm tối đa
 `qa_wait_extra_rounds` 2. Trong lúc chờ `.qa-active` vẫn còn nên review-watch không chạy chồng.
+`verify_pass` thêm luật: bản sửa BE (file main) thuộc luồng hẹn giờ / cảnh báo / leo thang (Quartz, @Scheduled,
+Escalation, SlaWarning…) VÀ tiêu đề / mô tả ticket nói về SLA / cảnh báo / hẹn giờ / hết hạn, mà lần QA không có WAIT
+(Claude QA: không có `sleep` ≥ 60s) → hạ ĐẠT thành **KHÔNG TỰ TEST ĐƯỢC** (SOAR-1497: Gemini chỉ đọc lại sự việc cũ +
+"không thấy thông báo" rồi kết luận ĐẠT). Sửa kèm `_stem`: `cases` → `case` (trước là `cas`, nên `/api/v1/cases/…` không
+được tính là request liên quan bản sửa).
 
 ## Deploy không dừng trang (deploy_qa.py — DEPLOY_STRATEGY)
 

@@ -2279,8 +2279,10 @@ def _stem(w):
     w = w.lower()
     if w.endswith("ies") and len(w) > 4:
         return w[:-3] + "y"
-    if w.endswith("ses") or w.endswith("xes") or w.endswith("ches") or w.endswith("shes"):
-        return w[:-2]
+    if w.endswith("sses") or w.endswith("xes") or w.endswith("ches") or w.endswith("shes"):
+        return w[:-2]  # processes→process, boxes→box
+    if w.endswith("ses") and len(w) > 4:
+        return w[:-1]  # cases→case, licenses→license, responses→response (trước đây cases→cas: /cases không khớp "case")
     if w.endswith("s") and not w.endswith("ss") and len(w) > 3:
         return w[:-1]
     return w
@@ -2478,9 +2480,54 @@ def verify_pass(text, qa_dir, dcfg=None, start=None, end=None, read_log=None):
             why.append("bản sửa có phần BE nhưng lần QA không có request API nào (ngoài SEARCH mã FE / thao tác UI) "
                        "trả 2xx liên quan tính năng%s — chưa chứng minh BE chạy đúng." % (
                            " (%s)" % ", ".join(sorted(tokens)[:6]) if tokens else ""))
+    if not verdict and time_based(diff_text, qa_dir) and not qa_waited(reqs, qa_dir):
+        verdict = "KHÔNG TỰ TEST ĐƯỢC"
+        reasons.append("chưa chờ tới mốc thời gian")
+        why.append("bản sửa thuộc luồng chạy theo mốc thời gian (cảnh báo / leo thang SLA, job hẹn giờ) nhưng lần QA không "
+                   "tạo dữ liệu rồi chờ tới mốc (wait_minutes) để xem kết quả thật — đọc lại dữ liệu sẵn có / \"không thấy "
+                   "thông báo\" không chứng minh được bản sửa (SOAR-1497).")
     if not verdict:
         return text, []
     return _set_verdict(text, verdict, " ".join(why), "\n\n".join(evidence)), reasons
+
+
+TIME_CODE_RX = re.compile(r"quartz|scheduleJob|JobDetail|TriggerBuilder|@Scheduled|cron|Escalation|SlaWarning|"
+                          r"sla[._-]?warning|SlaJob|WarningJob", re.I)
+TIME_TICKET_RX = re.compile(r"\bSLA\b|cảnh báo|leo thang|hẹn giờ|lịch chạy|định kỳ|hết hạn|quá hạn|tới hạn", re.I)
+
+
+def time_based(diff_text, qa_dir):
+    """Bản sửa BE thuộc luồng chạy theo mốc thời gian VÀ ticket nói về SLA / cảnh báo / hẹn giờ → chỉ test được bằng
+    cách tạo dữ liệu rồi chờ tới mốc. Chỉ xét file main (bỏ test) của các mục "# BE …" trong diff.md."""
+    code, section = [], None
+    for chunk in re.split(r"(?m)^(?=# \S+ [0-9a-f]{7,40}\s*$|diff --git )", diff_text or ""):
+        m = re.match(r"# (\S+) [0-9a-f]{7,40}\s*$", chunk.split("\n", 1)[0])
+        if m:
+            section = m.group(1)
+            continue
+        if section == "BE" and chunk.startswith("diff --git") and "/src/test/" not in chunk.split("\n", 1)[0]:
+            code.append(chunk)
+    if not code or not TIME_CODE_RX.search("\n".join(code)):
+        return False
+    try:
+        with open(os.path.join(qa_dir, "ticket", "ticket.md"), encoding="utf-8", errors="replace") as f:
+            head = f.read()[:6000]  # tiêu đề + mô tả (lịch sử phía sau có thể nhắc SLA ngẫu nhiên)
+    except OSError:
+        return False
+    return bool(TIME_TICKET_RX.search(head))
+
+
+def qa_waited(reqs, qa_dir):
+    """Lần QA có chờ tới mốc không: Gemini có mục WAIT; Claude QA có lệnh sleep ≥ 60 giây."""
+    if any(r["method"] == "WAIT" for r in reqs):
+        return True
+    path = os.path.join(qa_dir, "claude.jsonl")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for m in re.finditer(r"\bsleep\s+(\d+)", f.read()):
+                if int(m.group(1)) >= 60:
+                    return True
+    return False
 
 
 def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None):

@@ -96,3 +96,48 @@ class GeminiLoopWaitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimeBasedPassGuardTest(unittest.TestCase):
+    DIFF = ("# BE a1a11885\n\n"
+            "diff --git a/SOAR/src/main/java/x/facade/impl/CaseFacadeServiceImpl.java b/SOAR/src/main/java/x/facade/impl/CaseFacadeServiceImpl.java\n"
+            "+    cancelSlaWarningJobs(id);\n"
+            "diff --git a/SOAR/src/main/java/x/job/SlaEscalationFireService.java b/SOAR/src/main/java/x/job/SlaEscalationFireService.java\n"
+            "+    if (closed) return; // bỏ cảnh báo SLA\n"
+            "diff --git a/SOAR/src/test/java/x/QuartzTest.java b/SOAR/src/test/java/x/QuartzTest.java\n+ quartz\n")
+    PASS = ("QA: ĐẠT\n\n_QA bằng Gemini (x), 2 request_\n\n## Kết quả\nĐẠT\n\n## Bằng chứng\n-\n\n## Ghi chú\n-\n\n"
+            "## Toàn bộ request\n## GET /api/v1/cases/1594\n(đọc)\n```\nHTTP 200\n{}\n```%s")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        q = self.q = self.tmp.name
+        os.makedirs(os.path.join(q, "ticket"))
+        for rel, text in (("ticket/ticket.md", "# SOAR-1497 Sự việc Hủy vẫn nhận cảnh báo SLA"), ("diff.md", self.DIFF)):
+            with open(os.path.join(q, rel), "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_stem_cases(self):
+        self.assertEqual(D._stem("cases"), "case")
+        self.assertEqual(D._stem("processes"), "process")
+        self.assertEqual(D._stem("histories"), "history")
+        self.assertTrue(D._related("/api/v1/cases/1594", {"case"}))
+
+    def test_pass_without_wait_downgraded(self):
+        text, reasons = D.verify_pass(self.PASS % "", self.q, {"qa_be_log_check": False})
+        self.assertEqual(reasons, ["chưa chờ tới mốc thời gian"])
+        self.assertTrue(text.startswith("QA: KHÔNG TỰ TEST ĐƯỢC"))
+
+    def test_pass_with_wait_kept(self):
+        wait = "\n\n## WAIT 22 phút\n(công cụ đã chờ 17:18:00 → 17:40:00)"
+        text, reasons = D.verify_pass(self.PASS % wait, self.q, {"qa_be_log_check": False})
+        self.assertEqual(reasons, [])
+
+    def test_not_time_based_when_only_tests_or_ticket_unrelated(self):
+        self.assertFalse(D.time_based("# BE abcdef1\n\ndiff --git a/SOAR/src/test/java/x/QuartzTest.java b/y\n+ quartz\n",
+                                      self.q))
+        with open(os.path.join(self.q, "ticket", "ticket.md"), "w", encoding="utf-8") as f:
+            f.write("# SOAR-1 Đổi màu nút")
+        self.assertFalse(D.time_based(self.DIFF, self.q))
