@@ -127,6 +127,8 @@ AUTOFIX_DEFAULTS = {
     # CẦN QUYẾT ĐỊNH với NGƯỜI QUYẾT: DEV (agent cần hỗ trợ) → tool tự chạy thêm một lượt "Claude hỗ trợ": tải mọi file
     # đính kèm, ticket liên quan, cho gọi API server test (soar_api.py, mọi method), rồi Claude gỡ vướng và sửa tiếp. Vẫn kẹt
     # mới chuyển UNREVIEWED. Trang theo dõi có nút chạy lại bước này kèm ghi chú (op_autofix.py --assist RUN).
+    # CẦN TEST TAY (có server test) cũng tự chạy bước này trước: Claude tự test trên server, đúng → "Đã được sửa sẵn" /
+    # ĐÃ SỬA; chỉ khi vẫn không test được mới comment "Cần test tay" + UNREVIEWED (và ghi sự cố qa_manual).
     "assist_auto": True,
     "assist_max_related": 8,
     # Ticket dạng CÂU HỎI / "kiểm tra, làm rõ chức năng" (không nêu lỗi cụ thể): Claude đọc code trả lời, KHÔNG sửa
@@ -3354,9 +3356,26 @@ def assist_step(api, cfg, acfg, wp, run_dir, report_text, note=""):
     return text, verdict
 
 
+def server_api_ok():
+    """Có server test để bước hỗ trợ gọi API / ui_check không (soar_api.py + api_url của dự án)."""
+    try:
+        dcfg = envconf.deploy_config()
+    except Exception:  # noqa: BLE001
+        return False
+    return os.path.exists(SOAR_API) and bool(dcfg.get("api_url"))
+
+
 def wants_assist(acfg, verdict, report_text):
-    return bool(acfg.get("assist_auto", True)) and verdict.startswith("CẦN QUYẾT ĐỊNH") \
-        and review_decider(report_text)[0] == "dev"
+    if not acfg.get("assist_auto", True):
+        return False
+    if verdict.startswith("CẦN QUYẾT ĐỊNH"):
+        return review_decider(report_text)[0] == "dev"
+    # CẦN TEST TAY: tự test trên server test TRƯỚC khi comment "[Cần duyệt] Cần test tay" + UNREVIEWED. Trước đây phải
+    # bấm "Claude hỗ trợ tiếp" (SOAR-1100: lỗi đã được sửa sẵn → 6 phút sau đổi thành "Đã được sửa sẵn", tester thấy 2
+    # comment trái nhau; sự cố "Cần test tay" vẫn đếm trong tab). Chỉ khi có server test để gọi API.
+    if verdict.startswith("CẦN TEST TAY"):
+        return server_api_ok()
+    return False
 
 
 def assist_run(cfg, acfg, run_name, note="", profile=None):

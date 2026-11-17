@@ -568,3 +568,7 @@ Telegram: không chia sẻ / commit; thu hồi ở Telegram → Settings → Dev
   `qa_wait_deploy_minutes` (40). Quá giờ vẫn chạy (lượt QA cũ tự dừng vì server đổi) và ghi sự cố.
 - **"QA trên server" khi server chưa có bản sửa**: vẫn QA, nhưng KHÔNG ĐẠT / KHÔNG TỰ TEST ĐƯỢC không tính vào bộ đếm,
   không giao Claude kiểm chứng, không comment / đổi ticket (sự cố `qa_fix_not_deployed`).
+- **CẦN TEST TAY tự chạy bước Claude hỗ trợ trước** (`wants_assist`, khi dự án có server test): Claude tự test trên
+  server (API / ui_check); đúng → "Đã được sửa sẵn" / ĐÃ SỬA, Resolved + giao QA; vẫn không test được mới comment
+  "[Cần duyệt] Cần test tay" + UNREVIEWED và ghi sự cố `qa_manual`. Trước đây phải bấm "Claude hỗ trợ tiếp" (SOAR-1100:
+  tester thấy "Cần test tay" rồi 6 phút sau "Đã được sửa sẵn"; tab Sự cố QA đếm cả ca đã tự gỡ). Tắt: `assist_auto`.
