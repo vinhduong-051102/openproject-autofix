@@ -93,6 +93,9 @@ DEFAULTS = {
     "qa_wait_max_minutes": 30,
     "qa_wait_total_minutes": 45,
     "qa_wait_extra_rounds": 2,
+    # Ticket theo mốc thời gian (time_based): chuỗi tạo dữ liệu → thao tác → chờ → đọc kết quả cần nhiều vòng hơn
+    # (SOAR-1497: 6 vòng hết khi còn đang dò API, chưa kịp tạo sự việc).
+    "qa_rounds_time_based": 10,
     # tài khoản tester được phép dùng khi ticket ghi sẵn tên + mật khẩu (vd tài khoản tenancy con) — đặt trong
     # deploy.json "qa_ticket_accounts" hoặc QA_TICKET_ACCOUNTS (cách nhau dấu phẩy) trong .env
     "qa_ticket_accounts": [],
@@ -398,6 +401,11 @@ lẫn kết quả mong đợi, mô tả mâu thuẫn với comment, hoặc khôn
 gọi request), kết luận KHÔNG RÕ YÊU CẦU; phần kết quả nêu cụ thể điểm nào chưa rõ và 1-3 câu hỏi cần tester / BA trả lời.
 Chỉ dùng khi thật sự không suy ra được; thiếu vài chi tiết nhưng vẫn kiểm tra được theo diff + ticket thì vẫn test.
 
+LÀM THEO HƯỚNG DẪN CÓ SẴN: ticket có comment "[QA tự động] … chưa chính xác" kèm "Cách test lại" / "Cách test đúng"
+(Claude đã kiểm chứng trên mã + server) → làm ĐÚNG các bước đó ngay từ vòng 1 (cùng endpoint, body, dữ liệu, thứ tự), không
+dò lại từ đầu. TIẾT KIỆM VÒNG: mỗi vòng dùng đủ số request cho phép; tra API theo đường dẫn / từ khoá cụ thể
+("swap-solution", "PUT /api/v1/cases"), không tra theo tên class; biết đủ endpoint thì tạo dữ liệu ngay trong vòng đó.
+
 CHỜ THEO THỜI GIAN (wait_minutes): tính năng chỉ xảy ra khi tới một mốc giờ (cảnh báo / leo thang SLA trước-sau hạn,
 job hẹn giờ, lịch chạy, hết hạn token / phiên…) thì KHÔNG kết luận "chưa phát sinh / cần cron / cần người test" mà:
 (1) tạo dữ liệu QA_AUTO_* với mốc NGẮN NHẤT có thể (cấu hình sẵn có đơn vị phút, hoặc tự tạo cấu hình phút), (2) đọc
@@ -689,6 +697,8 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
     transcript, answer = [], {}
     dcfg = dict(dcfg, _be_repo=acfg.get("be_repo"))  # cho request API (tra endpoint BE) + gợi ý khi 400/404/405
     rounds = dcfg["qa_rounds"]
+    if time_based(diff, qa_dir):
+        rounds = max(rounds, int(dcfg.get("qa_rounds_time_based") or rounds))
     wait_max = float(dcfg.get("qa_wait_max_minutes") or 0)
     wait_total = float(dcfg.get("qa_wait_total_minutes") or 0)
     wait_extra = int(dcfg.get("qa_wait_extra_rounds") or 0)

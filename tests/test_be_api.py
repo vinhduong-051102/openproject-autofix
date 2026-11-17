@@ -57,6 +57,22 @@ public class CaseSearch {
   private int page;
 }
 '''
+SLACK = '''package x;
+@RestController
+@RequestMapping("/api/slack")
+public class SlackController {
+  @PostMapping("/dm")
+  public Object dm() { return null; }
+}
+'''
+WARN = '''package x;
+@RestController
+@RequestMapping("/api/v1/sla-warnings")
+public class SLAWarningController {
+  @PostMapping("/filter")
+  public Object filter() { return null; }
+}
+'''
 ENUM = '''package x;
 public enum Kind { A, B("b"), C; Kind() {} Kind(String s) {} }
 '''
@@ -72,7 +88,8 @@ class BeApiTest(unittest.TestCase):
         base = os.path.join(repo, "SOAR/src/main/java/x")
         os.makedirs(base)
         for name, src in (("CaseController", CONTROLLER), ("SwapUserImplement", DTO_SWAP), ("CaseRequest", DTO_CASE),
-                          ("CaseSearch", DTO_SEARCH), ("Kind", ENUM)):
+                          ("CaseSearch", DTO_SEARCH), ("Kind", ENUM), ("SlackController", SLACK),
+                          ("SLAWarningController", WARN)):
             with open(os.path.join(base, name + ".java"), "w") as f:
                 f.write(src)
         run = lambda *a: subprocess.run(["git", "-C", repo] + list(a), check=True, stdout=subprocess.DEVNULL)
@@ -117,6 +134,16 @@ class BeApiTest(unittest.TestCase):
         self.assertIn("query lang: String", out)
         self.assertNotIn("pageable", out.lower())
         self.assertIn("DTO SwapUserImplement", be_api.lookup(self.repo, "SwapUserImplement"))
+
+    def test_short_keyword_matches_segment_not_substring(self):
+        out = be_api.lookup(self.repo, "sla")
+        self.assertIn("/api/v1/sla-warnings/filter", out)
+        self.assertNotIn("/api/slack", out)
+
+    def test_controller_name_lists_endpoints(self):
+        out = be_api.lookup(self.repo, "SLAWarningController")
+        self.assertIn("POST /api/v1/sla-warnings/filter", out)
+        self.assertNotIn("DTO", out)
 
     def test_hint_ignores_non_api(self):
         self.assertEqual(be_api.hint_for(self.repo, "GET", "https://fe/assets/x.js", 404), "")

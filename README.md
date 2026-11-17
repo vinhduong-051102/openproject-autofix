@@ -296,6 +296,11 @@ Escalation, SlaWarning…) VÀ tiêu đề / mô tả ticket nói về SLA / c�
 (Claude QA: không có `sleep` ≥ 60s) → hạ ĐẠT thành **KHÔNG TỰ TEST ĐƯỢC** (SOAR-1497: Gemini chỉ đọc lại sự việc cũ +
 "không thấy thông báo" rồi kết luận ĐẠT). Sửa kèm `_stem`: `cases` → `case` (trước là `cas`, nên `/api/v1/cases/…` không
 được tính là request liên quan bản sửa).
+Sau SOAR-1497 (6 vòng hết khi Gemini còn dò API theo tên class, chưa tạo dữ liệu): ticket theo mốc thời gian có
+`qa_rounds_time_based` (mặc định 10) vòng; prompt bắt làm theo "Cách test lại / Cách test đúng" do Claude kiểm chứng ghi
+trong ticket ngay từ vòng 1 và dùng đủ request mỗi vòng; `be_api` khớp từ khoá ngắn theo đầu đoạn đường dẫn / nguyên từ
+camelCase (`sla` khớp `/sla-warnings`, không khớp `/slack`), tra được theo tên controller, liệt kê chi tiết 4 endpoint
+đầu + danh sách gọn phần còn lại (tối đa 12).
 
 ## Deploy không dừng trang (deploy_qa.py — DEPLOY_STRATEGY)
 

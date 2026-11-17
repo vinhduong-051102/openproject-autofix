@@ -139,6 +139,12 @@ def _join(base, sub):
     return re.sub(r"/+", "/", p)
 
 
+def _camel_words(name):
+    words = re.findall(r"[A-Z]+(?=[A-Z][a-z]|\b|\d|_)|[A-Z]?[a-z]+|\d+", name or "")
+    out = {w.lower() for w in words}
+    return out | {w[:-1] for w in out if w.endswith("s") and len(w) > 3}
+
+
 def _snake(name):
     s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
     return re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", s).lower()
@@ -415,11 +421,29 @@ class Index:
                     if segs and e["path"].strip("/").startswith("/".join(segs[:-1]) + "/" + segs[-1].split("{")[0]):
                         scored.append((10, e))
         else:
-            low = q.lower()
+            low = q.lower().strip()
+            ctrl_q = low[:-len("controller")] if low.endswith("controller") and len(low) > 10 else None
             for e in self.endpoints:
-                hay = "%s %s %s" % (e["path"].lower(), e["handler"].lower(), e["controller"].lower())
-                if low and low in hay:
-                    scored.append((30 if low in e["path"].lower() else 20, e))
+                segs = [s for s in e["path"].lower().strip("/").split("/") if s and not s.startswith("{")]
+                ctrl = e["controller"].lower()
+                if ctrl_q is not None:
+                    # tên controller: khớp đúng tên (SLAController ~ slacontroller), hoặc chứa (CaseController ⊂ …)
+                    if ctrl == low or ctrl.replace("_", "") == low:
+                        scored.append((40, e))
+                    elif ctrl_q and ctrl_q in ctrl:
+                        scored.append((25, e))
+                    continue
+                # từ khoá: khớp đầu một đoạn đường dẫn (sla → sla-warnings, không khớp slack), cả cụm trong đường dẫn,
+                # hoặc tên hàm / controller (camelCase).
+                if any(s == low or s.startswith(low + "-") or s.rstrip("s") == low.rstrip("s") for s in segs):
+                    scored.append((35, e))
+                elif "-" in low or "/" in low or len(low) >= 6:
+                    if low in e["path"].lower():
+                        scored.append((30, e))
+                    elif low.replace("-", "") in e["handler"].lower() or low.replace("-", "") in ctrl:
+                        scored.append((20, e))
+                elif low in _camel_words(e["handler"]) | _camel_words(e["controller"]):
+                    scored.append((15, e))  # trùng nguyên một từ camelCase (SLAWarning → sla, warning; Slack ≠ sla)
         if want_method:
             scored = [(s + (5 if e["method"] in (want_method, "ANY") else 0), e) for s, e in scored]
         scored.sort(key=lambda x: (-x[0], x[1]["path"], x[1]["method"]))
@@ -486,7 +510,7 @@ class Index:
         return "\n".join(out)
 
 
-def lookup(repo, query, ref=None, limit=6):
+def lookup(repo, query, ref=None, limit=12):
     """Kết quả tra cứu dạng chữ cho Gemini."""
     query = (query or "").strip()
     if not query:
@@ -498,7 +522,7 @@ def lookup(repo, query, ref=None, limit=6):
     if not idx.sha:
         return "API: không đọc được repo BE %s" % repo
     head = "API (mã BE %s @ %s): " % (idx.ref, idx.sha[:9])
-    if re.match(r"^[A-Z]\w+$", query) and query in idx.classes:
+    if re.match(r"^[A-Z]\w+$", query) and query in idx.classes and not query.endswith("Controller"):
         d = idx.describe_dto(query)
         if d:
             return head + "DTO %s\n%s" % (query, d)
@@ -506,7 +530,12 @@ def lookup(repo, query, ref=None, limit=6):
     if not found:
         return head + "không thấy endpoint khớp %r (%d endpoint đã quét). Thử từ khoá ngắn hơn (vd \"swap-user\")." % (
             query, len(idx.endpoints))
-    return head + "%d endpoint khớp %r\n\n%s" % (len(found), query, "\n\n".join(idx.describe(e) for e in found))
+    detail, rest = found[:4], found[4:]
+    text = "\n\n".join(idx.describe(e) for e in detail)
+    if rest:  # liệt kê gọn phần còn lại — tra chi tiết bằng "METHOD /đường/dẫn"
+        text += "\n\nCòn khớp (tra chi tiết bằng \"METHOD /đường/dẫn\"):\n" + "\n".join(
+            "  %s %s   (%s.%s)" % (e["method"], e["path"], e["controller"], e["handler"]) for e in rest)
+    return head + "%d endpoint khớp %r\n\n%s" % (len(found), query, text)
 
 
 def hint_for(repo, method, target, status, ref=None):
