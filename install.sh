@@ -21,7 +21,7 @@ EXTRA_PATH="$(cd "$TOOL_DIR" && "$PYTHON" -c "import envconf; print(':'.join(env
 oncal() { local out="" IFS=';'; for t in $1; do t="$(echo "$t" | sed 's/^ *//;s/ *$//')"; [[ -n "$t" ]] && out+="OnCalendar=$t"$'\n'; done; printf '%s' "$out"; }
 MERGE_ONCALENDAR="$(oncal "$(read_env MERGE_SCHEDULE '*-*-* 12:00:00;*-*-* 18:00:00')")"
 REPORT_ONCALENDAR="$(oncal "$(read_env REPORT_SCHEDULE 'Mon..Fri *-*-* 08:00:00')")"
-LIMITS_ONCALENDAR="$(oncal "$(read_env LIMITS_SCHEDULE '*-*-* 08:00:00')")"
+LIMITS_ONCALENDAR="$(oncal "$(read_env LIMITS_SCHEDULE '*-*-* 07:00:00')")"
 
 mkdir -p "$UNIT_DIR"
 render() {

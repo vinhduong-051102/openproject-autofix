@@ -1,12 +1,13 @@
 [Unit]
-Description=op-limits - cap nhat han muc moi goi Claude (op_autofix.py --probe), chay ngam theo LIMITS_SCHEDULE
+Description=op-limits - dat moc reset han muc 5 gio + cap nhat han muc moi goi Claude (op_autofix.py --probe), theo LIMITS_SCHEDULE
 After=network-online.target
 
 [Service]
 Type=oneshot
 WorkingDirectory=@TOOL_DIR@
 Environment=PATH=@EXTRA_PATH@:/usr/local/bin:/usr/bin:/bin
-# Mỗi gói đã đăng nhập: một câu rất ngắn (--tools "") để lấy hạn mức 5 giờ / 7 ngày mới nhất (ghi ~/autofix/.usage/).
+# Mỗi gói đã đăng nhập: một câu rất ngắn (--tools "") — đặt mốc cửa sổ hạn mức 5 giờ từ giờ chạy (mặc định 07:00 →
+# làm mới 12:00, 17:00…) và lấy hạn mức 5 giờ / 7 ngày mới nhất (ghi ~/autofix/.usage/).
 ExecStart=@PYTHON@ -u @TOOL_DIR@/op_autofix.py --probe
 TimeoutStartSec=900
 Nice=10

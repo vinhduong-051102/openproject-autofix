@@ -157,14 +157,15 @@ def _job_texts():
     envconf.overlay(a, envconf.AUTOFIX_ENV)
     merge_at = envconf.get("MERGE_SCHEDULE", "*-*-* 12:00:00;*-*-* 18:00:00").replace(";", ", ")
     report_at = envconf.get("REPORT_SCHEDULE", "Mon..Fri *-*-* 08:00:00")
-    limits_at = envconf.get("LIMITS_SCHEDULE", "*-*-* 08:00:00").replace(";", ", ")
+    limits_at = envconf.get("LIMITS_SCHEDULE", "*-*-* 07:00:00").replace(";", ", ")
     return {
         "merge": "Theo lịch %s: PR %s → %s, %s → %s, rồi deploy server test và QA ticket (lỡ giờ vì tắt máy thì chạy bù "
                  "khi bật máy)" % (merge_at, a["fe_branch"], a["fe_upstream"], a["be_branch"], a["be_upstream"]),
         "report": "Theo lịch %s: tạo %s/bao-cao-DD-MM-YYYY.txt (lỡ giờ thì chạy khi bật máy)" % (
             report_at, envconf.get("DAILY_REPORT_DIR", "~/Downloads/bao-cao-ngay")),
-        "limits": "Theo lịch %s: cập nhật hạn mức 5 giờ / 7 ngày của mọi gói Claude đã đăng nhập (op_autofix.py --probe,"
-                  " mỗi gói một câu rất ngắn); lỡ giờ vì tắt máy thì chạy khi bật máy" % limits_at,
+        "limits": "Theo lịch %s: mỗi gói Claude đã đăng nhập gửi một câu rất ngắn (op_autofix.py --probe) — đặt mốc"
+                  " cửa sổ hạn mức 5 giờ từ giờ này (vd 07:00 → làm mới 12:00, 17:00…) và cập nhật hạn mức 5 giờ / 7"
+                  " ngày; lỡ giờ vì tắt máy thì chạy khi bật máy" % limits_at,
         "dashboard": "Trang này (http://127.0.0.1:%d)" % envconf.DASHBOARD_PORT,
     }
 
