@@ -273,6 +273,17 @@ Gemini / Claude kết luận ĐẠT thì tool kiểm tra lại trước mọi co
   năng (từ khoá lấy từ tên file / package Java đã sửa) → **KHÔNG TỰ TEST ĐƯỢC**.
 Kiểm thử: `python3 -m unittest discover -s tests` (dùng `tests/fixtures/SOAR-2896-qa`).
 
+### QA Gemini tra API BE (`be_api.py`)
+Bundle FE chỉ có đường dẫn gốc (`CHANGE_USER:"/api/v1/cases/swap-user"`), không có phương thức, `{id}` hay body, nên
+Gemini hay dựng sai request rồi nhận 400/404/405 tới hết vòng (SOAR-1437 thiếu `/{id}` → trúng `PUT /cases/{id}`;
+SOAR-1497 POST thay vì PUT). Hai cơ chế:
+- request **API** (target = đoạn đường dẫn / `"PUT /api/v1/cases/swap-user/1553"` / tên DTO): đọc controller + DTO của repo
+  BE (repo `deploy: be-image`) ở `origin/<be_release_branch>` qua git (không đụng working tree), trả phương thức, đường
+  dẫn đủ `{biến}`, query, body JSON (tên trường theo `@JsonProperty` / `@JsonNaming`), trường bắt buộc + message, enum.
+  Không gọi server; không tính là request API khi `verify_pass` xét bằng chứng BE.
+- request trả **400/404/405/415** được kèm sẵn chữ ký endpoint khớp (`be_api.hint_for`) để vòng sau gửi lại đúng.
+Chỉ mục lưu đệm theo commit ở `~/.cache/op-watch/be-api-<sha>.json`. Tra tay: `python3 be_api.py "swap-user"`.
+
 ## Deploy không dừng trang (deploy_qa.py — DEPLOY_STRATEGY)
 
 Sau khi build + `docker load` image mới và ghi vào `docker-compose.yml`, `deploy_qa.py` đưa bản mới vào chạy theo

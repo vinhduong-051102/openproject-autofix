@@ -306,7 +306,14 @@ Làm ĐÚNG như mô tả trong ticket: tái hiện các bước tái hiện (ti
 KẾT QUẢ MONG ĐỢI của ticket. Không mở rộng sang việc khác ngoài ticket.
 
 Gọi API: mỗi phần tử `calls` gồm
-- method: GET | POST | PUT | PATCH | UPLOAD (multipart) | SEARCH | UI | DELETE (chỉ cho: {delete_allow})
+- method: GET | POST | PUT | PATCH | UPLOAD (multipart) | SEARCH | API | UI | DELETE (chỉ cho: {delete_allow})
+- API: tra MÃ NGUỒN BE (controller + DTO của bản đang deploy) — không gọi server. target = đoạn đường dẫn / tên hàm
+  (vd "swap-user"), một request cụ thể (vd "PUT /api/v1/cases/swap-user/1553") hoặc tên DTO (vd "SwapUserImplement").
+  Trả: phương thức HTTP đúng, đường dẫn đầy đủ kèm {{biến}}, tham số query, body JSON với TÊN TRƯỜNG THẬT (snake_case /
+  camelCase theo DTO), trường bắt buộc + thông báo validate, enum. BẮT BUỘC dùng API trước khi gọi POST / PUT / PATCH /
+  DELETE lần đầu tới một endpoint (bundle FE chỉ có đường dẫn gốc, không có {{id}}, phương thức hay body — đoán sẽ nhận
+  400/404/405 và hết vòng). Request trả 400/404/405/415 sẽ được công cụ kèm sẵn chữ ký endpoint khớp: đọc và gửi lại
+  đúng trước khi kết luận; 4xx do request sai KHÔNG phải bằng chứng KHÔNG ĐẠT / KHÔNG TỰ TEST ĐƯỢC.
 - UI: thao tác GIAO DIỆN thật bằng trình duyệt (tự đăng nhập tài khoản ghi trong ticket; không có thì tài khoản QA,
   hoặc account=<tên> như API). target = "/" ; body = chuỗi JSON mảng các bước:
   {{"goto": "/duong-dan"}}, {{"click": "text=Lưu"}} (selector Playwright: text=…, css, role=button[name="…"]),
@@ -468,11 +475,13 @@ def soar_call(qa_dir, call, dcfg=None):
         return bundle_search(dcfg, call.get("target", ""))
     if method == "UI":
         return ui_call(qa_dir, call)
+    if method == "API":
+        return be_api_lookup(dcfg, call.get("target", ""))
     if method == "DELETE":
         if not dcfg or not any(re.search(rx, call.get("target", "")) for rx in dcfg.get("qa_delete_allow", [])):
             return "BỊ CHẶN: DELETE chỉ cho đường dẫn khớp %s" % (dcfg or {}).get("qa_delete_allow")
     elif method not in ("GET", "POST", "PUT", "PATCH", "UPLOAD"):
-        return "BỊ CHẶN: chỉ cho GET / POST / PUT / PATCH / UPLOAD / SEARCH / UI / DELETE (giới hạn)"
+        return "BỊ CHẶN: chỉ cho GET / POST / PUT / PATCH / UPLOAD / SEARCH / API / UI / DELETE (giới hạn)"
     rep_notes = []
     call = dict(call)
     for k in ("target", "body", "file_name", "file_content"):
@@ -523,7 +532,46 @@ def soar_call(qa_dir, call, dcfg=None):
         if TRANSIENT.search(out[:3000]):
             raise ServerChanged("server không phản hồi (%s)" % out.strip().splitlines()[0][:120])
     out = ("(công cụ đã mở rộng: %s)\n" % "; ".join(rep_notes) if rep_notes else "") + sent_note + out
-    return out if len(out) <= 4000 else out[:4000] + "\n… (cắt, tổng %d ký tự)" % len(out)
+    out = out if len(out) <= 4000 else out[:4000] + "\n… (cắt, tổng %d ký tự)" % len(out)
+    st = _HTTP_LINE.search(out[:300])
+    if st and int(st.group(1)) in (400, 404, 405, 415) and method != "UPLOAD":
+        # Request dựng sai (thiếu /{id}, sai phương thức, sai tên trường) là lý do QA kẹt nhiều vòng nhất (SOAR-1437,
+        # SOAR-1497): kèm luôn chữ ký endpoint theo mã BE để vòng sau gửi lại đúng.
+        out += be_api_hint(dcfg, method, call.get("target", ""), int(st.group(1)))
+    return out
+
+
+def _be_api_ctx(dcfg):
+    dcfg = dcfg or {}
+    repo = dcfg.get("_be_repo")
+    if not repo:
+        return None, None
+    branch = dcfg.get("be_release_branch") or ""
+    return repo, ("origin/" + branch) if branch else None
+
+
+def be_api_lookup(dcfg, query):
+    """Request API của QA: tra endpoint BE (phương thức, đường dẫn đủ {biến}, body JSON) từ mã nguồn nhánh deploy."""
+    repo, ref = _be_api_ctx(dcfg)
+    if not repo:
+        return "API: dự án không có repo BE (deploy be-image) — dùng SEARCH trong mã FE"
+    try:
+        import be_api
+        out = be_api.lookup(repo, query, ref)
+    except Exception as ex:  # noqa: BLE001
+        return "API: lỗi tra cứu mã BE (%s)" % ex
+    return out if len(out) <= 6000 else out[:6000] + "\n… (cắt — thu hẹp từ khoá)"
+
+
+def be_api_hint(dcfg, method, target, status):
+    repo, ref = _be_api_ctx(dcfg)
+    if not repo:
+        return ""
+    try:
+        import be_api
+        return be_api.hint_for(repo, method, target, status, ref)[:3000]
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def fe_bundle(dcfg):
@@ -605,6 +653,7 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
     with open(schema, "w", encoding="utf-8") as f:
         json.dump(QA_SCHEMA, f, ensure_ascii=False)
     transcript, answer = [], {}
+    dcfg = dict(dcfg, _be_repo=acfg.get("be_repo"))  # cho request API (tra endpoint BE) + gợi ý khi 400/404/405
     rounds = dcfg["qa_rounds"]
     for rnd in range(1, rounds + 1):
         change = guard() if guard else None
@@ -2040,7 +2089,7 @@ def handle_fail(api, acfg, dcfg, wp, display_id, qa_path, qa_text, commits=()):
 
 # ---- Kiểm tra lại kết luận ĐẠT (sau sự cố SOAR-2896: Gemini gặp HTTP 500 vẫn kết luận ĐẠT) ----------------------
 API_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "UPLOAD")
-_REQ_HEAD = re.compile(r"(?:\A|\n\n)## (?:\[([^\]\n]{1,80})\] )?(GET|POST|PUT|PATCH|DELETE|UPLOAD|SEARCH|UI) ?([^\n]*)")
+_REQ_HEAD = re.compile(r"(?:\A|\n\n)## (?:\[([^\]\n]{1,80})\] )?(GET|POST|PUT|PATCH|DELETE|UPLOAD|SEARCH|API|UI) ?([^\n]*)")
 _HTTP_LINE = re.compile(r"^HTTP (\d{3})\b", re.M)
 
 
