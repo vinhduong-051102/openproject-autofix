@@ -81,7 +81,7 @@ AUTOFIX_DEFAULTS = {
     "model": "",
     "claude": "claude",
     # Chỉ tự sửa ticket có số SOAR-<n> từ mức này trở lên (ticket cũ hơn bỏ qua; chạy tay MANUAL vẫn được).
-    "min_ticket_number": 1900,
+    "min_ticket_number": 0,
     # Số lượt autofix / test lại (Claude + Gemini) chạy cùng lúc. Mỗi lượt có worktree riêng; fetch / tạo worktree /
     # push vào nhánh chung được khoá riêng nên không giẫm lên nhau.
     "max_parallel": 3,
