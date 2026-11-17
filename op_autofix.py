@@ -3888,7 +3888,10 @@ def main():
         log("%s (%s): bỏ qua — dự án %s chưa khai báo repo (tab Dự án)" % (display_id, event, proj["name"]))
         return
     num = re.search(r"(\d+)$", display_id)
-    if event != "MANUAL" and acfg.get("min_ticket_number") and num and int(num.group(1)) < acfg["min_ticket_number"]:
+    # MANUAL (bấm tay) và QA_FAIL (ticket đã được sửa, QA server không đạt) không theo ngưỡng số ticket — trước đây
+    # QA_FAIL của ticket sửa tay dưới ngưỡng bị bỏ ngầm trong khi inbox báo "Claude đang kiểm chứng" (SOAR-1437).
+    if event not in ("MANUAL", "QA_FAIL") and acfg.get("min_ticket_number") and num \
+            and int(num.group(1)) < acfg["min_ticket_number"]:
         log("%s (%s): bỏ qua — chỉ tự sửa ticket từ %s-%d trở lên" % (
             display_id, event, proj["prefix"], acfg["min_ticket_number"]))
         return
