@@ -284,6 +284,14 @@ SOAR-1497 POST thay vì PUT). Hai cơ chế:
 - request trả **400/404/405/415** được kèm sẵn chữ ký endpoint khớp (`be_api.hint_for`) để vòng sau gửi lại đúng.
 Chỉ mục lưu đệm theo commit ở `~/.cache/op-watch/be-api-<sha>.json`. Tra tay: `python3 be_api.py "swap-user"`.
 
+### QA Gemini chờ theo mốc thời gian (`wait_minutes`)
+Ticket chỉ tái hiện được khi tới một mốc giờ (cảnh báo / leo thang SLA trước-sau hạn, job hẹn giờ, hết hạn…) trước đây
+luôn ra KHÔNG TỰ TEST ĐƯỢC vì một lượt QA chỉ vài phút (SOAR-1495). Nay Gemini tạo dữ liệu QA_AUTO_* với mốc ngắn nhất,
+đọc mốc thật server trả, rồi trả `wait_minutes`; công cụ chờ (`qa_wait`, cứ 2 phút kiểm tra server có bị deploy /
+restart — có thì bỏ kết quả như cũ) rồi chạy vòng sau. Prompt mỗi vòng có GIỜ HIỆN TẠI. Giới hạn (deploy.json / mặc
+định): `qa_wait_max_minutes` 30 mỗi lần, `qa_wait_total_minutes` 45 mỗi lượt, vòng chờ cộng thêm tối đa
+`qa_wait_extra_rounds` 2. Trong lúc chờ `.qa-active` vẫn còn nên review-watch không chạy chồng.
+
 ## Deploy không dừng trang (deploy_qa.py — DEPLOY_STRATEGY)
 
 Sau khi build + `docker load` image mới và ghi vào `docker-compose.yml`, `deploy_qa.py` đưa bản mới vào chạy theo

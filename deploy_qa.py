@@ -87,6 +87,12 @@ DEFAULTS = {
     # kết quả lại. "claude" = Claude headless tự gọi soar_api.py (tốn hạn mức Claude).
     "qa_engine": "gemini",
     "qa_rounds": 6,
+    # Ticket phụ thuộc thời gian (cảnh báo / leo thang SLA, lịch chạy, hết hạn…): Gemini trả wait_minutes để công cụ chờ
+    # tới mốc rồi mới chạy vòng sau (SOAR-1495: thông báo chỉ phát sinh sau 15–21 phút). Mỗi lần chờ tối đa
+    # qa_wait_max_minutes, cả lượt QA tối đa qa_wait_total_minutes; vòng chờ được cộng thêm (tối đa qa_wait_extra_rounds).
+    "qa_wait_max_minutes": 30,
+    "qa_wait_total_minutes": 45,
+    "qa_wait_extra_rounds": 2,
     # tài khoản tester được phép dùng khi ticket ghi sẵn tên + mật khẩu (vd tài khoản tenancy con) — đặt trong
     # deploy.json "qa_ticket_accounts" hoặc QA_TICKET_ACCOUNTS (cách nhau dấu phẩy) trong .env
     "qa_ticket_accounts": [],
@@ -392,6 +398,15 @@ lẫn kết quả mong đợi, mô tả mâu thuẫn với comment, hoặc khôn
 gọi request), kết luận KHÔNG RÕ YÊU CẦU; phần kết quả nêu cụ thể điểm nào chưa rõ và 1-3 câu hỏi cần tester / BA trả lời.
 Chỉ dùng khi thật sự không suy ra được; thiếu vài chi tiết nhưng vẫn kiểm tra được theo diff + ticket thì vẫn test.
 
+CHỜ THEO THỜI GIAN (wait_minutes): tính năng chỉ xảy ra khi tới một mốc giờ (cảnh báo / leo thang SLA trước-sau hạn,
+job hẹn giờ, lịch chạy, hết hạn token / phiên…) thì KHÔNG kết luận "chưa phát sinh / cần cron / cần người test" mà:
+(1) tạo dữ liệu QA_AUTO_* với mốc NGẮN NHẤT có thể (cấu hình sẵn có đơn vị phút, hoặc tự tạo cấu hình phút), (2) đọc
+lại mốc thật server trả (vd deadline / thời điểm hẹn trong response, GET escalation-timeline) và so với GIỜ HIỆN TẠI bên
+dưới, (3) trả done=false, verdict=CHƯA, wait_minutes = số phút tới mốc cuối cần kiểm + 1–2 phút (calls có thể rỗng hoặc
+là các request cần gửi NGAY trước khi chờ), (4) vòng sau đọc kết quả (danh sách thông báo theo loại, timeline, trạng thái).
+Mỗi lần chờ tối đa {wait_max} phút, cả lượt QA còn {wait_left} phút chờ; mốc xa hơn thì tạo dữ liệu mốc ngắn hơn.
+Vòng chờ không tính vào số vòng (cộng thêm tối đa {wait_extra} vòng).
+
 Kết thúc (done=true) khi đã đủ bằng chứng, với verdict ĐẠT | KHÔNG ĐẠT | KHÔNG TỰ TEST ĐƯỢC | KHÔNG RÕ YÊU CẦU và
 result (ngắn gọn cho tester: đã test gì, kết quả), evidence (request → mã HTTP + phần response quan trọng),
 notes (dữ liệu đã tạo / chưa kiểm tra được). Chưa xong: done=false, verdict=CHƯA, calls = các request tiếp theo.
@@ -401,6 +416,7 @@ notes (dữ liệu đã tạo / chưa kiểm tra được). Chưa xong: done=fal
 {qa_rules}
 
 Vòng {round}/{rounds}.{last_round}
+GIỜ HIỆN TẠI (giờ Việt Nam, cùng giờ server): {now}
 
 # TICKET
 {ticket}
@@ -416,6 +432,7 @@ QA_SCHEMA = {
     "type": "object",
     "properties": {
         "done": {"type": "boolean"},
+        "wait_minutes": {"type": "number"},
         "calls": {"type": "array", "items": {"type": "object", "properties": {
             "method": {"type": "string"}, "target": {"type": "string"}, "body": {"type": "string"},
             "header": {"type": "string"}, "file_name": {"type": "string"}, "file_content": {"type": "string"},
@@ -638,6 +655,23 @@ def bundle_search(dcfg, pattern, limit=12, ctx=200):
         "\n\n".join(hits) or "không thấy")
 
 
+def qa_wait(minutes, guard=None, check_every=120, sleep=time.sleep, clock=time.time):
+    """Chờ `minutes` phút giữa hai vòng QA; cứ `check_every` giây kiểm tra server có bị deploy / restart không (guard)
+    — có thì ném ServerChanged như các chỗ khác (kết quả QA bỏ, ticket về hàng chờ)."""
+    end = clock() + minutes * 60
+    next_check = clock() + check_every
+    while True:
+        left = end - clock()
+        if left <= 0:
+            return
+        sleep(min(15, left))
+        if guard and clock() >= next_check:
+            next_check = clock() + check_every
+            change = guard()
+            if change:
+                raise ServerChanged(change)
+
+
 def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
     """QA bằng Gemini nhiều vòng; ghi qa.md. Trả nội dung qa.md."""
     with open(os.path.join(qa_dir, "ticket", "ticket.md"), encoding="utf-8") as f:
@@ -655,7 +689,12 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
     transcript, answer = [], {}
     dcfg = dict(dcfg, _be_repo=acfg.get("be_repo"))  # cho request API (tra endpoint BE) + gợi ý khi 400/404/405
     rounds = dcfg["qa_rounds"]
-    for rnd in range(1, rounds + 1):
+    wait_max = float(dcfg.get("qa_wait_max_minutes") or 0)
+    wait_total = float(dcfg.get("qa_wait_total_minutes") or 0)
+    wait_extra = int(dcfg.get("qa_wait_extra_rounds") or 0)
+    waited, extra_used, rnd = 0.0, 0, 0
+    while rnd < rounds:
+        rnd += 1
         change = guard() if guard else None
         if change:
             raise ServerChanged(change)
@@ -664,7 +703,8 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
             display_id=display_id, deployed=deployed, api_url=dcfg["api_url"], fe_url=dcfg["fe_url"],
             max_calls=dcfg["qa_calls_per_round"], delete_allow=", ".join(dcfg.get("qa_delete_allow", [])) or "không",
             ticket_accounts=", ".join(dcfg.get("qa_ticket_accounts") or []) or "trống — không dùng",
-            round=rnd, rounds=rounds, ticket=ticket, diff=diff, qa_rules=load_qa_rules(), anti_false_pass=ANTI_FALSE_PASS,
+            round=rnd, rounds=rounds, now=datetime.now().strftime("%H:%M:%S %d/%m/%Y"),
+            wait_max=wait_max, wait_left=max(0, int(wait_total - waited)), wait_extra=wait_extra, ticket=ticket, diff=diff, qa_rules=load_qa_rules(), anti_false_pass=ANTI_FALSE_PASS,
             last_round=" ĐÂY LÀ VÒNG CUỐI: phải done=true và kết luận." if last else "",
             transcript="\n\n".join(transcript)[-60000:] or "(chưa gọi gì)")
         prompt = prompt.replace("\x00", "")
@@ -724,7 +764,11 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
                 result = "Gemini không trả kết quả (vòng %d, đã thử lại)%s" % (
                     rnd, ": " + err.strip().splitlines()[-1][:300] if err.strip() else "")
             answer = {"done": True, "verdict": "KHÔNG TỰ TEST ĐƯỢC", "result": result}
-        if answer.get("done") or not answer.get("calls"):
+        try:
+            want_wait = float(answer.get("wait_minutes") or 0)
+        except (TypeError, ValueError):
+            want_wait = 0
+        if answer.get("done") or (not answer.get("calls") and want_wait <= 0):
             break
         calls, n_ui = [], 0
         for c in answer["calls"][:dcfg["qa_calls_per_round"]]:
@@ -762,6 +806,21 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
             transcript.append("## %s%s %s%s\n(%s)\n```\n%s\n```" % (
                 "[%s] " % call["account"] if call.get("account") else "", call.get("method"), call.get("target"), (" body: " + call["body"][:500]) if call.get("body") else "",
                 call.get("why", ""), out))
+        if want_wait > 0:
+            mins = min(want_wait, wait_max, max(0.0, wait_total - waited))
+            if mins <= 0:
+                transcript.append("## WAIT %g phút\n(BỊ TỪ CHỐI: đã dùng hết %g phút chờ của lượt QA — kết luận với "
+                                  "bằng chứng đang có hoặc tạo dữ liệu mốc ngắn hơn)" % (want_wait, wait_total))
+            else:
+                t0 = datetime.now()
+                qa_wait(mins, guard)
+                waited += mins
+                if extra_used < wait_extra:  # vòng chờ không ăn vào số vòng làm việc
+                    rounds += 1
+                    extra_used += 1
+                transcript.append("## WAIT %g phút\n(công cụ đã chờ %s → %s%s)" % (
+                    mins, t0.strftime("%H:%M:%S"), datetime.now().strftime("%H:%M:%S"),
+                    "; xin %g phút, cắt theo giới hạn" % want_wait if mins < want_wait else ""))
     verdict = answer.get("verdict") if answer.get("verdict") in ("ĐẠT", "KHÔNG ĐẠT", "KHÔNG TỰ TEST ĐƯỢC",
                                                                  "KHÔNG RÕ YÊU CẦU") \
         else "KHÔNG TỰ TEST ĐƯỢC"
@@ -2089,7 +2148,7 @@ def handle_fail(api, acfg, dcfg, wp, display_id, qa_path, qa_text, commits=()):
 
 # ---- Kiểm tra lại kết luận ĐẠT (sau sự cố SOAR-2896: Gemini gặp HTTP 500 vẫn kết luận ĐẠT) ----------------------
 API_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "UPLOAD")
-_REQ_HEAD = re.compile(r"(?:\A|\n\n)## (?:\[([^\]\n]{1,80})\] )?(GET|POST|PUT|PATCH|DELETE|UPLOAD|SEARCH|API|UI) ?([^\n]*)")
+_REQ_HEAD = re.compile(r"(?:\A|\n\n)## (?:\[([^\]\n]{1,80})\] )?(GET|POST|PUT|PATCH|DELETE|UPLOAD|SEARCH|API|UI|WAIT) ?([^\n]*)")
 _HTTP_LINE = re.compile(r"^HTTP (\d{3})\b", re.M)
 
 
