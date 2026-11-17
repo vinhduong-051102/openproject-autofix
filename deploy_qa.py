@@ -20,6 +20,7 @@ Cấu hình server + tài khoản test: biến DEPLOY_* / QA_* trong .env và/ho
 """
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import glob
@@ -96,6 +97,15 @@ DEFAULTS = {
     # Ticket theo mốc thời gian (time_based): chuỗi tạo dữ liệu → thao tác → chờ → đọc kết quả cần nhiều vòng hơn
     # (SOAR-1497: 6 vòng hết khi còn đang dò API, chưa kịp tạo sự việc).
     "qa_rounds_time_based": 10,
+    # Deploy chờ các lượt QA đang chạy trên server xong rồi mới đổi server (trước đây job merge + deploy của chính tool
+    # làm hỏng lượt QA đang chạy — SOAR-1316 17/11). Quá thời gian thì vẫn deploy (lượt QA tự dừng vì server đổi).
+    "deploy_wait_qa_minutes": 60,
+    # QA chờ lượt deploy đang chạy xong rồi mới bắt đầu.
+    "qa_wait_deploy_minutes": 40,
+    # Kiểm tra tài khoản registry trước khi build (FE đẩy image, repo tuỳ chỉnh đọc tag qua Gitea API): sai mật khẩu thì
+    # bỏ phần đó ngay với lỗi rõ ràng thay vì build xong mới "unauthorized" (17/11: mất nửa ngày FE không lên server).
+    "registry_host": "git2.cytech.ai",
+    "registry_env_file": "~/.git2.env",
     # tài khoản tester được phép dùng khi ticket ghi sẵn tên + mật khẩu (vd tài khoản tenancy con) — đặt trong
     # deploy.json "qa_ticket_accounts" hoặc QA_TICKET_ACCOUNTS (cách nhau dấu phẩy) trong .env
     "qa_ticket_accounts": [],
@@ -1349,6 +1359,91 @@ def _part_error(what, ex, logf=None):
     return line
 
 
+QA_RUN_LOCK = os.path.join(envconf.autofix_root(), ".qa-run.lock")
+
+
+def _flock_wait(fd, mode, minutes, waiting_msg):
+    """flock có hạn chờ: True khi giữ được khoá, False khi quá `minutes` phút."""
+    deadline, said = time.time() + minutes * 60, False
+    while True:
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.time() >= deadline:
+                return False
+            if not said:
+                log(waiting_msg)
+                said = True
+            time.sleep(15)
+
+
+def deploy_lock(dcfg):
+    """Khoá ghi trên server: chờ mọi lượt QA (khoá đọc) xong. Trả fd (giữ tới khi QA của lượt này bắt đầu)."""
+    fd = open(QA_RUN_LOCK, "a")
+    minutes = float(dcfg.get("deploy_wait_qa_minutes") or 0)
+    if not _flock_wait(fd, fcntl.LOCK_EX, minutes,
+                       "đang có lượt QA trên server — chờ QA xong mới deploy (tối đa %g phút)" % minutes):
+        msg = "chờ lượt QA đang chạy quá %g phút — vẫn deploy (lượt QA đó sẽ tự dừng vì server đổi)" % minutes
+        log(msg)
+        qa_issues.record("deploy_wait_qa_timeout", msg)
+    return fd
+
+
+def qa_lock(dcfg, fd=None):
+    """Khoá đọc trong lúc QA: nhiều lượt QA chạy cùng lúc được, deploy phải đợi. fd của deploy_lock → hạ xuống khoá đọc."""
+    fd = fd or open(QA_RUN_LOCK, "a")
+    minutes = float(dcfg.get("qa_wait_deploy_minutes") or 0)
+    if not _flock_wait(fd, fcntl.LOCK_SH, minutes,
+                       "server đang được deploy — chờ deploy xong mới QA (tối đa %g phút)" % minutes):
+        log("chờ deploy quá %g phút — vẫn QA (server đổi giữa chừng thì lượt QA tự dừng)" % minutes)
+    return fd
+
+
+def _http_status(url, user, password, timeout=15):
+    req = urllib.request.Request(url, headers={"Authorization": "Basic " + base64.b64encode(
+        ("%s:%s" % (user, password)).encode("utf-8")).decode("ascii")})
+    try:
+        return urllib.request.urlopen(req, timeout=timeout).status
+    except urllib.error.HTTPError as ex:
+        return ex.code
+    except OSError:
+        return None  # mạng lỗi: không kết luận được tài khoản
+
+
+def registry_preflight(dcfg):
+    """Kiểm tra tài khoản registry trước khi build. Trả {"docker": lỗi | None, "api": lỗi | None}.
+    docker: auth của `docker login <registry_host>` (~/.docker/config.json) — FE đẩy image, repo tuỳ chỉnh build-push.
+    api: GIT2_USER / GIT2_PASSWORD trong registry_env_file — repo tuỳ chỉnh đọc tag qua Gitea API."""
+    host = dcfg.get("registry_host")
+    out = {"docker": None, "api": None}
+    if not host:
+        return out
+    try:
+        with open(os.path.expanduser("~/.docker/config.json"), encoding="utf-8") as f:
+            auth = ((json.load(f).get("auths") or {}).get(host) or {}).get("auth")
+    except (OSError, ValueError):
+        auth = None
+    if auth:  # dùng credsStore / chưa login thì không kiểm tra được ở đây (để lệnh build tự báo)
+        user, _, password = base64.b64decode(auth).decode("utf-8", "replace").partition(":")
+        if _http_status("https://%s/v2/" % host, user, password) == 401:
+            out["docker"] = ("tài khoản docker login của %s (%s) bị từ chối — mật khẩu đã đổi? Chạy: docker login %s -u %s"
+                             % (host, user, host, user))
+    env_file = os.path.expanduser(dcfg.get("registry_env_file") or "")
+    if env_file and os.path.exists(env_file):
+        vals = {}
+        with open(env_file, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"\s*(?:export\s+)?(GIT2_USER|GIT2_PASSWORD)\s*=\s*(.*?)\s*$", line)
+                if m:
+                    vals[m.group(1)] = m.group(2).strip("'\"")
+        if vals.get("GIT2_USER") and vals.get("GIT2_PASSWORD") and \
+                _http_status("https://%s/api/v1/user" % host, vals["GIT2_USER"], vals["GIT2_PASSWORD"]) == 401:
+            out["api"] = ("GIT2_USER / GIT2_PASSWORD trong %s (%s) bị %s từ chối — mật khẩu đã đổi? Sửa file đó"
+                          % (dcfg.get("registry_env_file"), vals["GIT2_USER"], host))
+    return out
+
+
 def deploy_parts(acfg, dcfg, root, logf, commits, drift=None):
     """
     Build + đưa lên server từng phần, phần này lỗi không chặn phần kia: FE (commit mới → deploy_fe; FE lệch → recover_fe),
@@ -1356,6 +1451,14 @@ def deploy_parts(acfg, dcfg, root, logf, commits, drift=None):
     → (parts đã chạy trên server, fe_version đã rollout hoặc None, errors ["FE build/deploy lỗi: …", "BE build lỗi: …"]).
     """
     parts, errors, changes, built, fe_version = [], [], [], {}, None
+    skip_custom = None
+    if commits.get("FE") or drift or any(commits.get(r["label"]) for r in acfg.get("custom_deploy") or []):
+        pre = registry_preflight(dcfg)
+        if pre["docker"] and (commits.get("FE") or drift):
+            errors.append("FE chưa build: " + pre["docker"])
+            qa_issues.record("registry_auth", pre["docker"], cause="registry_auth", path=logf.name)
+            commits, drift = dict(commits, FE=[]), None
+        skip_custom = pre["docker"] or pre["api"]
     if commits.get("FE") or drift:
         try:
             if commits.get("FE"):
@@ -1382,6 +1485,10 @@ def deploy_parts(acfg, dcfg, root, logf, commits, drift=None):
         except Exception as ex:  # noqa: BLE001
             errors.append(_part_error("rollout %s" % names, ex, logf))
     for r in acfg.get("custom_deploy") or []:
+        if commits.get(r["label"]) and skip_custom:
+            errors.append("%s chưa build: %s" % (r["label"], skip_custom))
+            qa_issues.record("registry_auth", skip_custom, cause="registry_auth", path=logf.name)
+            continue
         if commits.get(r["label"]):
             try:
                 parts.append("%s %s" % (r["label"], deploy_custom(acfg, dcfg, r, root, logf)))
@@ -2540,17 +2647,17 @@ def qa_waited(reqs, qa_dir):
     return False
 
 
-def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None):
+def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None, fix_missing=None):
     """Bọc _qa_ticket: ghi thời gian QA trên server lên ticket (Testing)."""
     t0 = time.time()
-    verdict, path = _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard)
+    verdict, path = _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard, fix_missing)
     if verdict:  # "" = không phải ticket của mình / không ở trạng thái QA → không ghi
         af.log_time(api, dict(af.AUTOFIX_DEFAULTS, **acfg), display_id, time.time() - t0, "test",
                     "[QA tự động] Gemini QA trên server test (%s) — %s" % (deployed, verdict[:120]))
     return verdict, path
 
 
-def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None):
+def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None, fix_missing=None):
     """QA một ticket trên server. Trả (kết luận, đường dẫn qa.md)."""
     wp = api.get("/api/v3/work_packages/%s" % display_id)
     assignee = (wp["_links"].get("assignee") or {}).get("href", "")
@@ -2633,6 +2740,10 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
         af.op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp["id"], {"lockVersion": lock_version, "_links": links})
         verdict += (" → Resolved, đã chuyển " if review else " → đã chuyển ") + dcfg["qa_user_name"]
         fail_count(display_id, 0)
+    elif verdict in ("KHÔNG ĐẠT", "KHÔNG TỰ TEST ĐƯỢC") and fix_missing:
+        verdict += " — không tính: %s (QA theo yêu cầu); không giao kiểm chứng, không đổi ticket" % fix_missing
+        qa_issues.record("qa_fix_not_deployed", "QA theo yêu cầu khi %s → %s (không tính)" % (fix_missing, verdict),
+                         ticket=display_id, path=os.path.dirname(path), build=deployed)
     elif verdict == "KHÔNG ĐẠT":
         verdict += handle_fail(api, acfg, dcfg, wp, display_id, path, text, commits)
     elif verdict == "KHÔNG TỰ TEST ĐƯỢC":
@@ -2876,6 +2987,7 @@ def deploy_only(cfg, acfg, dcfg, dry_run=False, qa_requested=False):
         return
     logf = open(os.path.join(root, "deploy-%s-%s.log" % (P.current(acfg)["key"], datetime.now().strftime("%m%d-%H%M"))),
                 "w", encoding="utf-8")
+    dlock = deploy_lock(dcfg)  # noqa: F841 — giữ khoá tới hết hàm (đóng khi ra khỏi hàm)
     parts, _, errors = deploy_parts(acfg, dcfg, root, logf, commits, drift)
     if errors:
         msg = _deploy_error_msg(errors, parts, logf)
@@ -2941,12 +3053,13 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
                 qa_issues.record("fe_drift", drift_text(drift), build=drift.get("running"), latest=drift.get("latest"))
         if dry_run or not (tickets or drift):
             return
-    fe_version = None
+    fe_version, dlock = None, None
     if not only and (any(commits.values()) or drift):
         logf = open(os.path.join(root, "deploy-%s.log" % datetime.now().strftime("%m%d-%H%M")), "w", encoding="utf-8")
         what = ["%s %d commit" % (k, len(v)) for k, v in commits.items() if v]
         if drift:
             what.append("FE deploy lại bản %s (server đang %s)" % (drift["latest"], drift["running"]))
+        dlock = deploy_lock(dcfg)
         notify("[DEPLOY 86]", "Bắt đầu deploy: " + ", ".join(what))
         parts, fe_version, errors = deploy_parts(acfg, dcfg, root, logf, commits, drift)
         deployed_parts.extend(parts)
@@ -2998,6 +3111,7 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
 
     lock = open(os.path.join(root, ".run.lock"), "w")
     remaining, done = list(tickets), set()
+    qlock = qa_lock(dcfg, dlock)  # deploy của lượt này xong → hạ xuống khoá đọc; không deploy → chờ deploy khác xong
     open(QA_ACTIVE, "w").close()
     try:
         _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
@@ -3006,6 +3120,7 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
     finally:
         if os.path.exists(QA_ACTIVE):
             os.remove(QA_ACTIVE)
+        qlock.close()
 
 
 def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, deployed, baseline, guard, lock,
@@ -3030,8 +3145,19 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         build = "%s|%s" % (baseline.get("fe"), baseline.get("be")) + custom_build_key(acfg)
         cust = {r["label"]: r for r in acfg.get("custom_deploy") or []}
         cust_state = [custom_contains(acfg, cust[label], hs) for label, _, hs in hashes if label in cust]
+        fix_missing = None
         if display_id in force:
             # QA tay từ trang theo dõi: bỏ điều kiện commit / bản đang chạy có bản sửa (vd ticket không cần sửa code).
+            # Bản đang chạy CHẮC CHẮN chưa có bản sửa → vẫn QA nhưng kết quả không đạt không tính vào bộ đếm / không
+            # giao kiểm chứng / không comment (SOAR-1164: 3 lần QA trên FE cũ → bị đẩy UNREVIEWED oan).
+            missing = [label for label, ok in [("FE", fe_hashes and fe_contains(acfg, baseline["fe"], fe_hashes)),
+                                               ("BE", be_hashes and be_contains(acfg, baseline["be"], be_hashes))]
+                       if ok is False] + [label for (label, _, hs) in hashes if label in cust
+                                          and custom_contains(acfg, cust[label], hs) is False]
+            if missing:
+                fix_missing = "bản %s đang chạy (FE %s, BE %s) chưa có bản sửa" % (
+                    "/".join(missing), baseline.get("fe"), baseline.get("be"))
+                log("%s: QA theo yêu cầu nhưng %s — kết quả không đạt sẽ không tính" % (display_id, fix_missing))
             log("%s: QA theo yêu cầu (bỏ qua điều kiện commit: FE %d, BE %d commit)"
                 % (display_id, len(fe_hashes), len(be_hashes)))
         elif display_id in review:
@@ -3080,7 +3206,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
             return
         slot = af.acquire_slot(os.path.expanduser(acfg["root"]), acfg) if dcfg["qa_engine"] != "gemini" else None
         try:
-            verdict, path = qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, hashes, deployed, guard)
+            verdict, path = qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, hashes, deployed, guard,
+                                      fix_missing=fix_missing)
             log("%s: %s" % (display_id, verdict or "bỏ qua (không phải của mình / không ở Resolved)"))
             if verdict and QA_TOOL_ERROR not in verdict:
                 qa_history(display_id, build, verdict)

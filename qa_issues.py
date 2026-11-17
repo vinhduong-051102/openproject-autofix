@@ -48,6 +48,12 @@ KINDS = {
     "rollout": ("server", "Rollout (đổi container) lỗi",
                 "Kiểm tra healthcheck / thời gian chờ container mới, cấu hình nginx upstream."),
     "deploy_custom": ("server", "Deploy repo tuỳ chỉnh lỗi", "Xem log deploy của repo tuỳ chỉnh."),
+    "registry_auth": ("server", "Tài khoản registry bị từ chối (kiểm tra trước khi build)",
+                      "Mật khẩu registry đã đổi: chạy `docker login <registry>` và sửa GIT2_PASSWORD trong ~/.git2.env "
+                      "(cả hai cùng tài khoản)."),
+    "deploy_wait_qa_timeout": ("server", "Deploy chờ lượt QA đang chạy quá lâu",
+                               "Lượt QA chờ theo mốc thời gian dài / treo: giảm qa_wait_total_minutes hoặc tăng "
+                               "deploy_wait_qa_minutes."),
     "server_not_up": ("server", "Server không lên sau deploy",
                       "Tăng wait_minutes nếu server chỉ chậm; nếu BE crash → đọc docker logs BE, thêm kiểm tra migration."),
     "server_down": ("server", "Server không trả lời trước khi QA",
@@ -72,6 +78,8 @@ KINDS = {
                       "Bổ sung rule QA: phải đọc mã HTTP, không kết luận ĐẠT khi có 5xx hoặc chưa gọi API đã sửa."),
     "qa_wrong": ("qa", "Claude kết luận QA SAI (QA test sai cách)",
                  "Rule đã thêm vào qa-rules.md — xem lại rule có đủ tổng quát, xoá rule trùng / mâu thuẫn."),
+    "qa_fix_not_deployed": ("qa", "QA theo yêu cầu khi server chưa có bản sửa (không tính)",
+                            "Đợi deploy bản có bản sửa rồi mới bấm QA trên server; kết quả này không tính vào bộ đếm."),
     "qa_manual": ("qa", "Cần test tay (QA tự động không làm được)",
                   "Xem có thể bổ sung công cụ (UI, tài khoản, dữ liệu mẫu) để lần sau tự test được."),
     "qa_tool_retry_exhausted": ("qa", "Lỗi công cụ QA quá số lần thử trên một bản build",
@@ -85,6 +93,7 @@ KINDS = {
 
 # Nguyên nhân gốc đoán từ nội dung lỗi (để gom nhóm "vì sao")
 CAUSES = [
+    (r"unauthorized|authGroup\.Verify|Không đọc được registry|registry bị từ chối|docker login", "registry_auth"),
     ("xung đột", "merge_conflict"),
     (r"Thiếu [A-Z_]+|biến môi trường|\.env", "config_missing"),
     (r"npm run build|vite|tsc|TS\d{4}", "fe_build"),

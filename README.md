@@ -557,3 +557,14 @@ journalctl --user -u op-telegram -f
 
 File phiên `TG_SESSION` (mặc định `~/.config/op-watch/telegram.session`, quyền 600) có toàn quyền vào tài khoản
 Telegram: không chia sẻ / commit; thu hồi ở Telegram → Settings → Devices. Nên báo tester là tin nhắn được ghi nhận tự động.
+
+### An toàn deploy / QA (sau sự cố 17/11)
+- **Kiểm tra tài khoản registry trước khi build** (`registry_preflight`): `docker login` của `registry_host` (GET
+  `/v2/`) và GIT2_USER / GIT2_PASSWORD trong `registry_env_file` (GET `/api/v1/user`). Bị từ chối (401) → FE / repo tuỳ
+  chỉnh không build, lỗi ghi rõ "mật khẩu đã đổi? Chạy: docker login …" (inbox DEPLOY 86 LỖI + tab Sự cố QA loại
+  `registry_auth`); BE vẫn deploy. Mạng lỗi thì không kết luận, để lệnh build tự báo.
+- **Deploy chờ QA đang chạy** (`~/autofix/.qa-run.lock`): mỗi lượt QA giữ khoá đọc (nhiều lượt song song được), deploy
+  lấy khoá ghi — chờ tối đa `deploy_wait_qa_minutes` (60) rồi mới đổi server; QA mới chờ deploy đang chạy tối đa
+  `qa_wait_deploy_minutes` (40). Quá giờ vẫn chạy (lượt QA cũ tự dừng vì server đổi) và ghi sự cố.
+- **"QA trên server" khi server chưa có bản sửa**: vẫn QA, nhưng KHÔNG ĐẠT / KHÔNG TỰ TEST ĐƯỢC không tính vào bộ đếm,
+  không giao Claude kiểm chứng, không comment / đổi ticket (sự cố `qa_fix_not_deployed`).
