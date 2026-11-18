@@ -281,7 +281,12 @@ Bản sửa trước của ticket đã deploy lên server test và QA tự độ
 4. QA đúng → sửa phần còn thiếu / sai, commit như hướng dẫn ở trên; report.md dòng đầu `KẾT QUẢ: ĐÃ SỬA`.
 5. QA sai (test sai cách, hiểu sai ticket, công cụ QA gửi sai, deploy-check ghi CHƯA) → KHÔNG sửa; report.md dòng
    đầu `KẾT QUẢ: QA SAI`, nêu rõ nguyên nhân thuộc loại nào + bằng chứng (request thực gửi / dòng deploy-check), kèm đề
-   xuất cách test đúng cho tester.
+   xuất cách test đúng cho tester. Dòng thứ hai BẮT BUỘC là một trong hai:
+   - `LOẠI QA SAI: CHẤM SAI` — QA (Gemini) đã test ĐÚNG và ĐỦ kết quả mong đợi của ticket, các response trong báo
+     cáo đủ chứng minh; chỉ bước chấm tự động sau QA của công cụ hạ kết luận ĐẠT xuống. Công cụ sẽ dùng luôn kết luận
+     ĐẠT gốc và chuyển tester, nên CHỈ ghi khi chính bạn đã đối chiếu từng kết quả mong đợi với response thật.
+   - `LOẠI QA SAI: TEST SAI` — mọi trường hợp khác (QA test sai cách / thiếu bước / dựng request sai, công cụ gửi sai,
+     server chưa có bản sửa…). Công cụ sẽ QA lại ngay ở lượt kiểm tra kế tiếp.
 6. Phần cần người quyết định → `KẾT QUẢ: CẦN QUYẾT ĐỊNH` như thường.
 7. QA kết luận KHÔNG TỰ TEST ĐƯỢC: xét QA có tự test được không — tài khoản / quyền khác, endpoint đúng (đối chiếu
    controller trong code), bật cấu hình rồi trả lại, tạo dữ liệu QA_AUTO_*, SEARCH mã FE đã deploy… Làm được mà QA bỏ
@@ -1555,7 +1560,54 @@ def _qa_issue(kind, display_id, report_text, run_dir):
         pass
 
 
-def report_qa_wrong(api, wp_id, display_id, report_text, run_name):
+QA_WRONG_KIND_RX = re.compile(r"^\s*LOẠI QA SAI:\s*(CHẤM SAI|TEST SAI)", re.M)
+
+
+def qa_wrong_kind(report_text):
+    m = QA_WRONG_KIND_RX.search(report_text[:2000] or "")
+    return m.group(1) if m else "TEST SAI"  # không ghi rõ → an toàn: QA lại, không tự chuyển tester
+
+
+def _qa_engine_pass(qa_report):
+    """Báo cáo GỐC của Gemini (trước bước chấm tự động) có kết luận ĐẠT không. → (đúng/sai, nội dung)."""
+    if not qa_report:
+        return False, ""
+    path = os.path.join(os.path.dirname(qa_report), "qa-engine.md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return False, ""
+    return text.lstrip().startswith("QA: ĐẠT"), text
+
+
+def report_qa_wrong(api, wp_id, display_id, report_text, run_name, qa_report=None):
+    """Claude kiểm chứng kết luận QA (chưa đạt) là sai:
+    - CHẤM SAI + báo cáo gốc của Gemini là ĐẠT → dùng luôn kết luận ĐẠT: comment ĐẠT, chuyển người QA (Review → Resolved),
+      đặt lại số lần không đạt (trước đây ticket nằm chờ tới đợt merge sau rồi lại bị bước chấm hạ, SOAR-2999/965/940).
+    - còn lại (TEST SAI) → comment cách test đúng, xoá kết quả QA trên bản này và đưa vào hàng chờ QA → review-watch
+      QA lại ở lượt kiểm tra kế tiếp (~10 phút). Số lần không đạt KHÔNG reset."""
+    import deploy_qa as DQ  # nhập muộn: deploy_qa nhập op_autofix
+    n = save_qa_rules(report_text, display_id)
+    rules = ", thêm %d rule QA" % n if n else ""
+    engine_ok, engine_text = _qa_engine_pass(qa_report)
+    if qa_wrong_kind(report_text) == "CHẤM SAI" and engine_ok:
+        dcfg = envconf.deploy_config()
+        body = report_section(engine_text, "Kết quả") or "Đã kiểm tra đạt."
+        lines = ["**[QA tự động] Kiểm tra lại trên môi trường test: ĐẠT** — chuyển %s." % (dcfg.get("qa_user_name") or "QA"),
+                 "", for_tester(body)[:3000], "",
+                 "_Bước chấm tự động của công cụ đã hạ nhầm kết luận; Claude đã đối chiếu từng kết quả mong đợi với "
+                 "response thật và xác nhận ĐẠT._"]
+        op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join(lines)}})
+        wp = api.get("/api/v3/work_packages/%s" % wp_id)
+        links = {"assignee": {"href": "/api/v3/users/%s" % dcfg["qa_user_id"]}}
+        status_id = wp["_links"]["status"]["href"].rstrip("/").split("/")[-1]
+        if status_id in {str(x) for x in dcfg.get("qa_review_status_ids") or []}:
+            links["status"] = {"href": "/api/v3/statuses/%s" % AUTOFIX_DEFAULTS.get("resolved_status_id", 95)}
+        op_write(api, "PATCH", "/api/v3/work_packages/%s" % wp_id, {"lockVersion": wp["lockVersion"], "_links": links})
+        DQ.fail_count(display_id, 0)
+        return "chấm sai → dùng kết luận ĐẠT gốc, đã chuyển %s%s" % (dcfg.get("qa_user_name") or "QA", rules)
+    # Chỉ đăng mục viết cho tester; mục "Nguyên nhân" là phân tích kỹ thuật cho dev (regex, file, annotation).
     """QA SAI (Claude kiểm chứng: QA tự động trên server test sai cách / công cụ gửi sai, code đúng):
     comment hướng dẫn test đúng cho tester lên ticket, rồi xoá kết quả QA của ticket trên bản build hiện tại để
     lượt QA kế tiếp test lại (Gemini đọc comment này trong ticket). Số lần QA không đạt KHÔNG reset — lặp lại quá
@@ -1563,7 +1615,7 @@ def report_qa_wrong(api, wp_id, display_id, report_text, run_name):
     # Chỉ đăng mục viết cho tester; mục "Nguyên nhân" là phân tích kỹ thuật cho dev (regex, file, annotation).
     guide = tester_body(report_text, "Comment cho tester") or tester_body(report_text, "Nguyên nhân") \
         or "Xem báo cáo autofix %s." % run_name
-    lines = ["**[QA tự động] Kết quả \"KHÔNG ĐẠT\" trên server test trước đó chưa chính xác** — Claude kiểm chứng lại: "
+    lines = ["**[QA tự động] Kết quả QA trên server test trước đó chưa chính xác** — Claude kiểm chứng lại: "
              "nguyên nhân nằm ở cách QA tự động test, không phải ở bản sửa. QA tự động sẽ test lại theo hướng dẫn dưới đây.",
              "", guide]
     op_write(api, "POST", "/api/v3/work_packages/%s/activities" % wp_id, {"comment": {"raw": "\n".join(lines)}})
@@ -1577,8 +1629,12 @@ def report_qa_wrong(api, wp_id, display_id, report_text, run_name):
         with open(path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
         os.replace(path + ".tmp", path)
-    n = save_qa_rules(report_text, display_id)
-    return "đã comment cách test đúng%s, QA lại ở lượt kế tiếp" % (", thêm %d rule QA" % n if n else "")
+    try:  # vào hàng chờ QA → review-watch (on_tick ~10 phút) QA lại, không đợi đợt merge kế tiếp
+        DQ.save_pending(sorted(set(DQ.load_pending()) | {display_id}), "QA lại sau khi Claude kết luận QA SAI")
+        when = "QA lại ở lượt kiểm tra kế tiếp (~10 phút)"
+    except (OSError, ValueError) as ex:
+        when = "chưa đưa vào hàng chờ QA (%s) — QA lại ở đợt merge sau" % ex
+    return "đã comment cách test đúng%s, %s" % (rules, when)
 
 
 def report_answer(api, acfg, wp_id, report_text, run_name, has_fix=False):
@@ -1661,6 +1717,23 @@ GEMINI_AUTH_RX = re.compile(r"not logged in|not signed in|sign[- ]in (again|upda
 GEMINI_NO_LOGIN = "Gemini chưa đăng nhập (chạy agy để đăng nhập lại)"
 
 
+# Linux giới hạn MỘT tham số dòng lệnh 131072 byte (MAX_ARG_STRLEN): prompt QA (ticket + diff + nhật ký vòng trước +
+# rule, tiếng Việt UTF-8) vượt mức này → "[Errno 7] Argument list too long" (SOAR-1438/688, 18/11). agy chỉ nhận prompt
+# qua -p (không đọc stdin) → prompt dài ghi ra file trong thư mục Gemini được đọc, -p chỉ còn câu dẫn tới file.
+GEMINI_ARG_MAX = 100000
+
+
+def gemini_prompt_arg(prompt, dirs):
+    if len(prompt.encode("utf-8")) <= GEMINI_ARG_MAX or not dirs or not os.path.isdir(dirs[0]):
+        return prompt
+    path = os.path.join(dirs[0], ".gemini-prompt-%s-%d.md" % (datetime.now().strftime("%H%M%S%f"), os.getpid()))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(prompt)
+    return ("Toàn bộ yêu cầu của lượt này nằm trong file %s (dài %d ký tự). Đọc HẾT file bằng công cụ đọc file "
+            "(đọc nhiều lần theo từng đoạn nếu cần, không bỏ đoạn nào) rồi làm đúng theo yêu cầu và định dạng trả lời "
+            "ghi trong file đó." % (path, len(prompt)))
+
+
 def gemini_cmd(acfg, prompt, readable, commands=True, extra=(), timeout_s=None, model=None):
     """
     Lệnh agy chạy nền chỉ đọc: --mode plan, đọc được các thư mục `readable` (cả cây con), không ghi được vào chúng.
@@ -1674,6 +1747,7 @@ def gemini_cmd(acfg, prompt, readable, commands=True, extra=(), timeout_s=None, 
             dirs.append(d)
     perms = {"allow": ["read_file(%s)" % d for d in dirs], "deny": ["write_file(%s)" % d for d in dirs]}
     settings = {"permissions": perms}
+    prompt = gemini_prompt_arg(prompt, dirs)
     cmd = [os.path.expanduser(acfg["gemini_cmd"]), "-p", prompt, "--mode", "plan"]
     if commands:
         settings["toolPermission"] = "proceed-in-sandbox"
@@ -4164,7 +4238,8 @@ def main():
         elif verdict.startswith("QA SAI"):
             _qa_issue("qa_wrong", display_id, report_text, run_dir)
             try:
-                verdict += " → " + report_qa_wrong(api, wp_id, display_id, report_text, run_name)
+                verdict += " → " + report_qa_wrong(api, wp_id, display_id, report_text, run_name,
+                                                   qa_report=args.qa_report)
             except (op_watch.urllib.error.URLError, OSError, ValueError, KeyError) as ex:
                 verdict += " (comment lên ticket lỗi: %s)" % ex
         elif verdict.startswith("GIẢI ĐÁP"):
