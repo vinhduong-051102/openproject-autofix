@@ -2514,7 +2514,7 @@ def handle_fail(api, acfg, dcfg, wp, display_id, qa_path, qa_text, commits=()):
     n = fail_count(display_id, 1)
     if n <= dcfg["qa_fail_autofix_max"]:
         log_path = os.path.join(os.path.dirname(qa_path), "autofix.log")
-        how = runstate.spawn_detached(
+        how, _ = runstate.spawn_detached(
             [sys.executable, AUTOFIX, "--wp", str(wp["id"]), "--event", "QA_FAIL", "--qa-report", qa_path], log_path,
             cwd=os.path.dirname(AUTOFIX), unit="op-autofix-%s" % display_id)
         log("%s: autofix QA_FAIL chạy nền (%s)" % (display_id, how))

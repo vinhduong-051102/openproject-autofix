@@ -3841,14 +3841,14 @@ def recover(cfg, acfg, dry_run=False):
             set_status(root, display_id, state="error", verdict="bị ngắt: " + what)
             inbox(cfg, "**AUTOFIX BỊ NGẮT** %s — %s" % (display_id, what))
             continue
-        with open(os.path.join(root, ".recover-%s.log" % display_id), "a", encoding="utf-8") as logf:
+        rlog = os.path.join(root, ".recover-%s.log" % display_id)
+        with open(rlog, "a", encoding="utf-8") as logf:
             logf.write("\n[%s] %s\n" % (datetime.now().isoformat(timespec="seconds"), " ".join(argv)))
-            logf.flush()
-            child = subprocess.Popen([sys.executable, os.path.join(here, "op_autofix.py")] + argv, cwd=here,
-                                     stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                     start_new_session=True)
+        # Unit systemd riêng: --recover chạy tay / từ service oneshot thì con không bị giết khi tiến trình này thoát.
+        _, child_pid = runstate.spawn_detached([sys.executable, os.path.join(here, "op_autofix.py")] + argv, rlog,
+                                               cwd=here, unit="op-autofix-%s" % display_id)
         # Ghi PID con ngay: lượt on_tick sau thấy tiến trình còn sống, không mở trùng.
-        set_status(root, display_id, pid=child.pid, recover_attempts=attempts + 1,
+        set_status(root, display_id, pid=child_pid, recover_attempts=attempts + 1,
                    recovered_at=datetime.now().isoformat(timespec="seconds"))
         inbox(cfg, "**AUTOFIX BỊ NGẮT → CHẠY LẠI** %s — %s (lần %d/%d)" % (display_id, what, attempts + 1, MAX_RECOVER))
         # Cách nhau một chút để các lượt xếp hàng lại giữ đúng thứ tự cũ khi giành suất chạy.

@@ -71,7 +71,7 @@ def spawn_detached(cmd, log_path, cwd=None, unit=None):
     """Chạy tiến trình nền sống lâu hơn tiến trình gọi. Gọi từ op-merge.service (oneshot, KillMode=control-group):
     Popen(start_new_session) vẫn nằm trong cgroup của service → service kết thúc là systemd giết luôn (autofix QA_FAIL
     của SOAR-982 / SOAR-1438 đợt 18/11 19:00 chết lúc 19:24:54 khi op-merge xong). Dùng systemd-run --user để tách ra
-    unit riêng; không có systemd-run / user bus thì quay về Popen. Trả mô tả ngắn (tên unit hoặc pid)."""
+    unit riêng; không có systemd-run / user bus thì quay về Popen. Trả (mô tả ngắn, pid hoặc None)."""
     log_path = os.path.abspath(log_path)
     if unit and os.environ.get("XDG_RUNTIME_DIR") and _which("systemd-run"):
         name = "%s-%d" % (unit, int(time.time()))
@@ -83,13 +83,19 @@ def spawn_detached(cmd, log_path, cwd=None, unit=None):
         try:
             res = subprocess.run(run + list(cmd), capture_output=True, text=True, timeout=30)
             if res.returncode == 0:
-                return name
+                pid = None
+                try:
+                    pid = int(subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", name + ".service"],
+                                             capture_output=True, text=True, timeout=10).stdout.strip() or 0) or None
+                except (OSError, subprocess.SubprocessError, ValueError):
+                    pass
+                return name, pid
         except (OSError, subprocess.SubprocessError):
             pass
     with open(log_path, "a", encoding="utf-8") as out:
         proc = subprocess.Popen(list(cmd), cwd=cwd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 start_new_session=True)
-    return "pid %d" % proc.pid
+    return "pid %d" % proc.pid, proc.pid
 
 
 def _which(name):
