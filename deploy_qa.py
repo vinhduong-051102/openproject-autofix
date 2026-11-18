@@ -2426,7 +2426,7 @@ def be_tokens(diff_text):
                "facade", "facades", "manager", "managers", "component", "components"}
     suffix = re.compile(r"(FacadeServiceImpl|FacadeService|Facade|ServiceImpl|Service|ControllerImpl|Controller|"
                         r"Request|Response|Repository|Repo|Entity|Dto|DTO|Mapper|Impl|Processor|Matcher|Job|Config|"
-                        r"Helper|Utils?|Handler|Listener|Converter|Validator|Spec|Specification|Manager|Component)+$")
+                        r"Helper|Utils?|Handler|Listener|Converter|Validator|Spec|Specification|Manager|Component|Exceptions?)+$")
     touched, tokens = False, set()
     section = None
     for line in diff_text.splitlines():
@@ -2459,6 +2459,40 @@ def be_tokens(diff_text):
         if pkg and len(pkg) >= 4:
             tokens.add(pkg.replace("_", "-"))
     return touched, tokens
+
+
+def be_added_literals(diff_text):
+    """Chuỗi mà diff BE THÊM vào: mã lỗi UPPER_SNAKE trong chuỗi Java, giá trị câu thông báo trong messages*.properties.
+    Response chứa chuỗi này ⇒ chắc chắn BE đang chạy bản sửa (dùng cho ticket mà kết quả đúng là 4xx — SOAR-2999)."""
+    out, section, fname = set(), None, ""
+    for line in diff_text.splitlines():
+        m = re.match(r"^# (\S+) [0-9a-f]{7,40}\s*$", line)
+        if m:
+            section = m.group(1)
+            continue
+        if section != "BE":
+            continue
+        m = re.match(r"^diff --git a/(\S+) b/", line)
+        if m:
+            fname = m.group(1)
+            continue
+        if not line.startswith("+") or line.startswith("+++") or "/src/test/" in fname:
+            continue
+        if fname.endswith(".java"):
+            for lit in re.findall(r'"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"', line):
+                if len(lit) >= 8:
+                    out.add(lit)
+        elif re.search(r"messages[^/]*\.properties$", fname) and "=" in line:
+            val = line[1:].split("=", 1)[1].strip()
+            if "\\u" in val:
+                try:
+                    val = val.encode("latin-1", "backslashreplace").decode("unicode_escape")
+                except (UnicodeError, ValueError):
+                    pass
+            val = re.split(r"\{\d+\}", val)[0].strip()  # bỏ phần tham số {0}
+            if len(val) >= 12:
+                out.add(val)
+    return out
 
 
 def _stem(w):
@@ -2498,6 +2532,12 @@ def _related(target, tokens):
             return True  # cả cụm nằm trong một đoạn URL (correlation-rule ↔ /correlation-rules)
         if all(any(_stem(w) == st or (len(w) >= 5 and _stem(w) in st) for st in stems) for w in words[-1:]):
             return True  # từ cuối cùng (danh từ chính: history của common-history) khớp một đoạn URL
+        # Từ của từ khoá trùng một từ trong đoạn URL ghép gạch nối: user ↔ /export-user-implement (SOAR-940),
+        # forgot-password-otp-invalid ↔ /forgot-password (SOAR-965).
+        sub = {_stem(x) for sg in segs for x in sg.split("-") if len(x) >= 4}
+        kw = {_stem(w) for w in words}
+        if kw & sub and (len(words) == 1 or len(kw & sub) >= 2 or words[-1:] and _stem(words[-1]) in sub):
+            return True
         # Tên class ghép nhiều từ nhưng URL viết liền: HealthCheckAlert → health-check-alert ↔ /healthchecks/
         for n in range(len(words), 0, -1):
             joined = "".join(words[:n])
@@ -2661,6 +2701,13 @@ def verify_pass(text, qa_dir, dcfg=None, start=None, end=None, read_log=None):
     if has_be and not verdict:
         ok = [r for r in reqs if r["method"] in API_METHODS and r["status"] and 200 <= r["status"] < 300
               and "/api/" in r["target"] and _related(r["target"], tokens)]
+        if not ok:
+            # Bản sửa là validate / câu thông báo lỗi: response 4xx (trừ 401/403) chứa chuỗi diff BE vừa thêm cũng là
+            # bằng chứng BE chạy bản sửa (SOAR-2999: 400 CASE_IDS_REQUIRED).
+            lits = be_added_literals(diff_text)
+            ok = [r for r in reqs if r["method"] in API_METHODS and r["status"] and 400 <= r["status"] < 500
+                  and r["status"] not in (401, 403) and "/api/" in r["target"]
+                  and any(x in (r["out"] or "") for x in lits)]
         if not ok:
             verdict = "KHÔNG TỰ TEST ĐƯỢC"
             reasons.append("BE chưa có bằng chứng")
