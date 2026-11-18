@@ -35,6 +35,7 @@ import envconf  # noqa: E402
 import op_autofix as af  # noqa: E402
 import op_watch  # noqa: E402
 import cherry  # noqa: E402  gắp commit sang nhánh khác
+import runstate  # noqa: E402
 import qa_issues  # noqa: E402  nhật ký sự cố QA test / QA server
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -505,7 +506,7 @@ def review_queue(force=False):
     d = _REVIEWQ["data"] or {}
     return {"items": d.get("items", []), "build": d.get("build"), "server_up": d.get("server_up"),
             "checked_at": d.get("at"), "error": _REVIEWQ["error"], "busy": _REVIEWQ["busy"],
-            "running": os.path.exists(os.path.join(load()[2], ".qa-active")),
+            "running": runstate.qa_state(load()[2]) == "qa",
             "qa_name": envconf.deploy_config().get("qa_user_name") or "người QA"}
 
 
@@ -1112,10 +1113,13 @@ def action(body):
         tid = (body.get("display_id") or "").strip()
         if not re.match(r"^[A-Z][A-Z0-9]*-\d+$", tid):
             raise ValueError("mã ticket không hợp lệ")
-        if os.path.exists(os.path.join(root, ".qa-active")):
-            raise ValueError("đang có lượt QA khác chạy trên server — chờ xong rồi bấm lại")
-        if subprocess.run(["systemctl", "--user", "is-active", "--quiet", "op-merge.service"]).returncode == 0:
+        if runstate.merge_running():
             raise ValueError("đang merge + deploy — chờ xong rồi bấm lại")
+        state = runstate.qa_state(root)
+        if state == "deploy":
+            raise ValueError("server đang được deploy — chờ xong rồi bấm lại")
+        if state == "qa":
+            raise ValueError("đang có lượt QA khác chạy trên server — chờ xong rồi bấm lại")
         subprocess.Popen([sys.executable, os.path.join(HERE, "deploy_qa.py"), "--qa", tid, "--force"], cwd=HERE,
                          stdout=open(os.path.join(root, ".review-watch.log"), "a"), stderr=subprocess.STDOUT,
                          start_new_session=True)

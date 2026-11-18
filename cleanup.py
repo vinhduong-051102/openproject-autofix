@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envconf  # noqa: E402
 import op_autofix as af  # noqa: E402
 import op_watch  # noqa: E402
+import runstate  # noqa: E402
 
 PRUNE_AFTER = int(envconf.get("CLEANUP_PRUNE_AFTER") or 3600)
 PRUNE_NAMES = {"node_modules", "target", "dist", "build", ".turbo", ".next", ".nuxt", ".parcel-cache", ".vite",
@@ -76,8 +77,17 @@ def busy(root, display_id):
             data = {}
         if data.get("state") in af.ACTIVE_STATES and af.status_alive(data):
             return True
-    # QA trên server đang chạy (deploy_qa ghi .qa-active) và thư mục QA của ticket mới được tạo
-    if os.path.exists(os.path.join(root, ".qa-active")):
+    # Ticket đang được QA trên server (deploy_qa giữ khoá .qa-ticket-<SOAR-x>.lock)
+    qlock = runstate.ticket_lock_path(root, display_id)
+    if os.path.exists(qlock):
+        with open(qlock, "a") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+            except OSError:
+                return True
+    # Có lượt QA trên server đang chạy (khoá .qa-run.lock) và thư mục QA của ticket mới được tạo
+    if runstate.qa_state(root) == "qa":
         for d in glob.glob(os.path.join(root, "%s-qa-*" % display_id)):
             if time.time() - os.path.getmtime(d) < 3600:
                 return True
@@ -379,6 +389,7 @@ def run(dry=False, only=None):
                             os.path.join(root, ".pending-followup", display_id + ".json")]:
             if os.path.exists(p):
                 os.remove(p)
+        runstate.remove_ticket_lock(root, display_id)
         for name in ("qa-history.json", "qa-fail-count.json", "qa-pending.json"):
             drop_key(os.path.join(root, name), display_id, dry)
         done.append(display_id)

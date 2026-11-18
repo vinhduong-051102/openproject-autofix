@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envconf  # noqa: E402
 import repos as R  # noqa: E402  danh sách repo (cấu hình động; mặc định FE + BE như trước)  (nạp .env)
 import op_watch  # noqa: E402  (dùng chung cấu hình + client OpenProject)
+import runstate  # noqa: E402
 import projects as P  # noqa: E402  nhiều dự án: mỗi ticket dùng repo / quy ước của dự án mình (theo tiền tố mã)
 
 _CFG = {}  # cấu hình op-watch đầy đủ của tiến trình (main ghi) — để tra dự án của một ticket
@@ -2118,6 +2119,16 @@ def claude_followup(acfg, display_id, wp, run_dir, fe_dir, be_dir, gemini_verdic
     return (m.group(1) if m else ""), text
 
 
+def ticket_still_mine(api, wp_id):
+    """Ticket vẫn giao cho mình (người chạy tool)? Lỗi đọc OpenProject → coi như còn (giữ hành vi cũ)."""
+    try:
+        wp = api.get("/api/v3/work_packages/%s" % wp_id)
+        me = api.me()["id"]
+    except Exception:  # noqa: BLE001
+        return True
+    return ((wp.get("_links") or {}).get("assignee") or {}).get("href", "").rstrip("/").endswith("/%s" % me)
+
+
 def deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, report_text, review_of=None,
             gemini_from=None):
     """Bọc _deliver: ghi thời gian kiểm tra + Gemini test lại + push (Testing); push xong → Finish date."""
@@ -3031,10 +3042,10 @@ def review_ticket(api, cfg, acfg, ref, profile=None, gemini_from=None):
     wp_id, display_id = wp["id"], wp.get("displayId") or "WP-%s" % wp["id"]
     cfg, acfg = for_ticket(cfg, acfg, display_id, wp)
     # QA trên server đang chạy (deploy_qa) thì ưu tiên nó: chờ xong mới test lại ticket cũ.
-    qa_flag = os.path.join(root, ".qa-active")
-    if os.path.exists(qa_flag):
+    if runstate.qa_state(root) == "qa":
         log("%s: chờ QA trên server xong (ưu tiên QA)" % display_id)
-        while os.path.exists(qa_flag) and time.time() - os.path.getmtime(qa_flag) < 6 * 3600:
+        deadline = time.time() + 6 * 3600
+        while runstate.qa_state(root) == "qa" and time.time() < deadline:
             time.sleep(30)
     global_lock = acquire_slot(root, acfg, wait=False)
     if global_lock is None:
@@ -3923,6 +3934,12 @@ def main():
         log("%s đang được xử lý, bỏ qua" % display_id)
         return
 
+    if event == "QA_FAIL" and not ticket_still_mine(api, wp_id):
+        msg = "bỏ kiểm chứng QA không đạt: ticket đã chuyển người khác (vd lượt QA khác đã chuyển tester)"
+        log("%s (QA_FAIL): %s" % (display_id, msg))
+        inbox(cfg, "**AUTOFIX BỎ QUA** %s — %s" % (display_id, msg))
+        return
+
     # Tối đa max_parallel lượt chạy cùng lúc: hết suất thì chờ ở đây.
     log("%s (%s): chờ tới lượt" % (display_id, event))
     set_status(root, display_id, state="queued", event=event, queued_at=datetime.now().isoformat(timespec="seconds"),
@@ -4097,7 +4114,12 @@ def main():
             except Exception as ex:  # noqa: BLE001 — hỗ trợ lỗi thì giao kết quả cũ như thường
                 log("%s: bước hỗ trợ lỗi: %s" % (display_id, ex))
                 report_text, verdict = report_verdict(report)
-        if verdict.startswith("CẦN QUYẾT ĐỊNH") and acfg.get("review_status_id"):
+        # QA_FAIL: trong lúc Claude kiểm chứng, ticket có thể đã được chuyển tester (vd lượt QA khác ĐẠT) →
+        # không comment / đổi trạng thái / push; commit (nếu có) giữ trong worktree để người xem.
+        gone = event == "QA_FAIL" and not ticket_still_mine(api, wp_id)
+        if gone:
+            verdict += " → bỏ: ticket đã chuyển người khác trong lúc kiểm chứng (không comment, không push)"
+        if not gone and verdict.startswith("CẦN QUYẾT ĐỊNH") and acfg.get("review_status_id"):
             try:
                 mark_for_review(api, wp_id, acfg["review_status_id"], report_text, run_name, run_dir)
                 verdict += " → đã chuyển UNREVIEWED"
@@ -4111,7 +4133,9 @@ def main():
             if out:
                 commits.append("%s %s" % (label, out.splitlines()[0].split()[0]))
         has_fix = any_fix(acfg, run_dir)
-        if verdict.startswith("ĐÃ SỬA") and has_fix and acfg.get("auto_ship"):
+        if gone:
+            pass
+        elif verdict.startswith("ĐÃ SỬA") and has_fix and acfg.get("auto_ship"):
             set_status(root, display_id, state="shipping")
             log("%s: kiểm tra lại + push" % display_id)
             notify("[AUTOFIX ĐANG PUSH] %s" % display_id, "Đã sửa — đang build / test, Gemini test lại rồi push")

@@ -45,6 +45,7 @@ import op_autofix as af  # noqa: E402
 import op_watch  # noqa: E402
 
 import envconf  # noqa: E402
+import runstate  # noqa: E402
 import projects as P  # noqa: E402
 import qa_issues  # noqa: E402
 
@@ -220,7 +221,7 @@ def expand_repeat(text, notes):
         return out
     return REPEAT_RX.sub(sub, text)
 # Có file này = đang QA trên server: đợt test lại bằng Gemini (op_autofix --review) chờ, nhường agy cho QA.
-QA_ACTIVE = os.path.join(envconf.autofix_root(), ".qa-active")
+QA_ACTIVE = os.path.join(envconf.autofix_root(), ".qa-active")  # chỉ để tương thích; trạng thái thật: runstate.qa_state
 AUTOFIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "op_autofix.py")
 
 PENDING = os.path.join(envconf.autofix_root(), "qa-pending.json")
@@ -2649,7 +2650,7 @@ def qa_waited(reqs, qa_dir):
 
 def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None, fix_missing=None):
     """Bọc _qa_ticket: ghi thời gian QA trên server lên ticket (Testing). Một ticket chỉ một lượt QA cùng lúc."""
-    lk = open(os.path.join(os.path.expanduser(acfg["root"]), ".qa-ticket-%s.lock" % display_id), "w")
+    lk = open(runstate.ticket_lock_path(acfg["root"], display_id), "a")
     try:
         fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -2674,6 +2675,7 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
     status_id = wp["_links"]["status"]["href"].rstrip("/").split("/")[-1]
     review = status_id in {str(x) for x in dcfg.get("qa_review_status_ids") or []}
     if not assignee.endswith("/%s" % me_id) or (status_id != str(acfg["resolved_status_id"]) and not review):
+        log("%s: bỏ qua (không phải của mình / không ở Resolved / Review)" % display_id)
         return "", ""
     root = os.path.expanduser(acfg["root"])
     qa_dir = os.path.join(root, "%s-qa-%s" % (display_id, datetime.now().strftime("%m%d-%H%M")))
@@ -2727,9 +2729,12 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
             now_status != str(acfg["resolved_status_id"]) and now_status not in
             {str(x) for x in dcfg.get("qa_review_status_ids") or []}):
         # Trong lúc QA, ticket đã được chuyển (vd lượt QA khác đã chuyển tester) → không comment / không giao Claude.
-        log("%s: QA xong (%s) nhưng ticket đã đổi người / trạng thái trong lúc QA — không xử lý kết quả"
-            % (display_id, verdict))
+        msg = "QA xong (%s) nhưng ticket đã đổi người / trạng thái trong lúc QA — bỏ kết quả, không comment," \
+              " không giao Claude" % verdict
+        log("%s: %s" % (display_id, msg))
+        inbox(cfg, "**QA SERVER BỎ KẾT QUẢ** %s — %s · %s" % (display_id, msg, path))
         return "", path
+    review = now_status in {str(x) for x in dcfg.get("qa_review_status_ids") or []}  # trạng thái lúc có kết quả
     if verdict == "ĐẠT":
         # Kiểm tra lại trước khi comment / chuyển QA: HTTP 5xx, lỗi log BE, BE sửa mà không có request API 2xx.
         checked, reasons = verify_pass(text, qa_dir, dcfg, qa_start, time.time())
@@ -2924,7 +2929,7 @@ def _review_watch(proj):
         fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return
-    if os.path.exists(QA_ACTIVE) or qa_run_busy() or merge_running():
+    if runstate.qa_busy(root) or runstate.merge_running():
         return
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
     review_wps = api.my_work_packages(cfg["project"], [str(x) for x in dcfg["qa_review_status_ids"]])
@@ -2961,25 +2966,6 @@ def _review_watch(proj):
     if cands:
         log("ticket Review / hàng chờ cần QA trên bản đang chạy: %s" % ", ".join(cands))
         run_one(proj, only=cands, auto_only=True, review=review)
-
-
-def merge_running():
-    """op-merge.service là Type=oneshot: lúc đang chạy ở trạng thái "activating" (is-active --quiet trả mã 3)."""
-    state = subprocess.run(["systemctl", "--user", "show", "-p", "ActiveState", "--value", "op-merge.service"],
-                           capture_output=True, text=True).stdout.strip()
-    return state in ("active", "activating", "reloading", "deactivating")
-
-
-def qa_run_busy():
-    """Có lượt deploy (khoá ghi) hoặc QA (khoá đọc) nào đang giữ QA_RUN_LOCK? Đúng cả khi nhiều lượt chạy song song
-    (QA_ACTIVE là một file chung: lượt xong trước xoá mất dấu của lượt còn chạy)."""
-    with open(QA_RUN_LOCK, "a") as fd:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
 
 
 def _autofix_busy(status_dir, display_id):
@@ -3245,7 +3231,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         try:
             verdict, path = qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, hashes, deployed, guard,
                                       fix_missing=fix_missing)
-            log("%s: %s" % (display_id, verdict or "bỏ qua (không phải của mình / không ở Resolved)"))
+            if verdict:  # "" = bỏ qua, lý do đã ghi log trong qa_ticket
+                log("%s: %s" % (display_id, verdict))
             if verdict and QA_TOOL_ERROR not in verdict:
                 qa_history(display_id, build, verdict)
             elif verdict:
