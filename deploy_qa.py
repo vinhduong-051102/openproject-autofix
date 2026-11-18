@@ -2648,9 +2648,19 @@ def qa_waited(reqs, qa_dir):
 
 
 def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None, fix_missing=None):
-    """Bọc _qa_ticket: ghi thời gian QA trên server lên ticket (Testing)."""
-    t0 = time.time()
-    verdict, path = _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard, fix_missing)
+    """Bọc _qa_ticket: ghi thời gian QA trên server lên ticket (Testing). Một ticket chỉ một lượt QA cùng lúc."""
+    lk = open(os.path.join(os.path.expanduser(acfg["root"]), ".qa-ticket-%s.lock" % display_id), "w")
+    try:
+        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lk.close()
+        log("%s: đang được QA ở lượt khác — bỏ qua" % display_id)
+        return "", ""
+    try:
+        t0 = time.time()
+        verdict, path = _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard, fix_missing)
+    finally:
+        lk.close()
     if verdict:  # "" = không phải ticket của mình / không ở trạng thái QA → không ghi
         af.log_time(api, dict(af.AUTOFIX_DEFAULTS, **acfg), display_id, time.time() - t0, "test",
                     "[QA tự động] Gemini QA trên server test (%s) — %s" % (deployed, verdict[:120]))
@@ -2711,6 +2721,15 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
     change = guard() if guard else None
     if change:
         raise ServerChanged(change)
+    now = api.get("/api/v3/work_packages/%s" % wp["id"])
+    now_status = now["_links"]["status"]["href"].rstrip("/").split("/")[-1]
+    if not (now["_links"].get("assignee") or {}).get("href", "").endswith("/%s" % me_id) or (
+            now_status != str(acfg["resolved_status_id"]) and now_status not in
+            {str(x) for x in dcfg.get("qa_review_status_ids") or []}):
+        # Trong lúc QA, ticket đã được chuyển (vd lượt QA khác đã chuyển tester) → không comment / không giao Claude.
+        log("%s: QA xong (%s) nhưng ticket đã đổi người / trạng thái trong lúc QA — không xử lý kết quả"
+            % (display_id, verdict))
+        return "", path
     if verdict == "ĐẠT":
         # Kiểm tra lại trước khi comment / chuyển QA: HTTP 5xx, lỗi log BE, BE sửa mà không có request API 2xx.
         checked, reasons = verify_pass(text, qa_dir, dcfg, qa_start, time.time())
@@ -2905,8 +2924,7 @@ def _review_watch(proj):
         fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return
-    if os.path.exists(QA_ACTIVE) or subprocess.run(["systemctl", "--user", "is-active", "--quiet", "op-merge.service"]
-                                                   ).returncode == 0:
+    if os.path.exists(QA_ACTIVE) or qa_run_busy() or merge_running():
         return
     api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
     review_wps = api.my_work_packages(cfg["project"], [str(x) for x in dcfg["qa_review_status_ids"]])
@@ -2943,6 +2961,25 @@ def _review_watch(proj):
     if cands:
         log("ticket Review / hàng chờ cần QA trên bản đang chạy: %s" % ", ".join(cands))
         run_one(proj, only=cands, auto_only=True, review=review)
+
+
+def merge_running():
+    """op-merge.service là Type=oneshot: lúc đang chạy ở trạng thái "activating" (is-active --quiet trả mã 3)."""
+    state = subprocess.run(["systemctl", "--user", "show", "-p", "ActiveState", "--value", "op-merge.service"],
+                           capture_output=True, text=True).stdout.strip()
+    return state in ("active", "activating", "reloading", "deactivating")
+
+
+def qa_run_busy():
+    """Có lượt deploy (khoá ghi) hoặc QA (khoá đọc) nào đang giữ QA_RUN_LOCK? Đúng cả khi nhiều lượt chạy song song
+    (QA_ACTIVE là một file chung: lượt xong trước xoá mất dấu của lượt còn chạy)."""
+    with open(QA_RUN_LOCK, "a") as fd:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
 
 
 def _autofix_busy(status_dir, display_id):
