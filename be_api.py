@@ -510,6 +510,176 @@ class Index:
         return "\n".join(out)
 
 
+def _refs_graph(idx):
+    """{"refs": {class: [class mà file nhắc tới]}, "supers": {class: [interface / lớp cha]}} cho mã main (cache theo
+    commit). supers cần vì controller inject interface (AuthenticateFacadeService), không bao giờ nhắc tên ...Impl."""
+    cache = os.path.join(CACHE_DIR, "be-refs3-%s.json" % idx.sha[:12])
+    try:
+        with open(cache, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        pass
+    names = set(idx.classes)
+    graph = {"refs": {}, "supers": {}, "calls": {}}
+    for path, src in _read_many(idx.repo, idx.sha, sorted(set(idx.classes.values()))).items():
+        me = os.path.basename(path)[:-5]
+        src = _strip_comments(src)
+        words = set(re.findall(r"\b[A-Z]\w+\b", src))
+        graph["refs"][me] = sorted((words & names) - {me})
+        graph["calls"][me] = sorted(set(re.findall(r"\.([a-z]\w{5,})\s*\(", src)))
+        m = re.search(r"\b(?:class|interface)\s+%s\b[^{]*" % re.escape(me), src)
+        if m:
+            sup = set(re.findall(r"\b[A-Z]\w+\b", re.sub(r"<[^{]*?>", " ", m.group(0)))) & names
+            graph["supers"][me] = sorted(sup - {me})
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(cache, "w", encoding="utf-8") as f:
+            json.dump(graph, f)
+    except OSError:
+        pass
+    return graph
+
+
+_DECL = re.compile(r"^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private|static|final|synchronized|default|\s)+"
+                   r"[\w<>\[\], ?.]+\s+([a-z]\w*)\s*\([^;{]*\)\s*(?:throws [\w., ]+)?\s*\{", re.M)
+
+
+def _expand_in_class(src, names, rounds=4):
+    """Hàm trong CÙNG class có gọi tới các hàm `names` (hàm private sửa → hàm public bọc nó), lặp tới khi ổn định."""
+    src = _strip_comments(src)
+    decls = [(m.start(), m.group(1)) for m in _DECL.finditer(src)]
+    if not decls:
+        return set(names)
+    found = set(names)
+    for _ in range(rounds):
+        add = set()
+        for n in found:
+            for m in re.finditer(r"(?<![\w.])(?:this\.)?%s\s*\(" % re.escape(n), src):
+                owner = [d for pos, d in decls if pos <= m.start()]
+                if owner and owner[-1] != n:
+                    add.add(owner[-1])
+        if add <= found:
+            break
+        found |= add
+    return found
+
+
+def related_endpoints(repo, class_names, ref=None, depth=6, cap=120, methods=()):
+    """
+    Endpoint (method, path) có thể chạy qua code của các class đã sửa: đi ngược "ai nhắc tới class này" từ class sửa
+    lên tới controller (DTO, exception, service, repository → facade → controller). Lấy theo từng tầng gần nhất: tầng
+    đầu có controller mà tổng endpoint vượt `cap` thì dừng ở đó (service dùng chung → không kéo cả hệ thống).
+    Trả [] khi không đọc được repo. Dùng cho bước chấm QA: request trên endpoint này mới là bằng chứng BE chạy bản sửa.
+    """
+    key = (os.path.expanduser(repo), ref)
+    idx = _MEM.get(key) or _MEM.setdefault(key, Index(repo, ref))
+    if not idx.sha:
+        return []
+    graph = _refs_graph(idx)
+    refs, supers = graph.get("refs", {}), graph.get("supers", {})
+    users = {}
+    for c, rs in refs.items():
+        for r in rs:
+            users.setdefault(r, set()).add(c)
+    by_ctrl = {}
+    for e in idx.endpoints:
+        by_ctrl.setdefault(e["controller"], []).append(e)
+
+    def widen(cs):  # class sửa ~ interface / lớp cha của nó (người dùng interface chạy tới code của Impl)
+        out_ = set(cs)
+        for c in cs:
+            out_ |= set(supers.get(c, []))
+        return out_
+
+    changed = {c for c in class_names if c in refs or c in by_ctrl}
+    # DTO / tham số sửa: endpoint nhận đúng kiểu đó là chính xác nhất (không kéo cả controller)
+    direct = [e for e in idx.endpoints
+              if any(re.search(r"\b%s\b" % re.escape(c), p.get("type", "")) for p in e["params"] for c in changed)]
+    # hàm sửa trùng tên hàm controller (facade.exportUserImplementReport ↔ ReportController.exportUserImplementReport)
+    if methods:  # hàm private sửa → hàm public trong cùng class gọi nó (queryUserImplementReport → exportUserImplementReport)
+        srcs = _read_many(idx.repo, idx.sha, [idx.classes[c] for c in class_names if c in idx.classes])
+        methods = set(methods)
+        for src in srcs.values():
+            methods |= _expand_in_class(src, methods)
+    low = {m.lower() for m in methods if len(m) >= 6}
+    direct += [e for e in idx.endpoints if e["handler"].lower() in low]
+    # Lớp GỌI hàm đã sửa (.queryUserImplementReport(...)) chính xác hơn mọi lớp nhắc tên class dùng chung
+    # (UserFacadeServiceImpl có hàng chục controller dùng — SOAR-940): đi ngược từ các lớp gọi này trước.
+    calls = graph.get("calls", {})
+    callers = {c for c, ms in calls.items() if low & {m.lower() for m in ms}} - changed
+    if callers:
+        direct += related_endpoints(repo, sorted(callers), ref, depth, cap)
+    seen = widen(changed)
+    level, out = set(seen), list(direct)
+    for _ in range(depth + 1):
+        found = [e for c in sorted(level) for e in by_ctrl.get(c, [])]
+        if found:
+            if out and len(out) + len(found) > cap:
+                break
+            out.extend(found)
+            if len(out) >= cap:
+                break
+        nxt = set()
+        for c in level:
+            nxt |= users.get(c, set())
+        nxt = widen(nxt)
+        level = nxt - seen
+        seen |= level
+        if not level:
+            break
+    uniq, keys = [], set()
+    for e in out:
+        k = (e["method"], e["path"])
+        if k not in keys:
+            keys.add(k)
+            uniq.append({"method": e["method"], "path": e["path"], "controller": e["controller"], "handler": e["handler"]})
+    return uniq
+
+
+def path_matches(pattern, target):
+    """Đường dẫn request khớp mẫu endpoint ("/api/v1/cases/{id}") — bỏ query, {biến} khớp một đoạn bất kỳ."""
+    segs = [x for x in re.sub(r"^https?://[^/]+", "", target or "").split("?")[0].split("/") if x]
+    want = [x for x in pattern.split("/") if x]
+    return len(segs) == len(want) and all(w.startswith("{") or w == s for w, s in zip(want, segs))
+
+
+def precheck(repo, method, target, body, ref=None):
+    """
+    Kiểm tra request TRƯỚC khi gửi theo mã BE (chỉ khi đường dẫn khớp đúng một endpoint đã biết): sai phương thức,
+    thiếu tham số query bắt buộc, thiếu body bắt buộc. Trả "" (cho gửi) hoặc lý do + chữ ký đúng (không gửi).
+    """
+    path = re.sub(r"^https?://[^/]+", "", target or "")
+    if "/api/" not in path:
+        return ""
+    try:
+        key = (os.path.expanduser(repo), ref)
+        idx = _MEM.get(key) or _MEM.setdefault(key, Index(repo, ref))
+    except Exception:  # noqa: BLE001
+        return ""
+    exact = [e for e in idx.endpoints if path_matches(e["path"], path)]
+    if not exact:
+        return ""
+    # đoạn tĩnh nhiều nhất = cụ thể nhất (GET /cases/export thắng GET /cases/{id})
+    best = max(sum(1 for x in e["path"].split("/") if x and not x.startswith("{")) for e in exact)
+    exact = [e for e in exact if sum(1 for x in e["path"].split("/") if x and not x.startswith("{")) == best]
+    same = [e for e in exact if e["method"] in (method, "ANY")]
+    if not same:
+        return ("phương thức %s không có trên đường dẫn này theo mã BE (sẽ trả 405)\n\n%s"
+                % (method, "\n\n".join(idx.describe(e) for e in exact)))
+    e = same[0]
+    query = set(re.findall(r"[?&]([^=&#]+)=", target or ""))
+    missing = [p["name"] for p in e["params"] if p["kind"] == "query" and p.get("required") and p["name"] not in query]
+    problems = []
+    if missing:
+        problems.append("thiếu tham số query bắt buộc: %s" % ", ".join(missing))
+    need_body = [p for p in e["params"] if p["kind"] == "body" and p.get("required", True)]
+    if need_body and method in ("POST", "PUT", "PATCH") and not (body or "").strip():
+        problems.append("thiếu body JSON bắt buộc (%s)" % need_body[0]["type"])
+    if not problems:
+        return ""
+    return "%s\n\n%s" % ("; ".join(problems), idx.describe(e))
+
+
 def lookup(repo, query, ref=None, limit=12):
     """Kết quả tra cứu dạng chữ cho Gemini."""
     query = (query or "").strip()

@@ -359,6 +359,12 @@ Gọi API: mỗi phần tử `calls` gồm
   một tài khoản test QA_AUTO_* vừa tạo, hoặc tài khoản tester ghi trong ticket (sau đó tool nhớ, chỉ cần account)
 - why: gọi để kiểm tra gì
 - parallel: true trên các request của CÙNG một vòng → các request đó được gửi đồng thời (test tranh chấp / gửi trùng)
+- intentional_invalid: true khi CỐ Ý gửi request thiếu / sai (test validate, test lỗi thiếu tham số). Không có cờ này,
+  công cụ kiểm tra request theo mã BE trước khi gửi: sai phương thức, thiếu tham số query / body bắt buộc → KHÔNG gửi,
+  trả lại chữ ký đúng để bạn gửi lại.
+- Response 5xx của request do bạn TỰ DỰNG (không phải đúng cách màn hình gọi): công cụ kèm chữ ký BE + đoạn mã FE gọi
+  endpoint đó. Trước khi kết luận, gửi lại ĐÚNG như màn hình gọi (đủ tham số mã FE truyền, vd `type`); 5xx vẫn còn khi
+  đã gửi đúng như màn hình thì mới là lỗi thật.
 Tối đa {max_calls} request mỗi vòng; response dài bị cắt.
 CHUỖI DÀI / LẶP (test giới hạn độ dài…): KHÔNG tự gõ chuỗi dài (dễ đếm sai). Viết `{{{{rep:<chuỗi>:<số lần>}}}}` trong
 body / target / file_name / file_content, công cụ thay bằng chuỗi lặp đúng số lần và ghi lại độ dài thực gửi. Ví dụ tên
@@ -459,6 +465,7 @@ QA_SCHEMA = {
             "method": {"type": "string"}, "target": {"type": "string"}, "body": {"type": "string"},
             "header": {"type": "string"}, "file_name": {"type": "string"}, "file_content": {"type": "string"},
             "account": {"type": "string"}, "password": {"type": "string"}, "parallel": {"type": "boolean"},
+            "intentional_invalid": {"type": "boolean"},
             "why": {"type": "string"}}, "required": ["method", "target"]}},
         "verdict": {"type": "string", "enum": ["ĐẠT", "KHÔNG ĐẠT", "KHÔNG TỰ TEST ĐƯỢC", "KHÔNG RÕ YÊU CẦU", "CHƯA"]},
         "result": {"type": "string"}, "evidence": {"type": "string"}, "notes": {"type": "string"},
@@ -526,6 +533,11 @@ def soar_call(qa_dir, call, dcfg=None):
     for k in ("target", "body", "file_name", "file_content"):
         if isinstance(call.get(k), str):
             call[k] = expand_repeat(call[k], rep_notes)
+    if method in ("GET", "POST", "PUT", "PATCH") and not call.get("intentional_invalid"):
+        pre = be_api_precheck(dcfg, method, call.get("target", ""), call.get("body") or "")
+        if pre:
+            return ("CÔNG CỤ CHƯA GỬI request này — kiểm tra trước theo mã BE: %s\n\n(Sửa rồi gửi lại. Cố ý gửi "
+                    "sai để test validate thì gửi lại kèm \"intentional_invalid\": true.)" % pre)[:4000]
     cmd = ["python3", SOAR_API]
     if call.get("account"):
         cmd += ["--as", call["account"]]
@@ -577,6 +589,11 @@ def soar_call(qa_dir, call, dcfg=None):
         # Request dựng sai (thiếu /{id}, sai phương thức, sai tên trường) là lý do QA kẹt nhiều vòng nhất (SOAR-1437,
         # SOAR-1497): kèm luôn chữ ký endpoint theo mã BE để vòng sau gửi lại đúng.
         out += be_api_hint(dcfg, method, call.get("target", ""), int(st.group(1)))
+    elif st and int(st.group(1)) >= 500 and method != "UPLOAD":
+        # 5xx thường do request tự dựng thiếu tham số mà màn hình luôn gửi (SOAR-982/2978: /histories thiếu type — BE
+        # để không bắt buộc nhưng vẫn lỗi): kèm chữ ký BE + chỗ mã FE gọi endpoint để vòng sau gửi đúng như màn hình.
+        out += be_api_hint(dcfg, method, call.get("target", ""), int(st.group(1)))
+        out += fe_call_sites(dcfg, call.get("target", ""))
     return out
 
 
@@ -600,6 +617,62 @@ def be_api_lookup(dcfg, query):
     except Exception as ex:  # noqa: BLE001
         return "API: lỗi tra cứu mã BE (%s)" % ex
     return out if len(out) <= 6000 else out[:6000] + "\n… (cắt — thu hẹp từ khoá)"
+
+
+def be_api_precheck(dcfg, method, target, body):
+    repo, ref = _be_api_ctx(dcfg)
+    if not repo:
+        return ""
+    try:
+        import be_api
+        return be_api.precheck(repo, method, target, body, ref)
+    except Exception:  # noqa: BLE001 — kiểm tra trước là phụ, lỗi thì cứ gửi
+        return ""
+
+
+def fe_call_sites(dcfg, target, limit=6):
+    """Chỗ mã FE (nhánh deploy) nhắc tới đoạn đường dẫn cuối của target — để thấy màn hình gửi tham số gì."""
+    repo, ref = (dcfg or {}).get("_fe_repo"), (dcfg or {}).get("_fe_ref")
+    path = re.sub(r"^https?://[^/]+", "", target or "").split("?")[0]
+    segs = [x for x in path.split("/") if x and not re.fullmatch(r"\d+|[0-9a-f-]{8,}|v\d+|api", x)]
+    if not repo or not segs:
+        return ""
+    needle = "/" + "/".join(segs[-2:]) if len(segs) >= 2 else "/" + segs[-1]
+    out = []
+    for pat in (needle, "/" + segs[-1]):
+        res = subprocess.run(["git", "-C", os.path.expanduser(repo), "grep", "-n", "-F", "-C", "3", pat] + ([ref] if ref else [])
+                             + ["--", "src", ":!src/i18n"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             universal_newlines=True, errors="replace").stdout
+        if res.strip():
+            out = res.strip().split("\n--\n")[:limit]
+            break
+    if not out:
+        return ""
+    # Đường dẫn thường chỉ khai báo trong hằng (ServicePaths.ts: GET_HISTORY: "/api/v1/histories") — tìm tiếp chỗ GỌI
+    # hằng đó (ở đó mới có tham số thật: type, object_id…).
+    keys = []
+    # hằng có giá trị ĐÚNG đường dẫn request trước; không có mới lấy hằng kết thúc bằng đoạn cuối
+    for rx in (r"\b([A-Z][A-Z0-9_]{2,})\s*:\s*[\"'`]%s[\"'`]" % re.escape(path.rstrip("/")),
+               r"\b([A-Z][A-Z0-9_]{2,})\s*:\s*[\"'`][^\"'`]*%s[\"'`]" % re.escape(needle)):
+        for blk in out:
+            for m in re.finditer(rx, blk):
+                # tên đầy đủ NHÓM.KHOÁ (COMMON.GET_HISTORY ≠ HEALTHCHECK.GET_HISTORY): nhóm = "TEN: {" gần nhất phía trên
+                grp = re.findall(r"\b([A-Z][A-Z0-9_]+)\s*:\s*\{", blk[:m.start()])
+                k = "%s.%s" % (grp[-1], m.group(1)) if grp else m.group(1)
+                if k not in keys:
+                    keys.append(k)
+        if keys:
+            break
+    uses = []
+    for k in keys[:3]:
+        res = subprocess.run(["git", "-C", os.path.expanduser(repo), "grep", "-n", "-w", "-F", "-C", "4", k] + ([ref] if ref else [])
+                             + ["--", "src", ":!src/i18n", ":!src/constants"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, universal_newlines=True, errors="replace").stdout
+        uses += [x for x in res.strip().split("\n--\n") if x.strip()][:3]
+    if uses:
+        out = uses[:limit]
+    text = "\n--\n".join(x[:700] for x in out)
+    return "\n\n(gợi ý của công cụ — mã FE đang gọi endpoint này như sau; gửi lại ĐỦ tham số như màn hình)\n" + text[:3000]
 
 
 def be_api_hint(dcfg, method, target, status):
@@ -677,6 +750,63 @@ def bundle_search(dcfg, pattern, limit=12, ctx=200):
         "\n\n".join(hits) or "không thấy")
 
 
+WRITE_VERBS = re.compile(r"(?<!\w)(chỉnh sửa|thêm mới|tạo mới|tạo|xoá|xóa|cập nhật|đổi|thay đổi|gán|lưu|phê duyệt|duyệt|"
+                         r"từ chối|huỷ|hủy|chuyển|import|nhập file|tải lên|upload|khoá|khóa|mở khoá|mở khóa|kích hoạt|"
+                         r"đóng|gửi|phân công|giao|đánh dấu|bật|tắt)(?!\w)", re.I)
+READ_LIKE_POST = re.compile(r"/(filter|search|list|get|count|preview|statistic\w*|summary|lookup|exists?[\w-]*|check[\w-]*)"
+                            r"(/|\?|$)|/export[\w-]*|/ping\b", re.I)
+
+
+def _ticket_steps(ticket):
+    """Phần mô tả bước làm của ticket (bỏ lịch sử / file đính kèm) để dò động từ thao tác."""
+    body = ticket.split("\n## Lịch sử")[0]
+    m = re.search(r"CÁC BƯỚC[^\n]*\n(.*?)(?:\n\*\*KẾT QUẢ MONG ĐỢI|\Z)", body, re.S | re.I)
+    return m.group(1) if m else body[:4000]
+
+
+def premature_conclusion(verdict, executed, ticket, diff, dcfg):
+    """
+    Gemini kết luận ĐẠT / KHÔNG TỰ TEST ĐƯỢC mà CHƯA làm thao tác ghi dữ liệu nào trong khi bước của ticket là thao tác
+    (sửa, tạo, đổi người, duyệt…) → lý do để trả lại cho Gemini làm tiếp; "" = chấp nhận kết luận.
+    Request ghi = POST/PUT/PATCH/DELETE/UPLOAD đã thực sự gửi (không tính filter/search/list/export…, không tính request
+    công cụ chặn), hoặc UI có click. Có endpoint BE liên quan (be_api) thì request ghi phải trúng một endpoint đó.
+    """
+    if verdict not in ("ĐẠT", "KHÔNG TỰ TEST ĐƯỢC"):
+        return ""
+    # "Người tạo", "Ngày cập nhật", "Thời gian gửi"… là tên cột / trường, không phải thao tác (SOAR-738: tìm theo người tạo)
+    steps = re.sub(r"(?i)(người|ng|ngày|thời gian|thời điểm|lần|trạng thái|đơn vị|phòng ban|mã|loại)\s+(\w+\s+)?"
+                   r"(chỉnh sửa|tạo|cập nhật|sửa|duyệt|phê duyệt|gửi|giao|chuyển|đóng|xoá|xóa|hủy|huỷ|khoá|khóa|thêm)",
+                   " ", _ticket_steps(ticket or ""))
+    verbs = sorted({m.group(1).lower() for m in WRITE_VERBS.finditer(steps)})
+    if not verbs:
+        return ""
+    eps = [e for e in be_related_endpoints(dcfg, diff or "") if e["method"] in ("POST", "PUT", "PATCH", "DELETE")]
+    import be_api
+
+    def is_write(m, target, body, out):
+        if out.startswith(("CÔNG CỤ CHƯA GỬI", "BỊ CHẶN")):
+            return False
+        if m == "UI":
+            return '"click"' in body or "'click'" in body
+        if m not in ("POST", "PUT", "PATCH", "DELETE", "UPLOAD"):
+            return False
+        if m == "POST" and READ_LIKE_POST.search(target.split("?")[0]):
+            return False
+        return not eps or m == "UI" or any(be_api.path_matches(e["path"], target) for e in eps)
+
+    if any(is_write(*x) for x in executed):
+        return ""
+    hint = ""
+    if eps:
+        hint = "\nEndpoint ghi dữ liệu chạy qua code đã sửa (theo mã BE): " + ", ".join(
+            "%s %s" % (e["method"], e["path"]) for e in eps[:8])
+    return ("Bạn kết luận %s nhưng CHƯA thực hiện thao tác chính của ticket (các bước có: %s): chưa có request ghi dữ "
+            "liệu nào (POST/PUT/PATCH/DELETE/UPLOAD — không tính filter/search/list/export) hoặc UI có click.%s\n"
+            "Hãy làm đúng thao tác màn hình làm: tạo dữ liệu QA_AUTO_* nếu cần, lấy body đầy đủ từ GET chi tiết rồi gửi "
+            "đúng request màn hình gửi (tra API trước), đọc lại kết quả thật. Chỉ khi thật sự không làm được qua API/UI thì "
+            "kết luận lại và ghi rõ lý do cụ thể." % (verdict, ", ".join(verbs[:8]), hint))
+
+
 def qa_wait(minutes, guard=None, check_every=120, sleep=time.sleep, clock=time.time):
     """Chờ `minutes` phút giữa hai vòng QA; cứ `check_every` giây kiểm tra server có bị deploy / restart không (guard)
     — có thì ném ServerChanged như các chỗ khác (kết quả QA bỏ, ticket về hàng chờ)."""
@@ -709,7 +839,8 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
     with open(schema, "w", encoding="utf-8") as f:
         json.dump(QA_SCHEMA, f, ensure_ascii=False)
     transcript, answer = [], {}
-    dcfg = dict(dcfg, _be_repo=acfg.get("be_repo"))  # cho request API (tra endpoint BE) + gợi ý khi 400/404/405
+    dcfg = dict(dcfg, _be_repo=acfg.get("be_repo"), _fe_repo=acfg.get("fe_repo"),  # tra endpoint BE + gợi ý 4xx/5xx
+                _fe_ref=("origin/" + acfg["fe_upstream"]) if acfg.get("fe_upstream") else None)
     rounds = dcfg["qa_rounds"]
     if time_based(diff, qa_dir):
         rounds = max(rounds, int(dcfg.get("qa_rounds_time_based") or rounds))
@@ -717,6 +848,7 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
     wait_total = float(dcfg.get("qa_wait_total_minutes") or 0)
     wait_extra = int(dcfg.get("qa_wait_extra_rounds") or 0)
     waited, extra_used, rnd = 0.0, 0, 0
+    executed, nudges = [], 0  # (method, target, body, output) các request đã chạy — cho premature_conclusion
     while rnd < rounds:
         rnd += 1
         change = guard() if guard else None
@@ -793,6 +925,14 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
         except (TypeError, ValueError):
             want_wait = 0
         if answer.get("done") or (not answer.get("calls") and want_wait <= 0):
+            nudge = premature_conclusion(answer.get("verdict"), executed, ticket, diff, dcfg) \
+                if not last and nudges < int(dcfg.get("qa_nudge_max", 1)) else ""
+            if nudge:
+                # Kết luận khi chưa làm thao tác chính của ticket (SOAR-1014/1437/1497): trả lại cho Gemini làm tiếp.
+                nudges += 1
+                log("%s: vòng %d — từ chối kết luận %s (chưa làm thao tác chính)" % (display_id, rnd, answer.get("verdict")))
+                transcript.append("## CÔNG CỤ TỪ CHỐI KẾT LUẬN %s (vòng %d)\n%s" % (answer.get("verdict"), rnd, nudge))
+                continue
             break
         calls, n_ui = [], 0
         for c in answer["calls"][:dcfg["qa_calls_per_round"]]:
@@ -827,6 +967,7 @@ def gemini_qa(acfg, dcfg, qa_dir, display_id, deployed, guard=None):
             out = results[i] if i in results else soar_call(qa_dir, call, dcfg)
             if call.get("parallel") and len(parallel) > 1:
                 out = "[gửi đồng thời cùng %d request]\n%s" % (len(parallel), out)
+            executed.append((str(call.get("method") or "").upper(), call.get("target") or "", call.get("body") or "", out))
             transcript.append("## %s%s %s%s\n(%s)\n```\n%s\n```" % (
                 "[%s] " % call["account"] if call.get("account") else "", call.get("method"), call.get("target"), (" body: " + call["body"][:500]) if call.get("body") else "",
                 call.get("why", ""), out))
@@ -2461,6 +2602,53 @@ def be_tokens(diff_text):
     return touched, tokens
 
 
+def be_changed_code(diff_text):
+    """(tên class Java main bị sửa, tên hàm bị sửa) trong các mục "# BE" của diff.md — cho be_api.related_endpoints."""
+    classes, methods, section, fname = set(), set(), None, ""
+    sig = re.compile(r"(?:public|protected|private|default|static|\bvoid\b|>)\s[\w<>\[\], ?.]*?\b([a-z]\w+)\s*\(")
+    for line in diff_text.splitlines():
+        m = re.match(r"^# (\S+) [0-9a-f]{7,40}\s*$", line)
+        if m:
+            section = m.group(1)
+            continue
+        if section != "BE":
+            continue
+        m = re.match(r"^diff --git a/(\S+) b/", line)
+        if m:
+            fname = m.group(1)
+            if fname.endswith(".java") and "/src/main/java/" in fname:
+                classes.add(os.path.basename(fname)[:-5])
+            continue
+        if not fname.endswith(".java") or "/src/main/java/" not in fname:
+            continue
+        if line.startswith("@@"):
+            ctx = line.split("@@")[-1]
+            m = sig.search(ctx)
+            if m:
+                methods.add(m.group(1))
+        elif line.startswith("+") and not line.startswith("+++"):
+            m = sig.search(line)
+            if m:
+                methods.add(m.group(1))
+    return classes, methods
+
+
+def be_related_endpoints(dcfg, diff_text):
+    """Endpoint chạy qua code BE đã sửa (be_api, theo nhánh deploy). [] khi không có repo BE / lỗi."""
+    repo, ref = _be_api_ctx(dcfg)
+    if not repo:
+        return []
+    classes, methods = be_changed_code(diff_text)
+    if not classes:
+        return []
+    try:
+        import be_api
+        return be_api.related_endpoints(repo, classes, ref, methods=methods)
+    except Exception as ex:  # noqa: BLE001 — chỉ là bằng chứng phụ, lỗi thì dùng cách so từ khoá
+        log("be_api related_endpoints lỗi: %s" % ex)
+        return []
+
+
 def be_added_literals(diff_text):
     """Chuỗi mà diff BE THÊM vào: mã lỗi UPPER_SNAKE trong chuỗi Java, giá trị câu thông báo trong messages*.properties.
     Response chứa chuỗi này ⇒ chắc chắn BE đang chạy bản sửa (dùng cho ticket mà kết quả đúng là 4xx — SOAR-2999)."""
@@ -2699,8 +2887,15 @@ def verify_pass(text, qa_dir, dcfg=None, start=None, end=None, read_log=None):
     has_be, tokens = be_tokens(diff_text)
     tokens |= ticket_api_paths(qa_dir)
     if has_be and not verdict:
+        eps = be_related_endpoints(dcfg, diff_text)
+        if eps:
+            import be_api
+
+        def related(target):
+            # endpoint thật chạy qua code đã sửa (be_api) HOẶC so từ khoá tên class / đường dẫn ticket như trước
+            return _related(target, tokens) or any(be_api.path_matches(e["path"], target) for e in eps)
         ok = [r for r in reqs if r["method"] in API_METHODS and r["status"] and 200 <= r["status"] < 300
-              and "/api/" in r["target"] and _related(r["target"], tokens)]
+              and "/api/" in r["target"] and related(r["target"])]
         if not ok:
             # Bản sửa là validate / câu thông báo lỗi: response 4xx (trừ 401/403) chứa chuỗi diff BE vừa thêm cũng là
             # bằng chứng BE chạy bản sửa (SOAR-2999: 400 CASE_IDS_REQUIRED).
@@ -2853,7 +3048,7 @@ def _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard
     review = now_status in {str(x) for x in dcfg.get("qa_review_status_ids") or []}  # trạng thái lúc có kết quả
     if verdict == "ĐẠT":
         # Kiểm tra lại trước khi comment / chuyển QA: HTTP 5xx, lỗi log BE, BE sửa mà không có request API 2xx.
-        checked, reasons = verify_pass(text, qa_dir, dcfg, qa_start, time.time())
+        checked, reasons = verify_pass(text, qa_dir, dict(dcfg, _be_repo=acfg.get("be_repo")), qa_start, time.time())
         if reasons:
             shutil.copy(path, os.path.join(qa_dir, "qa-engine.md"))  # giữ bản gốc của Gemini / Claude để đối chiếu
             with open(path, "w", encoding="utf-8") as f:
