@@ -103,6 +103,9 @@ DEFAULTS = {
     "deploy_wait_qa_minutes": 60,
     # QA chờ lượt deploy đang chạy xong rồi mới bắt đầu.
     "qa_wait_deploy_minutes": 40,
+    # Lệnh deploy repo tuỳ chỉnh (vd build FLOW) không in dòng nào trong chừng ấy phút → coi là treo, huỷ cả nhóm tiến
+    # trình (18/11: bun install --production → postinstall redis-memory-server chờ mạng 37 phút, chặn cả đợt merge).
+    "deploy_idle_minutes": 10,
     # Kiểm tra tài khoản registry trước khi build (FE đẩy image, repo tuỳ chỉnh đọc tag qua Gitea API): sai mật khẩu thì
     # bỏ phần đó ngay với lỗi rõ ràng thay vì build xong mới "unauthorized" (17/11: mất nửa ngày FE không lên server).
     "registry_host": "git2.cytech.ai",
@@ -1005,7 +1008,8 @@ def deploy_custom(acfg, dcfg, repo, root, logf):
         script = "set -e\n" + "\n".join(repo["deploy_cmd"])
         script = R.fill(script, repo, work).replace("{ref}", ref).replace("{sha}", sha).replace(
             "{host}", dcfg.get("host") or "").replace("{user}", dcfg.get("user") or "").replace("{base}", dcfg.get("base") or "")
-        sh(["bash", "-c", script], cwd=work, logf=logf, env=env, timeout=5400)
+        sh_watch(["bash", "-c", script], cwd=work, logf=logf, env=env, timeout=5400,
+                 idle=60 * float(dcfg.get("deploy_idle_minutes") or 10), label=repo["label"])
         url = repo.get("deploy_health")
         if url:
             end = time.time() + 60 * float(dcfg.get("wait_minutes", 10))
@@ -1036,6 +1040,71 @@ def sh(cmd, cwd=None, logf=None, env=None, timeout=3600):
         raise RuntimeError("%s → mã %s: %s" % (cmd[0] if isinstance(cmd, list) else cmd, res.returncode,
                                                 res.stdout.strip()[-400:]))
     return res.stdout
+
+
+class Stalled(RuntimeError):
+    pass
+
+
+def sh_watch(cmd, cwd=None, logf=None, env=None, timeout=3600, idle=600, label=None, grace=15):
+    """
+    Như sh() nhưng ghi log NGAY từng dòng (sh() chỉ ghi khi lệnh xong → lúc build dài log đứng yên) và canh treo:
+    quá `idle` giây không có dòng output mới (hoặc quá `timeout`) → SIGTERM cả nhóm tiến trình (bash → docker build…;
+    docker build bị huỷ thì buildkit huỷ bước đang chạy), sau `grace` giây còn sống thì SIGKILL. Treo → Stalled.
+    """
+    name = label or (cmd[0] if isinstance(cmd, list) else cmd)
+    if logf:
+        logf.write("\n$ %s\n" % (" ".join(cmd) if isinstance(cmd, list) else cmd))
+        logf.flush()
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                            env=env, stdin=subprocess.DEVNULL, bufsize=1, start_new_session=True, errors="replace")
+    started = time.time()
+    st = {"last": started, "why": None}
+    out = []
+
+    def killpg(sig):
+        try:
+            os.killpg(proc.pid, sig)
+        except OSError:
+            pass
+
+    def watch():
+        while proc.poll() is None:
+            now = time.time()
+            if now - st["last"] > idle:
+                st["why"] = "không có dòng output mới trong %d phút" % round(idle / 60)
+            elif now - started > timeout:
+                st["why"] = "quá %d phút" % round(timeout / 60)
+            if st["why"]:
+                killpg(signal.SIGTERM)
+                end = time.time() + grace
+                while proc.poll() is None and time.time() < end:
+                    time.sleep(1)
+                killpg(signal.SIGKILL)
+                return
+            time.sleep(min(5, max(0.2, idle / 10)))
+
+    t = threading.Thread(target=watch, daemon=True)
+    t.start()
+    for line in proc.stdout:
+        st["last"] = time.time()
+        out.append(line)
+        if logf:
+            logf.write(line)
+            logf.flush()
+    code = proc.wait()
+    t.join(timeout=grace + 5)
+    tail = "".join(out).strip()[-400:]
+    if st["why"]:
+        last = next((x.strip() for x in reversed(out) if x.strip()), "")
+        msg = "%s treo: %s → đã huỷ (dòng cuối: %s)" % (name, st["why"], last[:200])
+        if logf:
+            logf.write("\n### %s\n" % msg)
+            logf.flush()
+        raise Stalled(msg)
+    if code != 0:
+        raise RuntimeError("%s → mã %s: %s" % (name, code, tail))
+    return "".join(out)
 
 
 def remote(dcfg, command, logf=None, timeout=1800):
