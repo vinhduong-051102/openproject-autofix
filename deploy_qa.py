@@ -235,6 +235,17 @@ TRANSIENT = re.compile(r"^HTTP 50[234]\b|URLError|Connection refused|Connection 
                        re.M)
 
 
+def is_transient(out):
+    """Lỗi tạm của server (đang khởi động lại / mất kết nối). Có dòng "HTTP xxx" thì chỉ 502/503/504 mới tính: thân
+    response 200 có thể chứa chữ "timed out" / "Connection refused" (vd /api/v1/healthchecks/alerts liệt kê lỗi SMTP —
+    SOAR-3004 bị dừng QA oan vì thế)."""
+    head = out[:3000]
+    st = _HTTP_LINE.search(head[:300])
+    if st:
+        return st.group(1) in ("502", "503", "504")
+    return bool(TRANSIENT.search(head))
+
+
 class ServerChanged(Exception):
     """Server 86 bị người khác deploy / restart / không phản hồi trong lúc QA: kết quả ticket đang test không dùng."""
 
@@ -574,14 +585,17 @@ def soar_call(qa_dir, call, dcfg=None):
             return "HẾT THỜI GIAN (120s) timed out"
 
     out = once()
-    if dcfg and TRANSIENT.search(out[:3000]):
+    if dcfg and is_transient(out):
         # Server đang khởi động lại (có thể người khác deploy): chờ lên lại rồi gọi lại, không đưa lỗi tạm cho Gemini.
         deadline = time.time() + dcfg["server_retry_minutes"] * 60
         while time.time() < deadline and not api_alive(dcfg):
             time.sleep(15)
         out = once()
-        if TRANSIENT.search(out[:3000]):
+        if is_transient(out):
             raise ServerChanged("server không phản hồi (%s)" % out.strip().splitlines()[0][:120])
+    regen = _regen_code(qa_dir, call, dcfg, method, out)
+    if regen:
+        return regen
     out = ("(công cụ đã mở rộng: %s)\n" % "; ".join(rep_notes) if rep_notes else "") + sent_note + out
     out = out if len(out) <= 4000 else out[:4000] + "\n… (cắt, tổng %d ký tự)" % len(out)
     st = _HTTP_LINE.search(out[:300])
@@ -595,6 +609,43 @@ def soar_call(qa_dir, call, dcfg=None):
         out += be_api_hint(dcfg, method, call.get("target", ""), int(st.group(1)))
         out += fe_call_sites(dcfg, call.get("target", ""))
     return out
+
+
+def _json_tail(out):
+    i = out.find("{")
+    try:
+        return json.loads(out[i:]) if i >= 0 else None
+    except ValueError:
+        return None
+
+
+def _regen_code(qa_dir, call, dcfg, method, out):
+    """POST tạo bản ghi bị 400 CODE_INVALIDATE vì Gemini tự đặt mã (SOAR-1014/1438 hết 6 vòng vì lỗi này dù đã có rule):
+    công cụ tự gọi GET <đường dẫn>/gen-code, thay trường "code" bằng mã vừa sinh rồi gửi lại 1 lần. Không làm khi
+    Gemini cố ý gửi sai (intentional_invalid) để test validate mã."""
+    if method != "POST" or call.get("intentional_invalid") or call.get("_regen") or not dcfg:
+        return None
+    st = _HTTP_LINE.search(out[:300])
+    if not st or st.group(1) != "400" or "CODE_INVALIDATE" not in out[:3000]:
+        return None
+    try:
+        body = json.loads(call.get("body") or "")
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or "code" not in body:
+        return None
+    target = call.get("target", "").split("?")[0].rstrip("/")
+    auth = {k: call[k] for k in ("account", "password", "header") if call.get(k)}
+    gen = soar_call(qa_dir, dict(auth, method="GET", target=target + "/gen-code"), dcfg)
+    data = (_json_tail(gen) or {}).get("data")
+    if not (gen.startswith("HTTP 200") and isinstance(data, str) and data.strip()):
+        return None
+    old = body["code"]
+    body["code"] = data.strip()
+    again = soar_call(qa_dir, dict(call, body=json.dumps(body, ensure_ascii=False), _regen=True), dcfg)
+    return ("(công cụ: mã %s bị từ chối CODE_INVALIDATE → đã lấy mã hệ thống sinh GET %s/gen-code = %s và gửi lại. "
+            "Lần sau lấy mã từ gen-code trước khi tạo.)\n" % (json.dumps(old, ensure_ascii=False), target, data.strip())
+            + again)
 
 
 def _be_api_ctx(dcfg):
@@ -2463,9 +2514,10 @@ def handle_fail(api, acfg, dcfg, wp, display_id, qa_path, qa_text, commits=()):
     n = fail_count(display_id, 1)
     if n <= dcfg["qa_fail_autofix_max"]:
         log_path = os.path.join(os.path.dirname(qa_path), "autofix.log")
-        with open(log_path, "a", encoding="utf-8") as out:
-            subprocess.Popen(["python3", AUTOFIX, "--wp", str(wp["id"]), "--event", "QA_FAIL", "--qa-report", qa_path],
-                             stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        how = runstate.spawn_detached(
+            [sys.executable, AUTOFIX, "--wp", str(wp["id"]), "--event", "QA_FAIL", "--qa-report", qa_path], log_path,
+            cwd=os.path.dirname(AUTOFIX), unit="op-autofix-%s" % display_id)
+        log("%s: autofix QA_FAIL chạy nền (%s)" % (display_id, how))
         return " → Claude đang kiểm chứng + sửa (lần %d/%d)" % (n, dcfg["qa_fail_autofix_max"])
     reason = "## Cần quyết định\nQA tự động trên server test KHÔNG ĐẠT / KHÔNG TỰ TEST ĐƯỢC %d lần liên tiếp " \
              "(autofix đã kiểm chứng / sửa lại %d lần). Cần người xem.\n\n%s" % (

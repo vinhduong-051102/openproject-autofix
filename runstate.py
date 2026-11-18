@@ -9,6 +9,7 @@ Trạng thái chạy dùng chung cho deploy_qa / op_autofix / op_dashboard / cle
 import fcntl
 import os
 import subprocess
+import time
 
 QA_RUN_LOCK_NAME = ".qa-run.lock"
 
@@ -64,3 +65,33 @@ def remove_ticket_lock(root, display_id):
             return False
         os.remove(path)
         return True
+
+
+def spawn_detached(cmd, log_path, cwd=None, unit=None):
+    """Chạy tiến trình nền sống lâu hơn tiến trình gọi. Gọi từ op-merge.service (oneshot, KillMode=control-group):
+    Popen(start_new_session) vẫn nằm trong cgroup của service → service kết thúc là systemd giết luôn (autofix QA_FAIL
+    của SOAR-982 / SOAR-1438 đợt 18/11 19:00 chết lúc 19:24:54 khi op-merge xong). Dùng systemd-run --user để tách ra
+    unit riêng; không có systemd-run / user bus thì quay về Popen. Trả mô tả ngắn (tên unit hoặc pid)."""
+    log_path = os.path.abspath(log_path)
+    if unit and os.environ.get("XDG_RUNTIME_DIR") and _which("systemd-run"):
+        name = "%s-%d" % (unit, int(time.time()))
+        run = ["systemd-run", "--user", "--collect", "--quiet", "--unit", name,
+               "-p", "StandardOutput=append:" + log_path, "-p", "StandardError=append:" + log_path,
+               "--setenv=PATH=" + os.environ.get("PATH", "/usr/bin:/bin"), "--setenv=HOME=" + os.path.expanduser("~")]
+        if cwd:
+            run += ["--working-directory", os.path.abspath(cwd)]
+        try:
+            res = subprocess.run(run + list(cmd), capture_output=True, text=True, timeout=30)
+            if res.returncode == 0:
+                return name
+        except (OSError, subprocess.SubprocessError):
+            pass
+    with open(log_path, "a", encoding="utf-8") as out:
+        proc = subprocess.Popen(list(cmd), cwd=cwd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+    return "pid %d" % proc.pid
+
+
+def _which(name):
+    import shutil
+    return shutil.which(name)
