@@ -2385,12 +2385,53 @@ def api_alive(dcfg):
         return False
 
 
-def load_pending():
+def _pending_read():
     try:
         with open(PENDING, encoding="utf-8") as f:
-            return json.load(f).get("tickets", [])
+            data = json.load(f)
     except (OSError, ValueError):
-        return []
+        return [], {}
+    return list(data.get("tickets") or []), dict(data.get("added") or {})
+
+
+def load_pending():
+    return _pending_read()[0]
+
+
+class _PendingLock:
+    """Khoá đọc-sửa-ghi qa-pending.json: lượt QA (nhiều luồng) và autofix (QA SAI → thêm lại) cùng ghi."""
+    def __enter__(self):
+        os.makedirs(os.path.dirname(PENDING), exist_ok=True)
+        self.fd = open(PENDING + ".lock", "a")
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        self.fd.close()
+
+
+def _now_us():
+    return datetime.now().isoformat(timespec="microseconds")
+
+
+def _pending_write(tickets, reason, added):
+    tickets = sorted(set(tickets))
+    now = _now_us()
+    added = {t: added.get(t) or now for t in tickets}
+    with open(PENDING + ".tmp", "w", encoding="utf-8") as f:
+        json.dump({"tickets": tickets, "reason": reason, "updated": datetime.now().isoformat(timespec="seconds"),
+                   "added": added}, f, ensure_ascii=False, indent=1)
+    os.replace(PENDING + ".tmp", PENDING)
+
+
+def add_pending(ids, reason=""):
+    """Thêm (hoặc thêm lại) ticket vào hàng chờ, ghi mốc thêm = bây giờ: lượt QA đang chạy không xoá mất nó."""
+    with _PendingLock():
+        tickets, added = _pending_read()
+        for t in ids:
+            added[t] = _now_us()
+        _pending_write(set(tickets) | set(ids), reason, added)
 
 
 QA_TOOL_RETRY_MAX = 3  # lỗi công cụ QA (Gemini treo / không trả kết quả) trên cùng một bản build: thử lại tối đa
@@ -2415,17 +2456,26 @@ def tool_errors(display_id, build, add=False):
     return n
 
 
-def _merged_pending(waiting, done, remaining, retry):
+def _merged_pending(waiting, done, remaining, retry, current=None):
     """Hàng chờ mới = (file hiện tại ∪ hàng chờ lúc bắt đầu) − đã QA xong + còn lại + cần thử lại. Đọc lại file thay vì
-    ghi đè bằng bản đọc lúc bắt đầu: lượt QA khác (nút bấm / lượt kiểm tra) có thể đã thêm ticket trong lúc chạy."""
-    return (set(load_pending()) | set(waiting)) - set(done) | set(remaining) | set(retry)
+    ghi đè bằng bản đọc lúc bắt đầu: lượt QA khác (nút bấm / lượt kiểm tra) có thể đã thêm ticket trong lúc chạy.
+    done = {ticket: mốc bắt đầu QA}: chỉ bỏ ticket nếu nó vào hàng chờ TRƯỚC lúc bắt đầu QA. Ticket được thêm lại sau
+    đó (autofix kết luận QA SAI → QA lại) phải giữ — trước đây bị trừ mất (SOAR-1014, SOAR-3004 18/11 không được QA lại)."""
+    tickets, added = current if current is not None else _pending_read()
+    started = done if isinstance(done, dict) else {t: "9" for t in done}
+    drop = {t for t, st in started.items() if (added.get(t) or "") < st}
+    return (set(tickets) | set(waiting)) - drop | set(remaining) | set(retry)
 
 
 def save_pending(tickets, reason=""):
-    os.makedirs(os.path.dirname(PENDING), exist_ok=True)
-    with open(PENDING, "w", encoding="utf-8") as f:
-        json.dump({"tickets": sorted(set(tickets)), "reason": reason,
-                   "updated": datetime.now().isoformat(timespec="seconds")}, f, ensure_ascii=False, indent=1)
+    with _PendingLock():
+        _pending_write(tickets, reason, _pending_read()[1])
+
+
+def save_merged_pending(waiting, done, remaining, retry, reason=""):
+    with _PendingLock():
+        cur = _pending_read()
+        _pending_write(_merged_pending(waiting, done, remaining, retry, cur), reason, cur[1])
 
 
 def fe_contains(acfg, fe_version, fe_commits):
@@ -3496,7 +3546,7 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
         return describe_change(baseline, fingerprint(dcfg))
 
     lock = open(os.path.join(root, ".run.lock"), "w")
-    remaining, done = list(tickets), set()
+    remaining, done = list(tickets), {}
     qlock = qa_lock(dcfg, dlock)  # deploy của lượt này xong → hạ xuống khoá đọc; không deploy → chờ deploy khác xong
     open(QA_ACTIVE, "w").close()
     try:
@@ -3519,6 +3569,7 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
     def one(display_id):
         if stop["msg"]:
             return
+        started_at = _now_us()
         hashes = [(label, repo, [h for h, s in commits[label] if "[%s]" % display_id in s] or
                    [l.split()[0] for l in git_lines(repo, "log", "--no-merges", "-F", "--grep=[%s]" % display_id,
                                                     "--format=%H", "origin/" + up)])
@@ -3627,8 +3678,8 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
                 fcntl.flock(slot, fcntl.LOCK_UN)
         with mu:
             remaining.remove(display_id)
-            done.add(display_id)
-            save_pending(_merged_pending(waiting, done, remaining, retry), "đang QA")
+            done[display_id] = started_at
+            save_merged_pending(waiting, done, remaining, retry, "đang QA")
 
     # Số ticket QA cùng lúc đọc lại từ cấu hình mỗi vài giây: đổi trên trang theo dõi thì áp dụng ngay cho các ticket
     # còn đang xếp hàng trong lượt này (ticket đang test vẫn chạy tiếp).
@@ -3661,11 +3712,11 @@ def _qa_loop(api, cfg, acfg, dcfg, me_id, tickets, commits, deployed_parts, depl
         log(msg)
         qa_issues.record("server_changed", msg, build="%s|%s" % (baseline.get("fe"), baseline.get("be")),
                          tickets=list(remaining))
-        save_pending(_merged_pending(waiting, done, remaining, retry), stop["msg"])
+        save_merged_pending(waiting, done, remaining, retry, stop["msg"])
         inbox(cfg, "**QA SERVER TẠM DỪNG** " + msg)
         notify("[QA SERVER] tạm dừng", "Server 86 vừa bị cập nhật / restart — QA tiếp ở lần chạy sau")
         return
-    save_pending(_merged_pending(waiting, done, remaining, retry), "lỗi công cụ QA — thử lại" if retry else "")
+    save_merged_pending(waiting, done, remaining, retry, "lỗi công cụ QA — thử lại" if retry else "")
 
 def print_rollout_plan(parts, strategy=None, destructive=False):
     """--rollout-plan: in lệnh sẽ chạy (dry-run, không ssh). Mật khẩu không in."""

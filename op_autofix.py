@@ -1630,7 +1630,7 @@ def report_qa_wrong(api, wp_id, display_id, report_text, run_name, qa_report=Non
             json.dump(data, f, ensure_ascii=False, indent=1)
         os.replace(path + ".tmp", path)
     try:  # vào hàng chờ QA → review-watch (on_tick ~10 phút) QA lại, không đợi đợt merge kế tiếp
-        DQ.save_pending(sorted(set(DQ.load_pending()) | {display_id}), "QA lại sau khi Claude kết luận QA SAI")
+        DQ.add_pending([display_id], "QA lại sau khi Claude kết luận QA SAI")
         when = "QA lại ở lượt kiểm tra kế tiếp (~10 phút)"
     except (OSError, ValueError) as ex:
         when = "chưa đưa vào hàng chờ QA (%s) — QA lại ở đợt merge sau" % ex
