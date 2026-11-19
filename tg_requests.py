@@ -53,12 +53,17 @@ FIELDS = {  # khoá: (biến .env, kiểu, mặc định)
     "ask_auto": ("TG_ASK_AUTO", "bool", False),
     # Tự gửi câu hỏi bổ sung khi AI thấy việc mới thiếu thông tin (tối đa CLARIFY_MAX lượt). Tắt: chờ mình bấm gửi.
     "clarify_auto": ("TG_CLARIFY_AUTO", "bool", True),
+    # Trả lời câu hỏi người khác hỏi mình: AI soạn nháp theo văn phong của mình, mình duyệt rồi gửi.
+    "reply_enabled": ("TG_REPLY_ENABLED", "bool", True),
+    "style_samples": ("TG_STYLE_SAMPLES", "int", 40),       # số tin mình tự nhắn dùng làm mẫu văn phong
+    "reply_guide": ("TG_REPLY_GUIDE", "str", ""),           # dặn thêm cho AI khi viết tin (vd "không hứa thời gian")
 }
 RESTART_KEYS = ("api_id", "api_hash", "chats")
 CHAT_MODES = {"all": "Mọi tin", "mention": "Khi nhắc tới tôi / trả lời tin của tôi", "hashtag": "Chỉ tin có hashtag"}
 REF_OK = re.compile(r"^(@[A-Za-z0-9_]{4,32}|-?\d{3,})$")
 SECRET_KEYS = ("api_hash",)
-LIMITS = {"group_window": (10, 3600), "max_media_mb": (1, 200), "sync_minutes": (1, 120)}
+LIMITS = {"group_window": (10, 3600), "max_media_mb": (1, 200), "sync_minutes": (1, 120), "style_samples": (5, 200)}
+TEXT_MAX = {"reply_guide": 1500}
 MSG_FIELDS = ("title", "display_id", "reason", "status")
 _SETTINGS = {"mtime": None, "data": None}
 
@@ -189,6 +194,8 @@ def save_settings(body):
             v = _conv("list", re.split(r"[,\n]", v) if isinstance(v, str) else v, False)
         else:
             v = str(v).strip() if kind == "str" else str(v).replace("\r\n", "\n").strip()
+            if k in TEXT_MAX and len(v) > TEXT_MAX[k]:
+                raise ValueError("%s tối đa %d ký tự" % (k, TEXT_MAX[k]))
         if k == "detect_mode" and v not in ("all", "hashtag"):
             raise ValueError("chế độ nhận yêu cầu phải là all hoặc hashtag")
         if k == "api_hash" and not re.match(r"^[0-9a-f]{32}$", v):
@@ -1632,7 +1639,8 @@ def triage(rid):
                       ai_summary=(it.get("summary") or "")[:1000], ai_reason=(it.get("reason") or "")[:1000],
                       ai_refs=json.dumps(rlist, ensure_ascii=False), ai_dup=dup, ai_at=now(), ai_error=None,
                       ai_missing=json.dumps(missing, ensure_ascii=False) if missing else None,
-                      status="ignored" if kind == "chat" else "answer" if kind == "question" else "pending",
+                      status="ignored" if kind == "chat" or (kind == "question" and not settings()["reply_enabled"])
+                      else "answer" if kind == "question" else "pending",
                       decided_at=now() if kind == "chat" else None)
         if it.get("title"):
             fields["title"] = it["title"][:200]
@@ -1649,7 +1657,7 @@ def triage(rid):
         update(target, last_message_at=last, **fields)
         if missing:
             maybe_clarify(target)
-        if kind == "question":
+        if kind == "question" and settings()["reply_enabled"]:
             try:
                 draft_reply(target)
             except Exception as ex:  # noqa: BLE001 — không soạn được thì vẫn để Chờ trả lời, mình tự trả lời
@@ -1757,20 +1765,22 @@ nháp để dev duyệt rồi mới gửi. Chạy nền, chỉ trả JSON, khôn
 - Câu trả lời có nhiều ý → mỗi ý một dòng gạch đầu dòng "- "; một ý thì viết một câu bình thường.
 - Chỉ nói điều có căn cứ trong tin / ngữ cảnh / trạng thái ticket ở trên. Không hứa thời gian, không bịa tiến độ. Thiếu
   thông tin để trả lời chắc chắn → vẫn viết phần trả lời được, và ghi rõ trong "note" dev cần bổ sung / kiểm tra gì.
-{hint}
+{guide}{hint}
 {{"reply": "nội dung tin trả lời", "confident": true | false, "note": "ghi chú ngắn cho dev (vì sao chưa chắc / cần kiểm tra gì), rỗng nếu không có"}}
 """
 REPLY_PROMPT = _project_text(REPLY_PROMPT)
-STYLE_SAMPLES = 40
+STYLE_SAMPLES = 40  # mặc định; chỉnh ở ⚙ Cài đặt → Trả lời câu hỏi (style_samples)
 
 
-def style_samples(chat_id=None, n=STYLE_SAMPLES):
+def style_samples(chat_id=None, n=None):
     """Tin mình tự nhắn gần đây (bỏ tin công cụ gửi: 🤖 / ✅ / ❌ / 🎉 …) — ưu tiên cùng chat, thiếu thì lấy chat khác."""
     bot = ("🤖", "✅", "❌", "🎉", "📨", "⚠", "🧪", "❓")
     # Tin công cụ soạn rồi AI viết lại (outbox có raw_text / asks.styled_text) không phải mình tự gõ — không học theo.
     seen = {r["text"] for r in rows("SELECT text FROM outbox WHERE raw_text IS NOT NULL")}
     seen |= {r["styled_text"] for r in rows("SELECT styled_text FROM asks WHERE styled_text IS NOT NULL")}
     out = []
+    if n is None:
+        n = settings().get("style_samples") or STYLE_SAMPLES
     for sql, args in ((("SELECT text FROM messages WHERE sender='me' AND chat_id=? AND text IS NOT NULL"
                         " ORDER BY date DESC LIMIT 300"), (chat_id,)),
                       (("SELECT text FROM messages WHERE sender='me' AND text IS NOT NULL ORDER BY date DESC LIMIT 600"),
@@ -1810,6 +1820,7 @@ STYLE_PROMPT = """Viết lại tin nhắn Telegram dưới đây đúng như dev
 - Nhiều ý (nhiều câu hỏi / nhiều điểm) → mỗi ý một dòng gạch đầu dòng "- "; một ý thì viết một câu.
 - Cần người đọc trả lời (câu hỏi / xin ý kiến / nhờ test) → nhắc reply vào tin này một cách tự nhiên như dev hay nói.
 - Đường link giữ nguyên văn.
+{guide}
 {{"text": "tin nhắn đã viết lại"}}
 """
 STYLE_PROMPT = _project_text(STYLE_PROMPT)
@@ -1819,6 +1830,12 @@ STYLE_PURPOSES = {"clarify": "hỏi bổ sung thông tin để tạo việc", "m
                   "manual_test": "nhờ test tay rồi báo Đạt / Không đạt"}
 _STYLE_LOCK = threading.Lock()
 _BOT_MARK = re.compile(r"^[\s🤖✅❌🎉🧪❓📨⚠️]+|\s*\((?:Trả lời|Reply)[^)]*\)\s*$", re.M)
+
+
+def _guide_line():
+    g = (settings().get("reply_guide") or "").strip()
+    return ("- Dev dặn thêm (luôn làm theo):\n" + "\n".join("  " + x for x in g.splitlines() if x.strip()) + "\n") \
+        if g else ""
 
 
 def plain_text(raw):
@@ -1837,7 +1854,7 @@ def restyle(raw, chat_id, purpose):
     try:
         out = _run_claude_json(STYLE_PROMPT.format(
             me=watcher.get("me") or "dev", to=to, where=where, purpose=STYLE_PURPOSES.get(purpose, "tin nhắn"),
-            raw=raw, context="\n".join(_msg_line(m) for m in ctx) or "(không có)",
+            raw=raw, context="\n".join(_msg_line(m) for m in ctx) or "(không có)", guide=_guide_line(),
             style="\n".join("- " + t.replace("\n", " ⏎ ") for t in style_samples(chat_id)) or "(chưa có)"),
             settings()["ai_model"])
         text = str(out.get("text") or "").strip()
@@ -1892,6 +1909,7 @@ def draft_reply(rid, hint=""):
         context="\n".join(_msg_line(m) for m in ctx) or "(không có)",
         refs="\n".join(_fmt_wp(x) + _fmt_autofix(x["display_id"]) for x in refs) or "(không có)",
         style="\n".join("- " + t.replace("\n", " ⏎ ") for t in samples) or "(chưa có tin nào của dev)",
+        guide=_guide_line(),
         hint=("- Dev dặn thêm khi soạn lại: " + hint.strip()[:500]) if hint and hint.strip() else ""),
         settings()["ai_model"])
     reply = str(out.get("reply") or "").strip()

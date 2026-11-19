@@ -3050,6 +3050,10 @@ async function tgSettings() {
       <label for="tgs_request_tags">Hashtag${S("request_tags")}</label><div><input type="text" id="tgs_request_tags" value="${esc((st.request_tags || []).join(", "))}"><div class="hint">Dùng cho nguồn chat nhận “Chỉ tin có hashtag” (và cũng mở yêu cầu ở chế độ “Khi nhắc tới tôi”), cách nhau dấu phẩy.</div></div>
       <label for="tgs_group_window">Khoảng gom tin (giây)${S("group_window")}</label><div><input type="number" id="tgs_group_window" min="10" max="3600" value="${st.group_window}"><div class="hint">Tin liên tiếp cách nhau không quá khoảng này gộp thành một yêu cầu; hết khoảng → Chờ duyệt.</div></div>
       <label for="tgs_max_media_mb">Tệp tối đa (MB)${S("max_media_mb")}</label><div><input type="number" id="tgs_max_media_mb" min="1" max="200" value="${st.max_media_mb}"></div>
+      <h4>Trả lời câu hỏi</h4>
+      <label for="tgs_reply_enabled">Soạn câu trả lời${S("reply_enabled")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_reply_enabled" ${st.reply_enabled ? "checked" : ""}> Khi có người hỏi bạn (ticket xong chưa, cách dùng, vì sao…), AI soạn sẵn câu trả lời theo văn phong của bạn → yêu cầu “Chờ trả lời”, bạn sửa rồi bấm gửi. Tắt: câu hỏi chỉ ghi nhận, chuyển Bỏ qua. Cần bật “Lọc việc bằng AI”.</label></div>
+      <label for="tgs_style_samples">Số tin mẫu văn phong${S("style_samples")}</label><div><input type="number" id="tgs_style_samples" min="5" max="200" value="${st.style_samples}"><div class="hint">Số tin bạn tự nhắn gần nhất (ưu tiên cùng chat) AI đọc để bắt chước cách viết — dùng cho câu trả lời và mọi tin công cụ gửi. Nhiều hơn: giống hơn nhưng chậm / tốn hơn.</div></div>
+      <label for="tgs_reply_guide">Dặn thêm cho AI${S("reply_guide")}</label><div><textarea id="tgs_reply_guide" rows="3" maxlength="1500" placeholder="vd: Không hứa thời gian cụ thể&#10;Với anh Tám xưng em, gọi anh&#10;Không dùng emoji">${esc(st.reply_guide || "")}</textarea><div class="hint">Mỗi dòng một ý. Áp dụng khi AI soạn câu trả lời và khi viết lại tin công cụ gửi (tối đa 1500 ký tự).</div></div>
       <h4>Trả lời tester</h4>
       <div class="hint" style="grid-column:1/-1">Mọi tin công cụ gửi từ tài khoản của bạn (báo đã nhận / gắn / từ chối / xong, hỏi bổ sung, xin ý kiến, nhờ test tay) được AI viết lại theo văn phong bạn hay nhắn trước khi gửi — người đọc không thấy giọng bot. Các mẫu dưới đây chỉ là nội dung (dữ kiện) cần có trong tin.</div>
       <label for="tgs_notify_tester">Gửi tin trả lời${S("notify_tester")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_notify_tester" ${st.notify_tester ? "checked" : ""}> Trả lời tester (từ tài khoản của bạn) khi tạo task / gắn việc / từ chối / việc xong</label></div>
@@ -3075,6 +3079,7 @@ async function tgSettings() {
     const body = {api_id: v("api_id").trim(), chats: tgChatsValue(), request_tags: v("request_tags"),
       group_window: v("group_window"), max_media_mb: v("max_media_mb"), notify_tester: $("tgs_notify_tester").checked,
       done_statuses: v("done_statuses"), sync_minutes: v("sync_minutes"), ai_filter: $("tgs_ai_filter").checked, ai_model: v("ai_model"), ask_auto: $("tgs_ask_auto").checked, clarify_auto: $("tgs_clarify_auto").checked,
+      reply_enabled: $("tgs_reply_enabled").checked, style_samples: v("style_samples"), reply_guide: $("tgs_reply_guide").value,
       msg_created: v("msg_created"), msg_linked: v("msg_linked"), msg_rejected: v("msg_rejected"), msg_done: v("msg_done")};
     if (v("api_hash").trim()) body.api_hash = v("api_hash").trim();
     const r = await post({action: "tg_settings", settings: body});

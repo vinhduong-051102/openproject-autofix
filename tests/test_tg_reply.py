@@ -229,5 +229,56 @@ class StyleTest(TgBase):
         self.assertEqual(tr.style_samples(1), ["để e xem nha"])
 
 
+class ReplySettingsTest(TgBase):
+    def _triage_question(self):
+        rid = self.req(status="triage")
+        a = self.msg(rid, 21, "tester", "SOAR-1 xong chưa a?")
+        out = {"items": [{"kind": "question", "title": "Hỏi tiến độ", "message_ids": [a]}]}
+        fake_cfg = ({"url": "http://op", "api_key": "k"}, {}, {})
+        with mock.patch("task_create.load", return_value=fake_cfg), \
+                mock.patch("op_watch.OpenProject"), \
+                mock.patch.object(tr, "_refs_in", return_value=[]), \
+                mock.patch.object(tr, "_recent_wps", return_value=""), \
+                mock.patch.object(tr, "docs_block", return_value=""), \
+                mock.patch.object(tr, "media_docs", return_value={"docs": []}), \
+                mock.patch.object(tr, "_run_claude_json", side_effect=[out, {"reply": "chưa a"}]) as ai:
+            tr.triage(rid)
+        return rid, ai
+
+    def test_reply_disabled_ignores_question_without_draft(self):
+        self.cfg["reply_enabled"] = False
+        rid, ai = self._triage_question()
+        r = tr.row("SELECT * FROM requests WHERE id=?", (rid,))
+        self.assertEqual((r["ai_kind"], r["status"], r["reply_draft"]), ("question", "ignored", None))
+        self.assertEqual(ai.call_count, 1)  # chỉ bước lọc, không soạn trả lời
+
+    def test_guide_and_sample_count_reach_prompts(self):
+        self.cfg["reply_enabled"] = True
+        self.cfg["reply_guide"] = "Không hứa thời gian\nKhông dùng emoji"
+        self.cfg["style_samples"] = 5
+        for i in range(8):
+            self.msg(None, 100 + i, "me", "tin mẫu số %d" % i)
+        self.assertEqual(len(tr.style_samples(1)), 5)
+        rid, ai = self._triage_question()
+        reply_prompt = ai.call_args_list[1][0][0]
+        self.assertIn("Không hứa thời gian", reply_prompt)
+        self.assertIn("Không dùng emoji", reply_prompt)
+        with mock.patch.object(tr, "_run_claude_json", return_value={"text": "x"}) as ai2:
+            tr.restyle("Đã nhận việc", 1, "msg_created")
+        self.assertIn("Không hứa thời gian", ai2.call_args[0][0])
+
+    def test_settings_validation(self):
+        with mock.patch.object(tr, "SETTINGS_PATH", os.path.join(self.tmp, "telegram.json")), \
+                mock.patch.object(tr, "_restart_view", return_value=None):
+            with self.assertRaises(ValueError):
+                tr.save_settings({"style_samples": 1})
+            with self.assertRaises(ValueError):
+                tr.save_settings({"reply_guide": "x" * 1501})
+            tr.save_settings({"style_samples": 60, "reply_guide": "Xưng em", "reply_enabled": False})
+            with open(os.path.join(self.tmp, "telegram.json")) as f:
+                saved = json.load(f)
+        self.assertEqual((saved["style_samples"], saved["reply_guide"], saved["reply_enabled"]), (60, "Xưng em", False))
+
+
 if __name__ == "__main__":
     unittest.main()
