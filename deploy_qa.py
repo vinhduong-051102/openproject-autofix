@@ -3350,10 +3350,24 @@ def _review_queue(api=None, proj=None):
                     "status": (w["_links"].get("status") or {}).get("title"), "state": state, "note": note,
                     "fe_commits": len(fe_h), "be_commits": len(be_h), "last": last, "queued": t in queued})
     seen = {x["display_id"] for x in out}
+    gone = []
     for t in sorted(queued - seen):
-        out.append({"display_id": t, "wp_id": None, "subject": "", "status": "hàng chờ QA", "state": "waiting",
-                    "note": "trong hàng chờ QA (đợt deploy trước chưa test xong)", "last": qa_history(t) or {},
-                    "queued": True})
+        # Ticket hàng chờ đã chuyển người khác (vd QA đạt → giao tester): không còn chờ QA của mình — bỏ khỏi hàng chờ
+        # thay vì hiện "Chờ QA trên server" mãi.
+        if not af.ticket_still_mine(api, t):
+            gone.append(t)
+            continue
+        last = qa_history(t) or {}
+        done = last.get("build") == build
+        out.append({"display_id": t, "wp_id": None, "subject": "", "status": "hàng chờ QA",
+                    "state": "done" if done else "waiting",
+                    "note": ("đã QA trên bản này: %s" % last.get("verdict")) if done
+                    else "trong hàng chờ QA (đợt deploy trước chưa test xong)", "last": last, "queued": True})
+    if gone:
+        with _PendingLock():
+            cur, added = _pending_read()
+            _pending_write([x for x in cur if x not in gone], "bỏ ticket đã chuyển người khác: " + ", ".join(gone),
+                           {k: v for k, v in added.items() if k not in gone})
     return {"items": out, "build": build, "server_up": bool(fp.get("fe")), "at": time.time()}
 
 
