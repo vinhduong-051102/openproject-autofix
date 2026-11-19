@@ -3187,9 +3187,13 @@ def ship_run(cfg, acfg, run_name, profile=None):
     cfg, acfg = for_ticket(cfg, acfg, display_id)
     report_path = os.path.join(run_dir, "report.md")
     report_text = open(report_path, encoding="utf-8").read() if os.path.exists(report_path) else ""
-    kind = next((k for k in ("ĐÃ SỬA", "KHÔNG SỬA ĐƯỢC", "GIẢI ĐÁP") if report_text.lstrip().startswith("KẾT QUẢ: " + k)), None)
+    kind = next((k for k in ("ĐÃ SỬA", "KHÔNG SỬA ĐƯỢC", "GIẢI ĐÁP", "CẦN TEST TAY")
+                 if report_text.lstrip().startswith("KẾT QUẢ: " + k)), None)
+    if kind == "CẦN TEST TAY" and not any_fix(acfg, run_dir):
+        kind = None  # không có bản sửa: chỉ cần comment test tay, không có gì để giao
     if not kind:
-        sys.exit("%s: báo cáo không phải ĐÃ SỬA / KHÔNG SỬA ĐƯỢC / GIẢI ĐÁP — không giao lại" % run_name)
+        sys.exit("%s: báo cáo không phải ĐÃ SỬA / KHÔNG SỬA ĐƯỢC / GIẢI ĐÁP / CẦN TEST TAY có bản sửa — không giao lại"
+                 % run_name)
     fe_dir, be_dir = os.path.join(run_dir, "fe"), os.path.join(run_dir, "be")
     for r, d in R.trees(acfg, run_dir):  # cấu hình thư mục dùng chung / setup có thể đổi sau khi tạo worktree
         if os.path.isdir(d):
@@ -3532,7 +3536,8 @@ def assist_run(cfg, acfg, run_name, note="", profile=None):
         raise
     slot.close()
     ticket_lock.close()  # ship_run tự lấy lại khoá ticket + suất chạy
-    if verdict.startswith(("ĐÃ SỬA", "KHÔNG SỬA ĐƯỢC")):
+    if verdict.startswith(("ĐÃ SỬA", "KHÔNG SỬA ĐƯỢC")) or (verdict.startswith("CẦN TEST TAY") and any_fix(acfg, run_dir)
+                                                         and acfg.get("auto_ship")):
         ship_run(cfg, acfg, run_name, acfg.get("_profile"))
         return
     if verdict.startswith("CẦN QUYẾT ĐỊNH") and acfg.get("review_status_id"):
@@ -4229,6 +4234,20 @@ def main():
                                                          be_dir, report_text)
             except Exception as ex:  # noqa: BLE001
                 verdict += " → cập nhật ticket lỗi: %s" % str(ex).splitlines()[0][:200]
+        elif verdict.startswith("CẦN TEST TAY") and has_fix and acfg.get("auto_ship"):
+            # Có bản sửa mà chỉ comment "Cần test tay" + UNREVIEWED thì commit nằm lại worktree, không bao giờ lên
+            # server test → tester test bản cũ (SOAR-838). Giao bản sửa như ĐÃ SỬA (kiểm tra + push → Resolved);
+            # đợt deploy kế tiếp QA server, QA không tự test được thì lúc đó mới nhờ test tay.
+            _qa_issue("qa_manual", display_id, report_text, run_dir)
+            set_status(root, display_id, state="shipping")
+            try:
+                shipped, ship_msg = deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir,
+                                            report_text)
+            except Exception as ex:  # noqa: BLE001
+                shipped, ship_msg = False, "ship lỗi: %s" % str(ex).splitlines()[0][:200]
+            verdict += " → có bản sửa, giao trước: " + ship_msg
+            if not shipped and "UNREVIEWED" not in ship_msg and "chờ xem lại" not in ship_msg:
+                verdict += " (sửa tay rồi push)"
         elif verdict.startswith("CẦN TEST TAY"):
             _qa_issue("qa_manual", display_id, report_text, run_dir)
             try:
