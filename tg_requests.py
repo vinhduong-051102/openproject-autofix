@@ -43,10 +43,11 @@ FIELDS = {  # khoá: (biến .env, kiểu, mặc định)
     "notify_tester": ("TG_NOTIFY_TESTER", "bool", False),
     "done_statuses": ("TG_DONE_STATUSES", "list", ["Resolved", "Closed"]),
     "sync_minutes": ("TG_SYNC_MINUTES", "int", 5),
-    "msg_created": ("TG_MSG_CREATED", "msg", "✅ Đã tiếp nhận: {title}\nMã việc: {display_id}"),
-    "msg_linked": ("TG_MSG_LINKED", "msg", "✅ Đã ghi nhận bổ sung vào {display_id}: {title}"),
-    "msg_rejected": ("TG_MSG_REJECTED", "msg", "❌ Chưa tiếp nhận: {title}\nLý do: {reason}"),
-    "msg_done": ("TG_MSG_DONE", "msg", "🎉 {display_id} đã xử lý ({status}): {title}. Nhờ bạn kiểm tra lại giúp."),
+    # Nội dung (dữ kiện) của tin báo; trước khi gửi AI viết lại theo văn phong của mình (style_due), giữ nguyên dữ kiện.
+    "msg_created": ("TG_MSG_CREATED", "msg", "Đã nhận việc: {title}\nMã việc: {display_id}"),
+    "msg_linked": ("TG_MSG_LINKED", "msg", "Đã ghi bổ sung vào {display_id}: {title}"),
+    "msg_rejected": ("TG_MSG_REJECTED", "msg", "Chưa nhận việc: {title}\nLý do: {reason}"),
+    "msg_done": ("TG_MSG_DONE", "msg", "{display_id} đã xử lý xong ({status}): {title}. Nhờ kiểm tra lại giúp."),
     "ai_filter": ("TG_AI_FILTER", "bool", True),
     "ai_model": ("TG_AI_MODEL", "str", "sonnet"),
     "ask_auto": ("TG_ASK_AUTO", "bool", False),
@@ -406,6 +407,12 @@ def db():
             c.execute("ALTER TABLE outbox ADD COLUMN purpose TEXT")
         if "kind" not in {r[1] for r in c.execute("PRAGMA table_info(asks)")}:
             c.execute("ALTER TABLE asks ADD COLUMN kind TEXT DEFAULT 'decision'")  # decision | manual_test
+        # Tin công cụ soạn: styled=0 → chờ AI viết lại theo văn phong của mình (style_due) rồi mới gửi.
+        if "styled" not in {r[1] for r in c.execute("PRAGMA table_info(outbox)")}:
+            c.execute("ALTER TABLE outbox ADD COLUMN styled INTEGER DEFAULT 1")
+            c.execute("ALTER TABLE outbox ADD COLUMN raw_text TEXT")
+        if "styled_text" not in {r[1] for r in c.execute("PRAGMA table_info(asks)")}:
+            c.execute("ALTER TABLE asks ADD COLUMN styled_text TEXT")
         _LOCAL.conn = c
     return c
 
@@ -1049,6 +1056,14 @@ def _files_for(msgs, only=None):
     return files
 
 
+def queue_out(chat_id, text, reply_to=None, request_id=None, purpose=None, styled=True):
+    """Xếp tin gửi từ tài khoản của mình. styled=False: tin do công cụ soạn → AI viết lại theo văn phong thường ngày của
+    mình trước khi gửi (để người đọc không thấy giọng bot). Tin mình tự gõ / đã duyệt trên trang thì styled=True."""
+    db().execute("INSERT INTO outbox (chat_id, text, reply_to, created_at, request_id, purpose, styled, raw_text)"
+                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 (chat_id, text, reply_to, now(), request_id, purpose, 1 if styled else 0, None if styled else text))
+
+
 def _queue_reply(req, key, **extra):
     """Xếp tin trả lời tester (mẫu `key` trong cấu hình). Mẫu sai thì dùng mẫu mặc định — không được làm hỏng thao tác
     vừa xong (vd task đã tạo mà báo lỗi → bấm chạy lại sẽ tạo trùng)."""
@@ -1063,8 +1078,8 @@ def _queue_reply(req, key, **extra):
         text = settings()[key].format(**fields)
     except (KeyError, IndexError, ValueError):
         text = FIELDS[key][2].format(**fields)
-    db().execute("INSERT INTO outbox (chat_id, text, reply_to, created_at) VALUES (?, ?, ?, ?)",
-                 (req["chat_id"], text, first["tg_msg_id"] if first else None, now()))
+    queue_out(req["chat_id"], text, first["tg_msg_id"] if first else None, request_id=req.get("id"),
+              purpose=key, styled=False)
 
 
 def chat_project(chat_id):
@@ -1678,10 +1693,11 @@ def bullets(points):
 
 
 def clarify_text(req, questions):
-    head = "🤖 Để tạo việc “%s”, nhờ anh/chị bổ sung giúp em" % (req.get("title") or "")[:120]
+    """Nội dung câu hỏi bổ sung (dữ kiện). Gửi tự động thì AI viết lại theo văn phong của mình (style_due)."""
+    head = "Việc “%s” còn thiếu chút thông tin, bổ sung giúp" % (req.get("title") or "")[:120]
     qs = [q for q in questions if str(q).strip()]
     body = (head + ": " + bullets(qs)) if len(qs) == 1 else (head + ":\n" + bullets(qs))
-    return body + "\n\n(Trả lời bằng cách reply vào tin này)"
+    return body + "\nReply vào tin này giúp nhé"
 
 
 def send_clarify(rid, text=None):
@@ -1692,12 +1708,14 @@ def send_clarify(rid, text=None):
     if not can_clarify(req["chat_id"]):
         raise ValueError("chat này chưa bật quyền Xin ý kiến (⚙ Cài đặt → Nguồn chat) — không hỏi lại được")
     questions = json.loads(req.get("ai_missing") or "[]")
-    text = (text or "").strip() or clarify_text(req, questions)
+    typed = (text or "").strip()
+    text = typed or clarify_text(req, questions)
     if not text:
         raise ValueError("chưa có câu hỏi")
     first = row("SELECT tg_msg_id FROM messages WHERE request_id=? AND sender='tester' ORDER BY date LIMIT 1", (rid,))
-    db().execute("INSERT INTO outbox (chat_id, text, reply_to, created_at, request_id, purpose) VALUES (?, ?, ?, ?, ?, ?)",
-                 (req["chat_id"], text, first["tg_msg_id"] if first else None, now(), rid, "clarify"))
+    # Mình sửa / gõ trên trang (khác bản công cụ soạn) → gửi nguyên văn; còn lại AI viết lại theo văn phong của mình.
+    queue_out(req["chat_id"], text, first["tg_msg_id"] if first else None, request_id=rid, purpose="clarify",
+              styled=bool(typed) and typed != clarify_text(req, questions))
     update(rid, status="need_info", clarify_at=now(), clarify_count=(req.get("clarify_count") or 0) + 1)
     return "Đã xếp tin hỏi lại #%s (vài giây sau gửi)" % rid
 
@@ -1748,8 +1766,11 @@ STYLE_SAMPLES = 40
 
 def style_samples(chat_id=None, n=STYLE_SAMPLES):
     """Tin mình tự nhắn gần đây (bỏ tin công cụ gửi: 🤖 / ✅ / ❌ / 🎉 …) — ưu tiên cùng chat, thiếu thì lấy chat khác."""
-    bot = ("🤖", "✅", "❌", "🎉", "📨", "⚠")
-    seen, out = set(), []
+    bot = ("🤖", "✅", "❌", "🎉", "📨", "⚠", "🧪", "❓")
+    # Tin công cụ soạn rồi AI viết lại (outbox có raw_text / asks.styled_text) không phải mình tự gõ — không học theo.
+    seen = {r["text"] for r in rows("SELECT text FROM outbox WHERE raw_text IS NOT NULL")}
+    seen |= {r["styled_text"] for r in rows("SELECT styled_text FROM asks WHERE styled_text IS NOT NULL")}
+    out = []
     for sql, args in ((("SELECT text FROM messages WHERE sender='me' AND chat_id=? AND text IS NOT NULL"
                         " ORDER BY date DESC LIMIT 300"), (chat_id,)),
                       (("SELECT text FROM messages WHERE sender='me' AND text IS NOT NULL ORDER BY date DESC LIMIT 600"),
@@ -1765,6 +1786,88 @@ def style_samples(chat_id=None, n=STYLE_SAMPLES):
             if len(out) >= n:
                 return out
     return out
+
+
+STYLE_PROMPT = """Viết lại tin nhắn Telegram dưới đây đúng như dev ({me}) tự gõ gửi cho {to} {where} — dự án @@P@@. Người
+đọc không được thấy đây là tin tự động / bot. Chạy nền, chỉ trả JSON, không dùng công cụ.
+
+## Loại tin
+{purpose}
+
+## Nội dung cần gửi (dữ kiện — GIỮ ĐỦ: mã ticket, tiêu đề, đường link, lý do, từng câu hỏi; không thêm dữ kiện mới)
+{raw}
+
+## Mấy tin gần nhất trong chat này (để xưng hô cho đúng người)
+{context}
+
+## Văn phong của dev — các tin dev đã tự nhắn gần đây (học xưng hô, độ dài, từ hay dùng, viết tắt, dấu câu, emoji)
+{style}
+
+## Viết
+- Giọng nhắn tin thường ngày của dev: ngắn, tự nhiên, xưng hô như dev vẫn dùng với người này. Không văn mẫu, không tiêu
+  đề kiểu "Thông báo", không ngoặc đơn hướng dẫn kiểu bot, không ký tên, không nói mình là AI / hệ thống.
+- Không dùng emoji / ký hiệu đầu dòng kiểu bot (🤖 ✅ ❌ 🎉 🧪 ❓) trừ khi dev hay dùng đúng emoji đó.
+- Nhiều ý (nhiều câu hỏi / nhiều điểm) → mỗi ý một dòng gạch đầu dòng "- "; một ý thì viết một câu.
+- Cần người đọc trả lời (câu hỏi / xin ý kiến / nhờ test) → nhắc reply vào tin này một cách tự nhiên như dev hay nói.
+- Đường link giữ nguyên văn.
+{{"text": "tin nhắn đã viết lại"}}
+"""
+STYLE_PROMPT = _project_text(STYLE_PROMPT)
+STYLE_PURPOSES = {"clarify": "hỏi bổ sung thông tin để tạo việc", "msg_created": "báo đã nhận việc / đã tạo ticket",
+                  "msg_linked": "báo đã ghi bổ sung vào ticket có sẵn", "msg_rejected": "báo chưa nhận việc kèm lý do",
+                  "msg_done": "báo việc đã xử lý xong, nhờ kiểm tra lại", "decision": "xin ý kiến / nhờ quyết định",
+                  "manual_test": "nhờ test tay rồi báo Đạt / Không đạt"}
+_STYLE_LOCK = threading.Lock()
+_BOT_MARK = re.compile(r"^[\s🤖✅❌🎉🧪❓📨⚠️]+|\s*\((?:Trả lời|Reply)[^)]*\)\s*$", re.M)
+
+
+def plain_text(raw):
+    """Không viết lại được bằng AI: ít nhất bỏ dấu hiệu bot (emoji đầu dòng, ngoặc hướng dẫn)."""
+    return _BOT_MARK.sub("", raw or "").strip()
+
+
+def restyle(raw, chat_id, purpose):
+    """AI viết lại `raw` theo văn phong thường ngày của mình cho chat này. Lỗi → bỏ dấu hiệu bot, gửi bản thô."""
+    c = chat_cfg(chat_id)
+    where = ("trong nhóm “%s”" % c["name"]) if c and c["kind"] != "user" else "trong chat riêng"
+    ctx = rows("SELECT * FROM messages WHERE chat_id=? ORDER BY date DESC LIMIT 8", (chat_id,))[::-1]
+    watcher = get_meta("watcher", {}) or {}
+    to = next((m["sender_name"] for m in ctx[::-1] if m["sender"] == "tester" and m["sender_name"]), None) \
+        or (c["name"] if c else "người nhận")
+    try:
+        out = _run_claude_json(STYLE_PROMPT.format(
+            me=watcher.get("me") or "dev", to=to, where=where, purpose=STYLE_PURPOSES.get(purpose, "tin nhắn"),
+            raw=raw, context="\n".join(_msg_line(m) for m in ctx) or "(không có)",
+            style="\n".join("- " + t.replace("\n", " ⏎ ") for t in style_samples(chat_id)) or "(chưa có)"),
+            settings()["ai_model"])
+        text = str(out.get("text") or "").strip()
+    except Exception:  # noqa: BLE001
+        text = ""
+    return text or plain_text(raw)
+
+
+def style_due():
+    """Viết lại các tin công cụ soạn đang chờ gửi (outbox styled=0, asks queued chưa có styled_text) — luồng nền riêng,
+    tg_watch gọi mỗi vòng; đang chạy thì bỏ qua. Viết xong mới được pending_outbox / pending_asks lấy ra gửi."""
+    if not rows("SELECT id FROM outbox WHERE styled=0 AND sent_at IS NULL AND error IS NULL LIMIT 1") and \
+            not rows("SELECT id FROM asks WHERE status='queued' AND styled_text IS NULL LIMIT 1"):
+        return
+    if not _STYLE_LOCK.acquire(blocking=False):
+        return
+
+    def work():
+        try:
+            for o in rows("SELECT * FROM outbox WHERE styled=0 AND sent_at IS NULL AND error IS NULL ORDER BY id LIMIT 5"):
+                text = restyle(o["raw_text"] or o["text"], o["chat_id"], o["purpose"])
+                db().execute("UPDATE outbox SET text=?, styled=1 WHERE id=?", (text, o["id"]))
+            for a in rows("SELECT * FROM asks WHERE status='queued' AND styled_text IS NULL AND chat_id IS NOT NULL"
+                          " ORDER BY id LIMIT 5"):
+                text = restyle(ask_raw_text(a), a["chat_id"], a.get("kind") or "decision")
+                ask_update(a["id"], styled_text=text)
+        finally:
+            _LOCAL.conn = None
+            _STYLE_LOCK.release()
+    threading.Thread(target=work, name="tg-style", daemon=True).start()
 
 
 def draft_reply(rid, hint=""):
@@ -1811,8 +1914,7 @@ def send_reply(rid, text):
         raise ValueError("chưa có nội dung trả lời")
     last = row("SELECT tg_msg_id FROM messages WHERE request_id=? AND sender='tester' ORDER BY date DESC LIMIT 1",
                (req["id"],))
-    db().execute("INSERT INTO outbox (chat_id, text, reply_to, created_at, request_id, purpose) VALUES (?, ?, ?, ?, ?, ?)",
-                 (req["chat_id"], text, last["tg_msg_id"] if last else None, now(), req["id"], "reply"))
+    queue_out(req["chat_id"], text, last["tg_msg_id"] if last else None, request_id=req["id"], purpose="reply")
     update(req["id"], reply_draft=text, status="answered", reply_at=now(), decided_at=now())
     return "Đã xếp tin trả lời #%s (vài giây sau gửi)" % req["id"]
 
@@ -1938,17 +2040,24 @@ def _default_tester():
     return t[0]["id"] if t else None
 
 
-def ask_text(a):
+def ask_raw_text(a):
+    """Dữ kiện của tin xin ý kiến / nhờ test tay (AI viết lại theo văn phong của mình trước khi gửi)."""
     url = "%s/work_packages/%s/activity" % (_op_url(), a["wp_id"]) if a.get("wp_id") else ""
-    head = "🧪 Nhờ test tay" if a.get("kind") == "manual_test" else "❓ Xin ý kiến"
-    tail = "(Trả lời Đạt / Không đạt bằng cách reply vào tin này)" if a.get("kind") == "manual_test" \
-        else "(Trả lời bằng cách reply vào tin này)"
+    head = "Nhờ test tay" if a.get("kind") == "manual_test" else "Cần ý kiến về"
+    tail = "Reply vào tin này kết quả Đạt / Không đạt giúp nhé" if a.get("kind") == "manual_test" \
+        else "Reply vào tin này giúp nhé"
     return "%s %s — %s\n\n%s\n\n%s%s" % (head, a["display_id"], (a.get("subject") or "")[:150],
                                        (a.get("question") or "").strip(), url + "\n" if url else "", tail)
 
 
+def ask_text(a):
+    return (a.get("styled_text") or "").strip() or ask_raw_text(a)
+
+
 def pending_asks():
-    return rows("SELECT * FROM asks WHERE status='queued' AND chat_id IS NOT NULL ORDER BY id LIMIT 5")
+    # Chỉ gửi khi AI đã viết lại theo văn phong của mình (style_due điền styled_text, lỗi thì điền bản thô).
+    return rows("SELECT * FROM asks WHERE status='queued' AND chat_id IS NOT NULL AND styled_text IS NOT NULL"
+                " ORDER BY id LIMIT 5")
 
 
 def mark_ask_sent(aid, tg_msg_id=None, error=None):
@@ -2093,7 +2202,7 @@ def ask_action(kind, body):
         chat = int(body.get("chat_id") or a["chat_id"] or _default_tester() or 0)
         if not chat:
             raise ValueError("chưa có tester nào (op-telegram chưa chạy?)")
-        ask_update(a["id"], question=q, chat_id=chat, decider="tester", status="queued", error=None)
+        ask_update(a["id"], question=q, chat_id=chat, decider="tester", status="queued", error=None, styled_text=None)
         return "Đã xếp gửi câu hỏi %s cho tester (vài giây)" % a["display_id"]
     if kind == "tg_ask_keep":
         ask_update(a["id"], status="kept", decider="dev")
@@ -2212,7 +2321,8 @@ def sync_wp_status():
 
 
 def pending_outbox():
-    return rows("SELECT * FROM outbox WHERE sent_at IS NULL AND error IS NULL ORDER BY id LIMIT 20")
+    return rows("SELECT * FROM outbox WHERE sent_at IS NULL AND error IS NULL AND COALESCE(styled, 1)=1"
+                " ORDER BY id LIMIT 20")
 
 
 def mark_outbox(oid, error=None, sent_id=None):

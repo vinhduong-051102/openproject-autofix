@@ -2884,7 +2884,7 @@ async function tgOpen(id, keep) {
         <div class="tm-label">Bạn trả lời phần đã biết (AI bỏ câu đã trả lời, tạo lại câu hỏi còn thiếu — chưa gửi gì)</div>
         <textarea id="tgClarifyAns" rows="2" placeholder="vd: Lỗi ở màn Quản lý báo cáo, tài khoản quantri; bước tái hiện em biết rồi"></textarea>
         <div class="tm-row"><button id="tgClarifyRefine">🤖 AI tạo lại câu hỏi</button></div>
-        ${miss.length ? (r.can_clarify ? `<div class="tm-label">Tin sẽ gửi (sửa được)</div><textarea id="tgClarifyText" rows="4">${esc(clarifyText())}</textarea>
+        ${miss.length ? (r.can_clarify ? `<div class="tm-label">Nội dung sẽ hỏi — để nguyên thì AI viết lại theo văn phong của bạn khi gửi; sửa thì gửi đúng chữ bạn sửa</div><textarea id="tgClarifyText" rows="4">${esc(clarifyText())}</textarea>
           <div class="tm-row"><button class="primary" id="tgClarify">📨 Xác nhận gửi câu hỏi</button><button id="tgClarifySkip">Không cần hỏi</button></div>`
           : `<div class="muted">Chat này chưa bật quyền <b>Xin ý kiến</b> (⚙ Cài đặt → Nguồn chat) nên không gửi câu hỏi được — bạn tự bổ sung ở trên rồi duyệt.</div>`) : ""}
       </div>`;
@@ -3051,6 +3051,7 @@ async function tgSettings() {
       <label for="tgs_group_window">Khoảng gom tin (giây)${S("group_window")}</label><div><input type="number" id="tgs_group_window" min="10" max="3600" value="${st.group_window}"><div class="hint">Tin liên tiếp cách nhau không quá khoảng này gộp thành một yêu cầu; hết khoảng → Chờ duyệt.</div></div>
       <label for="tgs_max_media_mb">Tệp tối đa (MB)${S("max_media_mb")}</label><div><input type="number" id="tgs_max_media_mb" min="1" max="200" value="${st.max_media_mb}"></div>
       <h4>Trả lời tester</h4>
+      <div class="hint" style="grid-column:1/-1">Mọi tin công cụ gửi từ tài khoản của bạn (báo đã nhận / gắn / từ chối / xong, hỏi bổ sung, xin ý kiến, nhờ test tay) được AI viết lại theo văn phong bạn hay nhắn trước khi gửi — người đọc không thấy giọng bot. Các mẫu dưới đây chỉ là nội dung (dữ kiện) cần có trong tin.</div>
       <label for="tgs_notify_tester">Gửi tin trả lời${S("notify_tester")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_notify_tester" ${st.notify_tester ? "checked" : ""}> Trả lời tester (từ tài khoản của bạn) khi tạo task / gắn việc / từ chối / việc xong</label></div>
       <label for="tgs_clarify_auto">Hỏi bổ sung khi tạo việc${S("clarify_auto")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_clarify_auto" ${st.clarify_auto ? "checked" : ""}> Tự nhắn hỏi người gửi khi AI thấy việc mới thiếu thông tin (tối đa 2 lượt; chat cần bật quyền Xin ý kiến). Trả lời xong AI lọc lại và điền vào yêu cầu. Tắt: chờ bạn bấm gửi.</label></div>
       <label for="tgs_ask_auto">Xin ý kiến tester${S("ask_auto")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_ask_auto" ${st.ask_auto ? "checked" : ""}> Tự gửi câu hỏi khi AI xác định tester quyết (ticket chuyển UNREVIEWED). Tắt: chờ bạn bấm “Gửi tester”.</label></div>

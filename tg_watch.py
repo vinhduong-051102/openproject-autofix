@@ -287,6 +287,7 @@ class Watcher:
                     else:
                         tr.finish_command(cmd["id"], "bỏ qua")
                 tr.triage_due()  # AI lọc việc (luồng nền riêng, không chặn vòng này)
+                tr.style_due()  # AI viết lại tin công cụ soạn theo văn phong của mình trước khi gửi (luồng nền riêng)
                 done = await self.run_blocking(tr.advance_drafts)
                 for line in done:
                     log.info("tạo task: %s", line)

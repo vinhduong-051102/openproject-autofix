@@ -51,7 +51,8 @@ class BulletsTest(unittest.TestCase):
 
     def test_clarify_text_uses_bullets(self):
         one = tr.clarify_text({"title": "Lỗi A"}, ["Màn nào?"])
-        self.assertIn("bổ sung giúp em: Màn nào?", one)
+        self.assertIn("bổ sung giúp: Màn nào?", one)
+        self.assertNotIn("🤖", one)
         many = tr.clarify_text({"title": "Lỗi A"}, ["Màn nào?", "Tài khoản nào?"])
         self.assertIn(":\n- Màn nào?\n- Tài khoản nào?", many)
         self.assertNotIn("1. ", many)
@@ -160,6 +161,72 @@ class TriageQuestionTest(TgBase):
         o = tr.row("SELECT * FROM outbox WHERE request_id=?", (new["id"],))
         self.assertIn("- Màn nào?\n- Tài khoản nào?", o["text"])
         self.assertIsNone(tr.row("SELECT * FROM outbox WHERE request_id=?", (rid,)))  # câu trả lời chưa gửi
+
+
+class _NowThread:
+    def __init__(self, target=None, **kw):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
+class StyleTest(TgBase):
+    def setUp(self):
+        super().setUp()
+        self.p_thr = mock.patch.object(tr.threading, "Thread", _NowThread)
+        self.p_thr.start()
+
+    def tearDown(self):
+        self.p_thr.stop()
+        super().tearDown()
+
+    def test_tool_messages_wait_for_restyle_then_send_in_my_style(self):
+        rid = self.req(status="created", title="Lỗi A", display_id="SOAR-9")
+        self.msg(rid, 3, "tester", "lỗi màn A")
+        self.cfg["notify_tester"] = True
+        with mock.patch.object(tr, "chat_cfg", lambda cid: {"name": "Tester A", "kind": "user", "asks": True,
+                                                            "notify": True}):
+            tr._queue_reply(tr.row("SELECT * FROM requests WHERE id=?", (rid,)), "msg_created")
+            self.assertEqual(tr.pending_outbox(), [])  # chưa viết lại → chưa gửi
+            with mock.patch.object(tr, "_run_claude_json", return_value={"text": "ok a, e tạo SOAR-9 rồi nha"}) as ai:
+                tr.style_due()
+        prompt = ai.call_args[0][0]
+        self.assertIn("SOAR-9", prompt)
+        out = tr.pending_outbox()
+        self.assertEqual([o["text"] for o in out], ["ok a, e tạo SOAR-9 rồi nha"])
+        self.assertIn("Mã việc: SOAR-9", out[0]["raw_text"])
+
+    def test_ai_failure_falls_back_to_plain_text_without_bot_marks(self):
+        tr.queue_out(1, "🤖 Để tạo việc X, bổ sung giúp em: A?\n\n(Trả lời bằng cách reply vào tin này)", styled=False)
+        with mock.patch.object(tr, "_run_claude_json", side_effect=RuntimeError("hết hạn mức")):
+            tr.style_due()
+        text = tr.pending_outbox()[0]["text"]
+        self.assertFalse(text.startswith("🤖"))
+        self.assertNotIn("(Trả lời", text)
+        self.assertIn("bổ sung giúp em: A?", text)
+
+    def test_typed_clarify_is_sent_verbatim(self):
+        rid = self.req(ai_missing=json.dumps(["Màn nào?"]))
+        self.msg(rid, 5, "tester", "lỗi")
+        tr.send_clarify(rid, "màn nào thế a")
+        o = tr.row("SELECT * FROM outbox WHERE request_id=?", (rid,))
+        self.assertEqual((o["styled"], o["text"]), (1, "màn nào thế a"))
+        rid2 = self.req(ai_missing=json.dumps(["Màn nào?"]))
+        tr.send_clarify(rid2)
+        self.assertEqual(tr.row("SELECT styled FROM outbox WHERE request_id=?", (rid2,))["styled"], 0)
+
+    def test_asks_sent_only_after_restyle_and_tool_text_not_learned(self):
+        tr.db().execute("INSERT INTO asks (display_id, decider, status, chat_id, question, created_at, updated_at)"
+                        " VALUES ('SOAR-5', 'tester', 'queued', 1, 'Giữ hay bỏ cột X?', ?, ?)", (tr.now(), tr.now()))
+        self.assertEqual(tr.pending_asks(), [])
+        with mock.patch.object(tr, "_run_claude_json", return_value={"text": "a ơi SOAR-5 giữ hay bỏ cột X thế a"}):
+            tr.style_due()
+        a = tr.pending_asks()[0]
+        self.assertEqual(tr.ask_text(a), "a ơi SOAR-5 giữ hay bỏ cột X thế a")
+        self.msg(None, 40, "me", "a ơi SOAR-5 giữ hay bỏ cột X thế a")  # tin đó đã gửi → không lấy làm mẫu văn phong
+        self.msg(None, 41, "me", "để e xem nha")
+        self.assertEqual(tr.style_samples(1), ["để e xem nha"])
 
 
 if __name__ == "__main__":
