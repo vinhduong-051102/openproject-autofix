@@ -340,7 +340,7 @@ Làm ĐÚNG như mô tả trong ticket: tái hiện các bước tái hiện (ti
 KẾT QUẢ MONG ĐỢI của ticket. Không mở rộng sang việc khác ngoài ticket.
 
 Gọi API: mỗi phần tử `calls` gồm
-- method: GET | POST | PUT | PATCH | UPLOAD (multipart) | SEARCH | API | UI | DELETE (chỉ cho: {delete_allow})
+- method: GET | POST | PUT | PATCH | UPLOAD (multipart) | SEARCH | API | UI | LOG | DELETE (chỉ cho: {delete_allow})
 - API: tra MÃ NGUỒN BE (controller + DTO của bản đang deploy) — không gọi server. target = đoạn đường dẫn / tên hàm
   (vd "swap-user"), một request cụ thể (vd "PUT /api/v1/cases/swap-user/1553") hoặc tên DTO (vd "SwapUserImplement").
   Trả: phương thức HTTP đúng, đường dẫn đầy đủ kèm {{biến}}, tham số query, body JSON với TÊN TRƯỜNG THẬT (snake_case /
@@ -357,6 +357,10 @@ Gọi API: mỗi phần tử `calls` gồm
   (chụp + khoanh đỏ vùng cần chú ý). Màn hình đăng nhập / trang công khai: body = {{"login": false, "steps": [...]}}.
   Kết quả trả về: từng bước OK / LỖI, chữ / CSS đọc được, đường dẫn ảnh. Bạn KHÔNG xem được ảnh: kết luận dựa trên
   chữ / CSS đọc được; ảnh dùng làm minh chứng cho tester. Nút xoá / đăng xuất bị chặn. Tối đa 2 request UI mỗi vòng.
+- LOG: đọc log BE trên server test (chỉ đọc). target = đoạn chữ cần tìm (không phân biệt hoa thường, vd "Telegram",
+  tên lớp / hàm trong diff); body tuỳ chọn {{"since_minutes": 30}} (tối đa 180). Trả các dòng log khớp (đã bỏ dòng
+  stack, che token). Dùng cho kết quả KHÔNG trả qua API: gửi sang hệ thống ngoài (Telegram, mail, webhook), job nền,
+  xử lý bất đồng bộ — gọi thao tác qua API trước, rồi LOG để xem có lỗi / gửi thành công.
 - SEARCH: tìm trong TOÀN BỘ mã FE đang chạy (index.html + mọi file /assets/*.js, *.css đã tải sẵn); target = đoạn
   chữ hoặc regex (Python) cần tìm, ví dụ một chuỗi i18n, tên class, aria-label, mã màu trong diff. Trả các đoạn khớp
   kèm tên file và ngữ cảnh. Dùng SEARCH để kiểm tra lỗi giao diện thay vì GET file bundle (file rất lớn, bị cắt).
@@ -534,11 +538,13 @@ def soar_call(qa_dir, call, dcfg=None):
         return ui_call(qa_dir, call)
     if method == "API":
         return be_api_lookup(dcfg, call.get("target", ""))
+    if method == "LOG":
+        return be_log_search(dcfg, call.get("target", ""), call.get("body") or "")
     if method == "DELETE":
         if not dcfg or not any(re.search(rx, call.get("target", "")) for rx in dcfg.get("qa_delete_allow", [])):
             return "BỊ CHẶN: DELETE chỉ cho đường dẫn khớp %s" % (dcfg or {}).get("qa_delete_allow")
     elif method not in ("GET", "POST", "PUT", "PATCH", "UPLOAD"):
-        return "BỊ CHẶN: chỉ cho GET / POST / PUT / PATCH / UPLOAD / SEARCH / API / UI / DELETE (giới hạn)"
+        return "BỊ CHẶN: chỉ cho GET / POST / PUT / PATCH / UPLOAD / SEARCH / API / UI / LOG / DELETE (giới hạn)"
     rep_notes = []
     call = dict(call)
     for k in ("target", "body", "file_name", "file_content"):
@@ -609,6 +615,37 @@ def soar_call(qa_dir, call, dcfg=None):
         out += be_api_hint(dcfg, method, call.get("target", ""), int(st.group(1)))
         out += fe_call_sites(dcfg, call.get("target", ""))
     return out
+
+
+_SECRET_RX = re.compile(r"\d{6,12}:[A-Za-z0-9_-]{30,}\b|((?:password|passwd|secret|token)[\"'=: ]+)[^\s,\"'}]+",
+                        re.I)
+
+
+def be_log_search(dcfg, pattern, body=""):
+    """QA đọc log BE trên server test (chỉ đọc): dòng chứa `pattern` (không phân biệt hoa thường) trong N phút gần nhất.
+    Dùng cho kết quả không trả qua API — gửi sang hệ thống ngoài (Telegram, mail, webhook), job nền, @Async (SOAR-838).
+    Che token / mật khẩu trước khi trả cho Gemini."""
+    pattern = (pattern or "").strip()
+    if not dcfg or not dcfg.get("host"):
+        return "LOG: không có cấu hình server test"
+    if len(pattern) < 3:
+        return "LOG: target = đoạn chữ cần tìm (≥ 3 ký tự), vd tên lớp / \"Telegram\" / mã ticket"
+    try:
+        minutes = int((json.loads(body) if body.strip().startswith("{") else {}).get("since_minutes") or 30)
+    except (ValueError, AttributeError):
+        minutes = 30
+    minutes = max(1, min(minutes, 180))
+    container = dcfg.get("be_container") or "soar"
+    cmd = ("docker logs --since %dm %s 2>&1 | grep -i -F -e %s | grep -v '^[[:space:]]*at ' | tail -60 | cut -c1-500"
+           % (minutes, shlex.quote(container), shlex.quote(pattern)))
+    try:
+        out = remote(dcfg, cmd, timeout=90)
+    except Exception as ex:  # noqa: BLE001
+        return "LOG: không đọc được log BE (%s)" % str(ex).splitlines()[0][:200]
+    out = _SECRET_RX.sub(lambda m: (m.group(1) or "") + "***", out or "").strip()
+    head = "LOG BE (%s, %d phút gần nhất, dòng chứa %s, bỏ dòng stack 'at …'):\n" % (
+        container, minutes, json.dumps(pattern, ensure_ascii=False))
+    return (head + (out or "(không có dòng nào)"))[:4000]
 
 
 def _json_tail(out):
