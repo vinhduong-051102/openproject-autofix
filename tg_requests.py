@@ -50,8 +50,8 @@ FIELDS = {  # khoá: (biến .env, kiểu, mặc định)
     "ai_filter": ("TG_AI_FILTER", "bool", True),
     "ai_model": ("TG_AI_MODEL", "str", "sonnet"),
     "ask_auto": ("TG_ASK_AUTO", "bool", False),
-    # (cũ) tự hỏi lại — nay luôn cần mình xác nhận trên trang mới gửi; giữ khoá cho cấu hình cũ, không dùng nữa.
-    "clarify_auto": ("TG_CLARIFY_AUTO", "bool", False),
+    # Tự gửi câu hỏi bổ sung khi AI thấy việc mới thiếu thông tin (tối đa CLARIFY_MAX lượt). Tắt: chờ mình bấm gửi.
+    "clarify_auto": ("TG_CLARIFY_AUTO", "bool", True),
 }
 RESTART_KEYS = ("api_id", "api_hash", "chats")
 CHAT_MODES = {"all": "Mọi tin", "mention": "Khi nhắc tới tôi / trả lời tin của tôi", "hashtag": "Chỉ tin có hashtag"}
@@ -299,11 +299,12 @@ MAX_ATTACH_BYTES = 20 * 1024 * 1024
 STATUS_LABELS = {
     "collecting": "Đang gom tin", "triage": "AI đang lọc", "need_info": "Chờ bổ sung", "pending": "Chờ duyệt", "drafting": "AI đang soạn", "draft_ready": "Chờ tạo task",
     "created": "Đã tạo task", "linked": "Đã gắn việc", "rejected": "Từ chối", "ignored": "Bỏ qua", "error": "Lỗi",
+    "answer": "Chờ trả lời", "answered": "Đã trả lời",
 }
-OPEN_STATES = ("collecting", "triage", "need_info", "pending", "drafting", "draft_ready", "error")
+OPEN_STATES = ("collecting", "triage", "need_info", "pending", "drafting", "draft_ready", "error", "answer")
 CLARIFY_MAX = 2            # tối đa số lượt hỏi lại một yêu cầu
 CLARIFY_WINDOW_H = 2       # người gửi nhắn tiếp trong khoảng này (không reply) cũng coi là trả lời câu hỏi
-AI_KINDS = {"new": "Việc mới", "existing": "Việc đã có", "chat": "Trò chuyện"}
+AI_KINDS = {"new": "Việc mới", "existing": "Việc đã có", "question": "Câu hỏi", "chat": "Trò chuyện"}
 # Cột thêm sau (DB cũ): kết quả lọc của AI.
 MIGRATE = ("ai_kind TEXT", "ai_type TEXT", "ai_summary TEXT", "ai_reason TEXT", "ai_refs TEXT", "ai_dup TEXT",
            "ai_at TEXT", "ai_error TEXT",
@@ -312,7 +313,9 @@ MIGRATE = ("ai_kind TEXT", "ai_type TEXT", "ai_summary TEXT", "ai_reason TEXT", 
            # tệp nén nhiều báo cáo → mỗi báo cáo một yêu cầu: các file thuộc việc này + tin chứa tệp (dùng chung)
            "ai_files TEXT", "src_msg INTEGER",
            # mình trả lời trước một phần câu hỏi (AI tạo lại câu hỏi còn thiếu) — JSON [{at, text}]
-           "clarify_notes TEXT")
+           "clarify_notes TEXT",
+           # câu hỏi gửi mình: bản nháp trả lời theo văn phong của mình (chờ duyệt), ghi chú của AI, lúc gửi, tin đã gửi
+           "reply_draft TEXT", "reply_note TEXT", "reply_at TEXT", "reply_msg_id INTEGER")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -592,6 +595,7 @@ def detail(rid):
         raise ValueError("không có yêu cầu này")
     r["status_label"] = STATUS_LABELS.get(r["status"], r["status"])
     _ai_fields(r, live=True)
+    r["clarify_preview"] = clarify_text(r, r.get("ai_missing") or []) if r.get("ai_missing") else ""
     msgs = messages_of(r["id"])
     if r.get("src_msg") and not any(m["id"] == r["src_msg"] for m in msgs):
         src = row("SELECT * FROM messages WHERE id=?", (r["src_msg"],))
@@ -1076,7 +1080,7 @@ def approve(rid, auto_create=True, note="", force=False, project=None):
     if not force and req.get("ai_kind") in ("existing", "chat"):
         raise ValueError("AI đánh giá là %s%s — xác nhận “Vẫn tạo việc mới” nếu chắc chắn không trùng" % (
             AI_KINDS[req["ai_kind"]].lower(), (" (" + req["ai_dup"] + ")") if req.get("ai_dup") else ""))
-    if req["status"] not in ("pending", "rejected", "ignored", "error", "collecting", "need_info"):
+    if req["status"] not in ("pending", "rejected", "ignored", "error", "collecting", "need_info", "answer", "answered"):
         raise ValueError("yêu cầu đang ở trạng thái %s" % req["status_label"])
     msgs = req["messages"]
     if not msgs:
@@ -1219,6 +1223,14 @@ def action(body):
         return send_clarify(int(rid), body.get("text"))
     if kind == "tg_clarify_refine":
         return clarify_refine(int(rid), body.get("answer"))
+    if kind == "tg_reply_send":
+        return send_reply(int(rid), body.get("text"))
+    if kind == "tg_reply_redraft":
+        draft_reply(int(rid), body.get("hint") or "")
+        return "AI đã soạn lại câu trả lời"
+    if kind == "tg_reply_skip":
+        update(int(rid), status="ignored", decided_at=now())
+        return "Không trả lời #%s — chuyển Bỏ qua" % rid
     if kind == "tg_clarify_skip":
         update(int(rid), status="pending", ai_missing=None)
         return "Bỏ hỏi lại #%s — chuyển Chờ duyệt" % rid
@@ -1229,7 +1241,7 @@ def action(body):
         return delete(int(rid))
     if kind == "tg_triage":
         req = detail(int(rid))
-        if req["status"] not in ("pending", "ignored", "rejected", "error", "draft_ready", "need_info"):
+        if req["status"] not in ("pending", "ignored", "rejected", "error", "draft_ready", "need_info", "answer"):
             raise ValueError("yêu cầu đang ở trạng thái %s" % req["status_label"])
         update(req["id"], status="triage", ai_at=None, ai_error=None, draft_id=None)
         return "Đã chuyển #%s cho AI lọc lại (vài chục giây)" % req["id"]
@@ -1313,7 +1325,10 @@ Tách các tin cần lọc thành các việc (một việc = một nhóm tin n�
   đó), hoặc nội dung trùng ticket / yêu cầu đã có ở danh sách trên. Điền duplicate_of = mã ticket đó. Trong reason ghi
   rõ việc đó ĐÃ LÀM TỚI ĐÂU theo trạng thái ticket + autofix (vd "Resolved, autofix đã sửa và push" / "Reopened, autofix
   đang sửa" / "New, chưa ai làm").
-- "chat": trò chuyện, hỏi thăm, trả lời, xác nhận ("oke", "vâng"), bàn về công cụ / token… không phải việc cần làm.
+- "question": người gửi HỎI dev một điều cần dev trả lời (vd hỏi ticket xong chưa / khi nào xong, hỏi cách dùng, hỏi
+  vì sao, nhờ xác nhận thông tin) — không phải yêu cầu sửa / làm việc mới. Câu hỏi về tiến độ ticket đã có cũng là
+  "question" (ghi ticket vào refs).
+- "chat": trò chuyện, hỏi thăm xã giao, trả lời, xác nhận ("oke", "vâng"), bàn về công cụ / token… không cần dev đáp.
 Tin của dev ({me}) chỉ là ngữ cảnh, không tự tạo việc. Không bịa việc từ ngữ cảnh. Nghi ngờ giữa new và existing thì
 chọn existing kèm lý do. Một tin vừa nhắc ticket cũ vừa nêu yêu cầu mới (vd "verify bug X thì lòi thêm bug Y, Z — hỏi
 AI tại sao rồi cập nhật prompt") → việc mới là phần yêu cầu mới (Task), các bug đã có ticket ghi vào refs.
@@ -1322,10 +1337,11 @@ AI tại sao rồi cập nhật prompt") → việc mới là phần yêu cầu 
 "clear": true khi đủ để viết ticket mà dev làm được: chức năng / màn hình (hoặc API) nào, hiện tượng / yêu cầu cụ thể,
 và với Bug: cách tái hiện + kết quả mong đợi (suy ra được từ tin / ảnh / ngữ cảnh cũng tính là có). Thiếu điều cốt lõi
 → "clear": false và "missing": tối đa 3 câu hỏi NGẮN, cụ thể, bằng ngôn ngữ của người gửi (xưng "em", gọi "anh/chị"),
-chỉ hỏi điều thật sự cần — không hỏi lại điều đã có, không hỏi chi tiết kỹ thuật dev tự tra được.
+chỉ hỏi điều thật sự cần — không hỏi lại điều đã có, không hỏi chi tiết kỹ thuật dev tự tra được. Mỗi ý hỏi là MỘT
+phần tử riêng (không gộp nhiều ý vào một câu) để hiển thị thành gạch đầu dòng.
 
 ## Kết quả: chỉ một khối JSON
-{{"items": [{{"kind": "new" | "existing" | "chat", "type": "Bug" | "Task" | null, "title": "tiêu đề ngắn tiếng Việt",
+{{"items": [{{"kind": "new" | "existing" | "question" | "chat", "type": "Bug" | "Task" | null, "title": "tiêu đề ngắn tiếng Việt",
   "summary": "1-3 câu: tester muốn gì, đã có gì", "message_ids": [mã tin...], "refs": ["@@T@@-xxxx", ...],
   "duplicate_of": "@@T@@-xxxx" | null, "reason": "vì sao phân loại vậy (nêu trạng thái ticket nếu đã có)",
   "clear": true | false, "missing": ["câu hỏi bổ sung", ...], "files": ["tên file trong tệp", ...]}}]}}
@@ -1601,7 +1617,7 @@ def triage(rid):
                       ai_summary=(it.get("summary") or "")[:1000], ai_reason=(it.get("reason") or "")[:1000],
                       ai_refs=json.dumps(rlist, ensure_ascii=False), ai_dup=dup, ai_at=now(), ai_error=None,
                       ai_missing=json.dumps(missing, ensure_ascii=False) if missing else None,
-                      status="ignored" if kind == "chat" else "pending",
+                      status="ignored" if kind == "chat" else "answer" if kind == "question" else "pending",
                       decided_at=now() if kind == "chat" else None)
         if it.get("title"):
             fields["title"] = it["title"][:200]
@@ -1618,6 +1634,11 @@ def triage(rid):
         update(target, last_message_at=last, **fields)
         if missing:
             maybe_clarify(target)
+        if kind == "question":
+            try:
+                draft_reply(target)
+            except Exception as ex:  # noqa: BLE001 — không soạn được thì vẫn để Chờ trả lời, mình tự trả lời
+                update(target, reply_note="AI chưa soạn được câu trả lời: %s" % str(ex)[:300])
 
 
 
@@ -1643,11 +1664,24 @@ def can_clarify(chat_id):
     return bool(c and c["asks"])
 
 
+def bullets(points):
+    """Một ý: giữ nguyên câu. Nhiều ý: mỗi ý một dòng gạch đầu dòng (ý con viết "  + ")."""
+    pts = [str(p).strip() for p in points if str(p).strip()]
+    if len(pts) == 1:
+        return pts[0]
+    out = []
+    for p in pts:
+        head, *subs = [x.strip() for x in re.split(r"\n+\s*[-+•]\s*", p) if x.strip()]
+        out.append("- " + head)
+        out += ["  + " + x for x in subs]
+    return "\n".join(out)
+
+
 def clarify_text(req, questions):
-    lines = ["🤖 Để tạo việc “%s”, nhờ %s bổ sung giúp em:" % ((req.get("title") or "")[:120], "anh/chị")]
-    lines += ["%d. %s" % (i + 1, q) for i, q in enumerate(questions)]
-    lines += ["", "(Trả lời bằng cách reply vào tin này)"]
-    return "\n".join(lines)
+    head = "🤖 Để tạo việc “%s”, nhờ anh/chị bổ sung giúp em" % (req.get("title") or "")[:120]
+    qs = [q for q in questions if str(q).strip()]
+    body = (head + ": " + bullets(qs)) if len(qs) == 1 else (head + ":\n" + bullets(qs))
+    return body + "\n\n(Trả lời bằng cách reply vào tin này)"
 
 
 def send_clarify(rid, text=None):
@@ -1669,9 +1703,118 @@ def send_clarify(rid, text=None):
 
 
 def maybe_clarify(rid):
-    """Sau khi AI lọc thấy thiếu thông tin: KHÔNG tự gửi — để Chờ duyệt kèm câu hỏi; mình trả lời phần đã biết (AI tạo
-    lại câu hỏi) rồi tự xác nhận gửi trên trang theo dõi."""
-    return False
+    """Sau khi AI lọc thấy việc mới thiếu thông tin: bật clarify_auto (mặc định) và chat có quyền Xin ý kiến thì tự gửi
+    câu hỏi (tối đa CLARIFY_MAX lượt / yêu cầu). Người gửi trả lời → gộp vào yêu cầu, AI lọc lại và điền thông tin;
+    vẫn thiếu thì hỏi tiếp lượt sau, hết lượt thì để Chờ duyệt kèm câu hỏi cho mình xử lý. Tắt: chờ mình bấm gửi."""
+    req = row("SELECT * FROM requests WHERE id=?", (rid,))
+    if not req or not settings()["clarify_auto"] or not can_clarify(req["chat_id"]):
+        return False
+    if (req.get("clarify_count") or 0) >= CLARIFY_MAX:
+        return False
+    try:
+        send_clarify(rid)
+        return True
+    except ValueError:
+        return False
+
+
+REPLY_PROMPT = """Bạn soạn câu trả lời Telegram THAY dev ({me}) cho câu hỏi của {sender} {where} — dự án @@P@@. Bản
+nháp để dev duyệt rồi mới gửi. Chạy nền, chỉ trả JSON, không dùng công cụ.
+
+## Câu hỏi cần trả lời (mỗi dòng có [mã tin])
+{messages}
+
+## Ngữ cảnh trước đó trong chat
+{context}
+
+## Ticket được nhắc (trạng thái THẬT trên OpenProject + autofix — nguồn duy nhất để nói về tiến độ)
+{refs}
+
+## Văn phong của dev — các tin dev đã tự nhắn gần đây (học cách xưng hô, độ dài, từ hay dùng, dấu câu, emoji)
+{style}
+
+## Viết
+- Viết y như dev tự gõ: cùng cách xưng hô với người này (xem ngữ cảnh + mẫu), câu ngắn, tự nhiên, không văn mẫu, không
+  chào hỏi rườm rà, không ký tên, không nói mình là AI, không thêm emoji nếu dev không hay dùng.
+- Câu trả lời có nhiều ý → mỗi ý một dòng gạch đầu dòng "- "; một ý thì viết một câu bình thường.
+- Chỉ nói điều có căn cứ trong tin / ngữ cảnh / trạng thái ticket ở trên. Không hứa thời gian, không bịa tiến độ. Thiếu
+  thông tin để trả lời chắc chắn → vẫn viết phần trả lời được, và ghi rõ trong "note" dev cần bổ sung / kiểm tra gì.
+{hint}
+{{"reply": "nội dung tin trả lời", "confident": true | false, "note": "ghi chú ngắn cho dev (vì sao chưa chắc / cần kiểm tra gì), rỗng nếu không có"}}
+"""
+REPLY_PROMPT = _project_text(REPLY_PROMPT)
+STYLE_SAMPLES = 40
+
+
+def style_samples(chat_id=None, n=STYLE_SAMPLES):
+    """Tin mình tự nhắn gần đây (bỏ tin công cụ gửi: 🤖 / ✅ / ❌ / 🎉 …) — ưu tiên cùng chat, thiếu thì lấy chat khác."""
+    bot = ("🤖", "✅", "❌", "🎉", "📨", "⚠")
+    seen, out = set(), []
+    for sql, args in ((("SELECT text FROM messages WHERE sender='me' AND chat_id=? AND text IS NOT NULL"
+                        " ORDER BY date DESC LIMIT 300"), (chat_id,)),
+                      (("SELECT text FROM messages WHERE sender='me' AND text IS NOT NULL ORDER BY date DESC LIMIT 600"),
+                       ())):
+        if sql.count("?") and chat_id is None:
+            continue
+        for r in rows(sql, args):
+            t = (r["text"] or "").strip()
+            if not (3 <= len(t) <= 500) or t.startswith(bot) or t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+            if len(out) >= n:
+                return out
+    return out
+
+
+def draft_reply(rid, hint=""):
+    """AI soạn câu trả lời theo văn phong của mình → Chờ trả lời (mình duyệt / sửa rồi bấm gửi)."""
+    import task_create
+    import op_watch
+    req = row("SELECT * FROM requests WHERE id=?", (int(rid),))
+    msgs = messages_of(int(rid))
+    if not req or not msgs:
+        raise ValueError("không có yêu cầu này")
+    cfg, _, _ = task_create.load()
+    api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
+    ctx = context_before(req["chat_id"], msgs[0]["date"], 15)
+    refs = _refs_in(ctx[-6:] + msgs, api)[:20]
+    watcher = get_meta("watcher", {}) or {}
+    c = chat_cfg(req["chat_id"])
+    where = ("trong nhóm “%s”" % c["name"]) if c and c["kind"] != "user" else "trong chat riêng"
+    samples = style_samples(req["chat_id"])
+    out = _run_claude_json(REPLY_PROMPT.format(
+        me=watcher.get("me") or "dev", sender=req["tester_name"] or "người gửi", where=where,
+        messages="\n".join(_msg_line(m) for m in msgs),
+        context="\n".join(_msg_line(m) for m in ctx) or "(không có)",
+        refs="\n".join(_fmt_wp(x) + _fmt_autofix(x["display_id"]) for x in refs) or "(không có)",
+        style="\n".join("- " + t.replace("\n", " ⏎ ") for t in samples) or "(chưa có tin nào của dev)",
+        hint=("- Dev dặn thêm khi soạn lại: " + hint.strip()[:500]) if hint and hint.strip() else ""),
+        settings()["ai_model"])
+    reply = str(out.get("reply") or "").strip()
+    if not reply:
+        raise RuntimeError("AI không trả nội dung trả lời")
+    note = str(out.get("note") or "").strip()
+    if out.get("confident") is False and not note:
+        note = "AI chưa chắc chắn — xem lại trước khi gửi"
+    update(int(rid), reply_draft=reply[:4000], reply_note=note[:500] or None, status="answer")
+    return reply
+
+
+def send_reply(rid, text):
+    """Gửi câu trả lời (đã duyệt) cho người hỏi: reply vào tin hỏi cuối cùng của yêu cầu."""
+    req = row("SELECT * FROM requests WHERE id=?", (int(rid),))
+    if not req:
+        raise ValueError("không có yêu cầu này")
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("chưa có nội dung trả lời")
+    last = row("SELECT tg_msg_id FROM messages WHERE request_id=? AND sender='tester' ORDER BY date DESC LIMIT 1",
+               (req["id"],))
+    db().execute("INSERT INTO outbox (chat_id, text, reply_to, created_at, request_id, purpose) VALUES (?, ?, ?, ?, ?, ?)",
+                 (req["chat_id"], text, last["tg_msg_id"] if last else None, now(), req["id"], "reply"))
+    update(req["id"], reply_draft=text, status="answered", reply_at=now(), decided_at=now())
+    return "Đã xếp tin trả lời #%s (vài giây sau gửi)" % req["id"]
 
 
 CLARIFY_REFINE_PROMPT = """Yêu cầu tạo việc từ tin Telegram của {sender} (dự án @@P@@) đang thiếu thông tin. Dev đã tự trả
@@ -2080,6 +2223,11 @@ def mark_outbox(oid, error=None, sent_id=None):
             update(o["request_id"], status="pending", error="Gửi tin hỏi lại lỗi: %s" % error[:200])
         elif sent_id:
             update(o["request_id"], clarify_msg_id=sent_id, clarify_at=now())
+    if o and o["purpose"] == "reply" and o["request_id"]:
+        if error:  # gửi lỗi: về Chờ trả lời, giữ bản nháp
+            update(o["request_id"], status="answer", reply_note="Gửi lỗi: %s" % error[:200])
+        elif sent_id:
+            update(o["request_id"], reply_msg_id=sent_id)
 
 
 def pending_commands():

@@ -2751,8 +2751,8 @@ window.addEventListener("hashchange", () => { const m = location.hash.match(/^#w
 // ---- Yêu cầu tester qua Telegram: chờ duyệt → AI soạn theo mẫu tester → task New trên OpenProject (autofix tự sửa) ----
 const TG = {status: "open", q: "", data: null, cur: null, timer: null, chat: null};
 const TG_BADGE = {collecting: "", triage: "accent", need_info: "accent", pending: "warn", drafting: "accent", draft_ready: "accent", created: "ok", linked: "ok",
-  rejected: "crit", ignored: "", error: "crit"};
-const TG_AI_BADGE = {new: "ok", existing: "warn", chat: ""};
+  rejected: "crit", ignored: "", error: "crit", answer: "warn", answered: "ok"};
+const TG_AI_BADGE = {new: "ok", existing: "warn", question: "accent", chat: ""};
 const TG_WORK_BADGE = {done: "ok", doing: "accent", review: "warn", todo: "crit"};
 const tgWork = (w, label) => w ? ` <span class="badge ${TG_WORK_BADGE[w] || ""}">${w === "done" ? "✔ " : ""}${esc(label)}</span>` : "";
 function tgAiTag(r) {
@@ -2857,19 +2857,29 @@ async function tgOpen(id, keep) {
   if (keep && document.activeElement && document.activeElement.closest("#tgModal input, #tgModal textarea")) return;  // đang gõ: không vẽ lại
   tgShow();
   $("tgmTitle").textContent = `#${r.id} · ${r.tester_name || ""}`;
-  const open = ["pending", "collecting", "rejected", "ignored", "need_info"].includes(r.status);
+  const open = ["pending", "collecting", "rejected", "ignored", "need_info", "answer", "answered"].includes(r.status);
   const miss = r.ai_missing || [];
-  const clarifyText = () => `🤖 Để tạo việc “${(r.title || "").slice(0, 120)}”, nhờ anh/chị bổ sung giúp em:\n${miss.map((q, i) => `${i + 1}. ${q}`).join("\n")}\n\n(Trả lời bằng cách reply vào tin này)`;
+  const clarifyText = () => r.clarify_preview || "";
+  const replyBox = r.status === "answer" || (r.status === "answered" && r.reply_draft)
+    ? `<div class="tg-ai"><div><span class="badge ${r.status === "answer" ? "warn" : "ok"}">${r.status === "answer" ? "Chờ trả lời" : "Đã trả lời"}</span>
+        ${r.status === "answer" ? "AI soạn sẵn câu trả lời theo văn phong của bạn — sửa nếu cần rồi bấm gửi (chưa gửi gì)." : "Đã gửi lúc " + tgTime(r.reply_at) + "."}</div>
+        ${r.reply_note ? `<div class="muted">⚠ ${esc(r.reply_note)}</div>` : ""}
+        ${r.status === "answer" ? `<textarea id="tgReplyText" rows="5" placeholder="Nội dung trả lời">${esc(r.reply_draft || "")}</textarea>
+          <div class="tm-row"><input type="text" id="tgReplyHint" placeholder="Dặn AI khi soạn lại (vd: nói là chiều nay em deploy)"><button id="tgReplyRedraft">🤖 Soạn lại</button></div>
+          <div class="tm-row"><button class="primary" id="tgReplySend">📨 Gửi trả lời</button><button id="tgReplySkip">Không trả lời</button></div>`
+          : `<div style="white-space:pre-wrap">${esc(r.reply_draft)}</div>`}
+      </div>`
+    : "";
   let notes = []; try { notes = JSON.parse(r.clarify_notes || "[]"); } catch (e) { notes = []; }
   const notesHtml = notes.length ? `<div class="muted">Bạn đã bổ sung:</div><ul style="margin:0 0 0 18px">${notes.map((n) => `<li>${esc(n.text)} <span class="muted">(${tgTime(n.at)})</span></li>`).join("")}</ul>` : "";
   const clarifyBox = r.status === "need_info"
     ? `<div class="tg-ai"><div><span class="badge accent">Chờ bổ sung</span> Đã gửi câu hỏi cho người gửi${r.clarify_at ? " lúc " + tgTime(r.clarify_at) : ""} (lượt ${r.clarify_count || 1}) — trả lời xong AI lọc lại.</div>
-        ${miss.length ? `<div class="muted">Đã hỏi:</div><ol style="margin:0 0 0 18px">${miss.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>` : ""}${notesHtml}
+        ${miss.length ? `<div class="muted">Đã hỏi:</div><ul style="margin:0 0 0 18px">${miss.map((q) => `<li>${esc(q)}</li>`).join("")}</ul>` : ""}${notesHtml}
         <div class="tm-row"><button id="tgClarifySkip">Bỏ hỏi lại → Chờ duyệt</button></div></div>`
     : !miss.length && !notes.length ? ""
     : `<div class="tg-ai">
         ${miss.length ? `<div><span class="badge warn">Thiếu thông tin</span> AI thấy chưa đủ để viết ticket — cần hỏi:</div>
-          <ol style="margin:0 0 0 18px">${miss.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>` : `<div><span class="badge ok">Đã đủ thông tin</span> sau phần bạn bổ sung — có thể duyệt tạo task.</div>`}
+          <ul style="margin:0 0 0 18px">${miss.map((q) => `<li>${esc(q)}</li>`).join("")}</ul>` : `<div><span class="badge ok">Đã đủ thông tin</span> sau phần bạn bổ sung — có thể duyệt tạo task.</div>`}
         ${notesHtml}
         <div class="tm-label">Bạn trả lời phần đã biết (AI bỏ câu đã trả lời, tạo lại câu hỏi còn thiếu — chưa gửi gì)</div>
         <textarea id="tgClarifyAns" rows="2" placeholder="vd: Lỗi ở màn Quản lý báo cáo, tài khoản quantri; bước tái hiện em biết rồi"></textarea>
@@ -2909,6 +2919,7 @@ async function tgOpen(id, keep) {
         ${r.ai_reason ? `<div class="muted">Lý do: ${esc(r.ai_reason)}</div>` : ""}
         ${r.ai_refs.length ? `<div>Việc liên quan đã có (trạng thái hiện tại):${r.ai_refs.map(tgRefLink).join("")}</div>` : ""}` : ""}
       ${r.ai_error ? `<div class="badge crit" style="white-space:normal">AI lọc lỗi: ${esc(r.ai_error)}</div>` : ""}</div>` : ""}
+    ${replyBox}
     ${clarifyBox}
     <div class="tm-label">Tin nhắn (${r.messages.length}) <button class="link" id="tgOpenChat">mở toàn bộ cuộc trò chuyện</button></div>
     <div class="tg-msgs" id="tgReqMsgs">${r.context.map((m) => tgMsgHtml(m, true)).join("")}${r.messages.map((m, i) => `<div data-mid="${m.id}" ${i === 0 ? 'id="tgReqFirst"' : ""}>${tgMsgHtml(m)}</div>`).join("")}</div>
@@ -2928,6 +2939,10 @@ async function tgOpen(id, keep) {
     if (await post({action: "tg_clarify_refine", id, answer: ans})) tgOpen(id);
   });
   on("tgClarifySkip", () => post({action: "tg_clarify_skip", id}).then(tgLoad));
+  on("tgReplySend", () => { const t = $("tgReplyText").value.trim(); if (!t) return toast("Chưa có nội dung trả lời", true);
+    confirm("Gửi câu trả lời này qua Telegram (từ tài khoản của bạn)?") && post({action: "tg_reply_send", id, text: t}).then(tgLoad); });
+  on("tgReplyRedraft", async () => { if (await post({action: "tg_reply_redraft", id, hint: $("tgReplyHint").value})) tgOpen(id); });
+  on("tgReplySkip", () => post({action: "tg_reply_skip", id}).then(tgLoad));
   on("tgDelete", async () => {
     if (!confirm(`Xoá yêu cầu #${id}?` + (r.display_id ? ` Task ${r.display_id} trên OpenProject vẫn giữ.` : "") + " Tin nhắn vẫn còn trong lịch sử chat.")) return;
     if (await post({action: "tg_delete", id})) { tgClose(); tgLoad(); }
@@ -3037,6 +3052,7 @@ async function tgSettings() {
       <label for="tgs_max_media_mb">Tệp tối đa (MB)${S("max_media_mb")}</label><div><input type="number" id="tgs_max_media_mb" min="1" max="200" value="${st.max_media_mb}"></div>
       <h4>Trả lời tester</h4>
       <label for="tgs_notify_tester">Gửi tin trả lời${S("notify_tester")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_notify_tester" ${st.notify_tester ? "checked" : ""}> Trả lời tester (từ tài khoản của bạn) khi tạo task / gắn việc / từ chối / việc xong</label></div>
+      <label for="tgs_clarify_auto">Hỏi bổ sung khi tạo việc${S("clarify_auto")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_clarify_auto" ${st.clarify_auto ? "checked" : ""}> Tự nhắn hỏi người gửi khi AI thấy việc mới thiếu thông tin (tối đa 2 lượt; chat cần bật quyền Xin ý kiến). Trả lời xong AI lọc lại và điền vào yêu cầu. Tắt: chờ bạn bấm gửi.</label></div>
       <label for="tgs_ask_auto">Xin ý kiến tester${S("ask_auto")}</label><div><label style="font-weight:400"><input type="checkbox" id="tgs_ask_auto" ${st.ask_auto ? "checked" : ""}> Tự gửi câu hỏi khi AI xác định tester quyết (ticket chuyển UNREVIEWED). Tắt: chờ bạn bấm “Gửi tester”.</label></div>
       <label for="tgs_done_statuses">Trạng thái coi là xong${S("done_statuses")}</label><div><input type="text" id="tgs_done_statuses" value="${esc((st.done_statuses || []).join(", "))}"><div class="hint">Báo tester “đã xử lý” một lần khi task ở trạng thái này <b>và</b> đã được chuyển cho tester (QA trên server đạt → giao người QA). Autofix chuyển Resolved ngay sau khi push nên không báo lúc đó.</div></div>
       <label for="tgs_sync_minutes">Đồng bộ trạng thái (phút)${S("sync_minutes")}</label><div><input type="number" id="tgs_sync_minutes" min="1" max="120" value="${st.sync_minutes}"></div>
@@ -3057,7 +3073,7 @@ async function tgSettings() {
     const v = (id) => $("tgs_" + id).value;
     const body = {api_id: v("api_id").trim(), chats: tgChatsValue(), request_tags: v("request_tags"),
       group_window: v("group_window"), max_media_mb: v("max_media_mb"), notify_tester: $("tgs_notify_tester").checked,
-      done_statuses: v("done_statuses"), sync_minutes: v("sync_minutes"), ai_filter: $("tgs_ai_filter").checked, ai_model: v("ai_model"), ask_auto: $("tgs_ask_auto").checked,
+      done_statuses: v("done_statuses"), sync_minutes: v("sync_minutes"), ai_filter: $("tgs_ai_filter").checked, ai_model: v("ai_model"), ask_auto: $("tgs_ask_auto").checked, clarify_auto: $("tgs_clarify_auto").checked,
       msg_created: v("msg_created"), msg_linked: v("msg_linked"), msg_rejected: v("msg_rejected"), msg_done: v("msg_done")};
     if (v("api_hash").trim()) body.api_hash = v("api_hash").trim();
     const r = await post({action: "tg_settings", settings: body});
