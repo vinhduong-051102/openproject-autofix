@@ -2453,9 +2453,12 @@ def _now_us():
 
 
 def _pending_write(tickets, reason, added):
+    """added: {ticket: mốc thêm}. Chỉ add_pending (thêm lại từ bên ngoài, vd autofix QA SAI) ghi mốc thật; ticket do
+    chính lượt QA ghi vào (còn lại / hàng chờ lúc bắt đầu) để mốc rỗng — nếu ghi "bây giờ" thì mốc đó muộn hơn lúc
+    ticket bắt đầu QA và ticket không bao giờ bị bỏ khỏi hàng chờ dù đã QA xong (19/11 12:00: 6 ticket đã chuyển tester
+    vẫn hiện "Chờ QA trên server")."""
     tickets = sorted(set(tickets))
-    now = _now_us()
-    added = {t: added.get(t) or now for t in tickets}
+    added = {t: added.get(t) or "" for t in tickets}
     with open(PENDING + ".tmp", "w", encoding="utf-8") as f:
         json.dump({"tickets": tickets, "reason": reason, "updated": datetime.now().isoformat(timespec="seconds"),
                    "added": added}, f, ensure_ascii=False, indent=1)

@@ -44,6 +44,21 @@ class PendingTest(unittest.TestCase):
         d.save_pending(["A", "B"])
         self.assertEqual(d._merged_pending(["A", "B"], {"A"}, [], set()), {"B"})
 
+    def test_tickets_written_by_the_run_itself_are_dropped_when_done(self):
+        # 19/11 12:00: lượt QA lưu hàng chờ "đang QA" (remaining) sau khi các ticket đã bắt đầu → mốc mới hơn lúc bắt đầu
+        starts = {t: d._now_us() for t in ("A", "B", "C")}
+        d.save_merged_pending([], {"A": starts["A"]}, ["B", "C"], set())   # A xong trước, B/C còn chạy
+        d.save_merged_pending([], {"A": starts["A"], "B": starts["B"]}, ["C"], set())
+        d.save_merged_pending([], {t: starts[t] for t in starts}, [], set())
+        self.assertEqual(d.load_pending(), [])
+
+    def test_external_readd_during_run_survives_intermediate_saves(self):
+        starts = {"A": d._now_us(), "B": d._now_us()}
+        d.save_merged_pending([], {"A": starts["A"]}, ["B"], set())
+        d.add_pending(["A"], "QA SAI")                              # autofix thêm lại A sau khi A xong
+        d.save_merged_pending([], {"A": starts["A"], "B": starts["B"]}, [], set())
+        self.assertEqual(d.load_pending(), ["A"])
+
 
 if __name__ == "__main__":
     unittest.main()
