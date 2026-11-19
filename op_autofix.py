@@ -1441,7 +1441,8 @@ def deliver_already_fixed(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir
     Kết luận do bước Claude hỗ trợ đưa ra (đã kiểm tra trên server test) → không test lại bằng Gemini: comment +
     Resolved + giao người QA. Trả mô tả.
     """
-    dirs = tuple((r["label"], d, r["branch"]) for r, d in R.trees(acfg, run_dir))
+    # Chỉ repo có worktree trong lượt chạy (lượt chỉ dựng BE thì không có fe/ — SOAR-838: ship lỗi "No such file").
+    dirs = tuple((r["label"], d, r["branch"]) for r, d in R.trees(acfg, run_dir) if os.path.isdir(d))
     review_id = acfg.get("review_status_id")
     body = tester_body(report_text, "Comment cho tester", "Đề xuất")
     if assisted(run_dir):
@@ -2229,7 +2230,8 @@ def _deliver(api, cfg, acfg, wp_id, display_id, wp, run_dir, fe_dir, be_dir, rep
     trạng thái ticket (chỉ comment). Trả (đã push?, mô tả).
     gemini_from: thư mục có gemini.md của lượt trước — dùng lại kết luận đó, không chạy Gemini nữa (hàng chờ xem lại).
     """
-    dirs = tuple((r["label"], d, r["branch"]) for r, d in R.trees(acfg, run_dir))
+    # Chỉ repo có worktree trong lượt chạy (lượt chỉ dựng BE thì không có fe/ — SOAR-838: ship lỗi "No such file").
+    dirs = tuple((r["label"], d, r["branch"]) for r, d in R.trees(acfg, run_dir) if os.path.isdir(d))
     subject = wp.get("subject", "")
 
     def current():
