@@ -225,13 +225,30 @@ def refine_draft(draft_id, answers, subject="", description=""):
     return data["round"]
 
 
+def _file_line(d, x):
+    """Một dòng liệt kê file đính kèm cho prompt. Claude headless không đọc được .docx → chuyển sẵn sang
+    markdown ở <draft>/text/<tên>.md (ngoài files/ nên không bị upload lên ticket) và trỏ prompt tới đó."""
+    src = os.path.join(d, "files", x["name"])
+    line = "- %s (%s, %d byte)" % (src, x["type"] or "?", x["size"])
+    if not x["name"].lower().endswith(".docx"):
+        return line
+    try:
+        import docx_text
+        os.makedirs(os.path.join(d, "text"), exist_ok=True)
+        md = os.path.join(d, "text", x["name"] + ".md")
+        with open(md, "w", encoding="utf-8") as f:
+            f.write(docx_text.convert(src))
+        return line + " — file Word, ĐỌC nội dung đã chuyển sang markdown: %s" % md
+    except Exception as ex:  # docx hỏng / không phải zip: để Claude báo không đọc được như cũ
+        return line + " — không chuyển được sang văn bản (%s)" % str(ex)[:120]
+
+
 def _run_draft(d):
     try:
         cfg, acfg, dcfg = load(draft_project(d))
         req = json.load(open(os.path.join(d, "request.json"), encoding="utf-8"))
         api = op_watch.OpenProject(cfg["url"], cfg["api_key"])
-        files = "\n".join("- %s/files/%s (%s, %d byte)" % (d, x["name"], x["type"] or "?", x["size"])
-                          for x in req["files"]) or "(không có)"
+        files = "\n".join(_file_line(d, x) for x in req["files"]) or "(không có)"
         out = os.path.join(d, "draft.json")
         import projects as P
         prompt = PROMPT.format(project_name=P.name(acfg), title_template=P.title_template(acfg), prompt=req["prompt"] or "(xem file đính kèm)", files=files,
