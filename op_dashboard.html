@@ -601,6 +601,7 @@ table.tg-chats select { max-width: 220px; }
 .tm-qlist { display: grid; gap: 8px; margin: 8px 0; }
 .tm-qitem { display: grid; gap: 4px; font-size: 13px; }
 .tm-qitem textarea { width: 100%; min-height: 34px; resize: vertical; }
+.tm-accs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .tg-pick.hl > div > .tg-msg { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
 .tg-pick.hl { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); border-radius: 8px; }
 .tg-focusbar { font-size: 12.5px; padding: 6px 0; color: var(--text-2); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -2219,6 +2220,7 @@ function tmCloseFn() {
   $("taskModal").hidden = true; if (tmPoll) clearInterval(tmPoll);
   if ([...document.querySelectorAll(".modal")].every((m) => m.hidden)) document.documentElement.classList.remove("modal-open");
 }
+const TM_ACC_RX = /tài khoản|mật khẩu|account|password/i;
 async function tmShowDraft(st) {
   const d = st.draft || {};
   $("tmStep1").hidden = true; $("tmStep2").hidden = false;
@@ -2230,17 +2232,24 @@ async function tmShowDraft(st) {
   $("tmAssignee").innerHTML = `<option value="me">Tôi (autofix sẽ tự sửa)</option><option value="none">Chưa giao</option>`
     + (qa.id ? `<option value="${qa.id}">${esc(qa.name || "QA")}</option>` : "");
   const qs = d.questions || [];
+  const accs = st.accounts || [];
   $("tmQuestions").innerHTML = qs.length ? `<b>AI gợi ý bổ sung</b>${st.refine_round ? ` <span class="muted">(sau lần soạn lại ${st.refine_round})</span>` : ""} — nhập những ý bạn biết, bỏ trống ý chưa biết:
-    <div class="tm-qlist">${qs.map((q, i) => `<label class="tm-qitem"><span>${i + 1}. ${esc(q)}</span>
-      <textarea rows="1" data-tmq="${i}" placeholder="Thông tin cho ý này (bỏ trống nếu chưa biết)"></textarea></label>`).join("")}</div>
+    <div class="tm-qlist">${qs.map((q, i) => `<div class="tm-qitem"><span>${i + 1}. ${esc(q)}</span>
+      ${TM_ACC_RX.test(q) && accs.length ? `<div class="tm-accs"><span class="muted">Chọn tài khoản đã khai báo (mật khẩu tự điền khi soạn lại):</span>
+        ${accs.map((a) => `<button type="button" class="chip" data-tmacc="${i}" data-user="${esc(a.user)}"
+          title="${a.source === "server" ? "Tài khoản server test" : "Tài khoản tester"}${a.has_password ? "" : " — chưa lưu mật khẩu"}">${esc(a.user)}<small>${a.source === "server" ? "server" : "tester"}${a.has_password ? "" : " · chưa có MK"}</small></button>`).join("")}</div>` : ""}
+      <textarea rows="1" data-tmq="${i}" placeholder="${TM_ACC_RX.test(q) && accs.length ? "Ghi chú thêm, vd: tài khoản nào có / không có quyền (bỏ trống nếu không cần)" : "Thông tin cho ý này (bỏ trống nếu chưa biết)"}"></textarea></div>`).join("")}</div>
     <div class="tm-actions"><button id="tmRefine">🤖 Soạn lại mô tả với thông tin đã nhập</button><span class="muted" id="tmRefineSt"></span></div>`
     : st.refine_round ? `<span class="badge ok">Đã đủ thông tin</span> <span class="muted">sau lần soạn lại ${st.refine_round}</span>` : "";
   TM_QS = qs;
   const rb = $("tmRefine");
   if (rb) {
     document.querySelectorAll("[data-tmq]").forEach((t) => t.oninput = () => { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; });
+    document.querySelectorAll("[data-tmacc]").forEach((b) => b.onclick = () => b.classList.toggle("sel"));
     rb.onclick = async () => {
-      const answers = [...document.querySelectorAll("[data-tmq]")].map((t) => ({q: TM_QS[+t.dataset.tmq], a: t.value.trim()})).filter((x) => x.a);
+      const picked = (i) => [...document.querySelectorAll(`[data-tmacc="${i}"].sel`)].map((b) => b.dataset.user);
+      const answers = [...document.querySelectorAll("[data-tmq]")].map((t) => ({q: TM_QS[+t.dataset.tmq], a: t.value.trim(),
+        accounts: picked(t.dataset.tmq)})).filter((x) => x.a || x.accounts.length);
       if (!answers.length) return toast("Nhập thông tin cho ít nhất một ý", true);
       setBusy(rb, true);
       const r = await post({action: "task_refine", id: tmDraftId, answers, subject: $("tmSubject").value, description: $("tmDesc").value}, null);

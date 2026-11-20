@@ -1497,7 +1497,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/taskdraft":
                 import task_create
                 if q.get("id"):
-                    return self.send(200, task_create.get_draft(q.get("id")))
+                    return self.send(200, dict(task_create.get_draft(q.get("id")),
+                                               accounts=task_create.known_accounts(q.get("id"))))
                 dcfg_ = envconf.deploy_config()
                 return self.send(200, {"drafts": task_create.list_drafts(),
                                        "qa_user": {"id": dcfg_.get("qa_user_id"), "name": dcfg_.get("qa_user_name")}})

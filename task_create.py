@@ -195,6 +195,50 @@ rồi thì để [].
 """
 
 
+def _account_passwords(dcfg):
+    """{tên: mật khẩu|""} các tài khoản test đã khai báo: tài khoản server (deploy.json / tab Dự án "accounts")
+    + tài khoản tester trong qa_ticket_accounts (mật khẩu lấy từ bộ nhớ soar_api nếu đã từng dùng)."""
+    out = {}
+    for name, v in (dcfg.get("accounts") or {}).items():
+        out[name] = (v or {}).get("password") or "" if isinstance(v, dict) else ""
+    try:
+        with open(os.path.expanduser("~/.cache/op-watch/qa_accounts.json"), encoding="utf-8") as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    for name in dcfg.get("qa_ticket_accounts") or []:
+        out.setdefault(name, cache.get(name) or "")
+    return out
+
+
+def known_accounts(draft_id=None):
+    """Danh sách tài khoản cho ô chọn trên dashboard — KHÔNG trả mật khẩu (chỉ báo đã lưu hay chưa)."""
+    if draft_id:
+        _, acfg, _ = load()
+        _, _, dcfg = load(draft_project(os.path.join(drafts_root(acfg), draft_id)))
+    else:
+        _, _, dcfg = load()
+    server = set((dcfg.get("accounts") or {}).keys())
+    return [{"user": n, "has_password": bool(p), "source": "server" if n in server else "tester"}
+            for n, p in _account_passwords(dcfg).items()]
+
+
+def _expand_accounts(d, answers):
+    """answers[i]["accounts"] (tên đã chọn) → nối "tài khoản / mật khẩu" vào câu trả lời (mật khẩu lấy ở server)."""
+    names = [n for x in answers for n in (x.get("accounts") or [])]
+    if not names:
+        return answers
+    _, _, dcfg = load(draft_project(d))
+    pw = _account_passwords(dcfg)
+    for x in answers:
+        sel = [n for n in (x.get("accounts") or []) if n in pw]
+        if sel:
+            lines = ["- %s / %s" % (n, pw[n] or "[Cần bổ sung mật khẩu]") for n in sel]
+            x["a"] = ((x.get("a") or "").strip() + "\nTài khoản test đã chọn (tài khoản / mật khẩu):\n"
+                      + "\n".join(lines)).strip()
+    return answers
+
+
 def refine_draft(draft_id, answers, subject="", description=""):
     """Người dùng trả lời các câu AI gợi ý bổ sung → AI soạn lại bản nháp (chạy nền, giữ file đính kèm).
     answers: [{"q": câu hỏi, "a": trả lời}] — chỉ các câu có nhập; cộng dồn qua các lần soạn lại."""
@@ -203,12 +247,14 @@ def refine_draft(draft_id, answers, subject="", description=""):
         raise ValueError("AI đang soạn, chờ xong rồi soạn lại")
     if st.get("state") == "created":
         raise ValueError("bản nháp này đã tạo task")
-    answers = [{"q": str(x.get("q") or "").strip()[:500], "a": str(x.get("a") or "").strip()[:2000]}
-               for x in answers or [] if str(x.get("a") or "").strip()]
+    answers = [{"q": str(x.get("q") or "").strip()[:500], "a": str(x.get("a") or "").strip()[:2000],
+                "accounts": [str(n) for n in (x.get("accounts") or [])][:20]}
+               for x in answers or [] if str(x.get("a") or "").strip() or x.get("accounts")]
     if not answers:
         raise ValueError("chưa nhập thông tin cho câu nào")
     _, acfg, _ = load()
     d = os.path.join(drafts_root(acfg), draft_id)
+    answers = [{"q": x["q"], "a": x["a"]} for x in _expand_accounts(d, answers)]
     path = os.path.join(d, "refine.json")
     data = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {"round": 0, "answers": []}
     data["round"] += 1
