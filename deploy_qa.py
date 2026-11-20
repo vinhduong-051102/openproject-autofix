@@ -1979,7 +1979,8 @@ def cmd_preflight(dcfg, ch):
     f, n, c = q(pc["file"]), q(dcfg["nginx_container"]), q(ch["container"])
     confdir = q(os.path.dirname(pc["file"]) or ".")
     return ("cd %s || { echo 'PREFLIGHT: không vào được thư mục compose'; exit 0; }; r=''; "
-            "[ \"$(docker inspect -f '{{.State.Running}}' %s 2>/dev/null)\" = true ] || r=\"$r nginx-%s-không-chạy\"; "
+            "[ \"$(docker inspect -f '{{.State.Running}}{{.State.Restarting}}' %s 2>/dev/null)\" = truefalse ] "
+            "|| r=\"$r nginx-%s-không-chạy-hoặc-đang-restart\"; "
             "[ -f %s ] || r=\"$r thiếu-file-%s\"; "
             "k=$(grep -lE %s %s/*.conf 2>/dev/null | wc -l); "
             "{ [ \"$k\" = 1 ] && grep -qE %s %s; } || r=\"$r upstream-%s-khai-báo-ở-$k-file-.conf(cần-đúng-1:-%s)\"; "
@@ -1987,6 +1988,35 @@ def cmd_preflight(dcfg, ch):
             "echo \"PREFLIGHT:${r:-OK}\""
             % (dcfg["base"], n, dcfg["nginx_container"], f, pc["file"], rx, confdir, rx, f, pc["upstream"],
                pc["file"], c, ch["container"]))
+
+
+def cmd_ensure_stack(dcfg, rounds=18):
+    """Trước rollout: BE đã thoát → docker start; nginx không chạy / đang restart (vd. sau khi server khởi động lại,
+    BE không tự lên → nginx "host not found in upstream") → compose up -d --no-recreate (chỉ dựng container đang
+    dừng / thiếu, KHÔNG tạo lại container đang chạy bằng image mới trong compose) rồi chờ nginx ổn định
+    (chạy, không restart, RestartCount đứng yên 10s). In "STACK:OK…" hoặc "STACK: <lý do>"."""
+    n, b = q(dcfg["nginx_container"]), q(dcfg["be_container"])
+    return ("cd %s || { echo 'STACK: không vào được thư mục compose'; exit 0; }; fx=''; "
+            "case \"$(docker inspect -f '{{.State.Status}}' %s 2>/dev/null)\" in exited|dead|created) "
+            "docker start %s >/dev/null 2>&1 && fx=\"$fx docker-start-%s\";; esac; "
+            "up() { [ \"$(docker inspect -f '{{.State.Running}}{{.State.Restarting}}' %s 2>/dev/null)\" = truefalse ]; }; "
+            "stable() { up || { sleep 10; return 1; }; c=$(docker inspect -f '{{.RestartCount}}' %s); sleep 10; "
+            "up && [ \"$(docker inspect -f '{{.RestartCount}}' %s)\" = \"$c\" ]; }; "
+            "if ! stable; then docker logs --tail 5 %s 2>&1 | sed 's/^/nginx: /'; "
+            "docker compose up -d --no-recreate >/dev/null 2>&1 && fx=\"$fx compose-up-no-recreate\"; i=0; "
+            "until stable; do i=$((i+1)); [ $i -ge %d ] && { docker logs --tail 5 %s 2>&1 | sed 's/^/nginx: /'; "
+            "echo \"STACK: nginx-%s-vẫn-không-ổn-định${fx:+ (đã thử:$fx)}\"; exit 0; }; done; fi; "
+            "echo \"STACK:OK${fx:+ (đã sửa:$fx)}\""
+            % (dcfg["base"], b, b, dcfg["be_container"], n, n, n, n, int(rounds), n, dcfg["nginx_container"]))
+
+
+def parse_stack(out):
+    """→ (ok, chi tiết)."""
+    m = re.search(r"STACK:(.*)", out or "")
+    if not m:
+        return False, "không đọc được kết quả kiểm tra stack"
+    why = m.group(1).strip()
+    return why.startswith("OK"), why
 
 
 def parse_preflight(out):
@@ -2300,6 +2330,11 @@ def rollout(dcfg, changes, logf=None, dry=False, strategy=None):
                        result=None, host=dcfg["host"])
     result, errors = "error", []
     try:
+        ok, why = parse_stack(rn.run(cmd_ensure_stack(dcfg), timeout=600, quiet=True, fake="STACK:OK"))
+        if not ok:
+            raise RolloutError("server chưa sẵn sàng trước rollout: %s" % why)
+        if why != "OK":
+            rn.note("server: %s" % why)
         service_list = []
         for ch, how in plan:
             if how == "service" and ch["part"] == "be" and ch.get("destructive") and strategy == "bluegreen":
