@@ -18,7 +18,8 @@ class OnRemoteTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.r = self.tmp.name
-        git(self.r, "init", "-q", "-b", "main")
+        git(self.r, "init", "-q")
+        git(self.r, "checkout", "-q", "-b", "main")
         open(os.path.join(self.r, "a"), "w").write("1\n")
         git(self.r, "add", "a")
         git(self.r, "commit", "-q", "-m", "init")
