@@ -225,8 +225,11 @@ def coverage(wt, base, commits):
         missing += [(f, orig.strip()) for n, orig in lines.items() if n not in text]
     extra = []
     allowed = {f: {_norm(x) for x in v} for f, v in want.items()}
-    for f, (add, _) in _added_removed(_git(wt, "diff", base, "HEAD")).items():
-        extra += [(f, line.strip()) for line in add if not _TRIVIAL.match(line) and _norm(line) not in allowed.get(f, set())]
+    for f, (add, rem) in _added_removed(_git(wt, "diff", base, "HEAD")).items():
+        # dòng có sẵn của nhánh đích chỉ đổi dấu phẩy cuối (để chèn khoá mới phía sau) → không tính là kéo thừa
+        old = {_norm(x).rstrip(",") for x in rem}
+        extra += [(f, line.strip()) for line in add if not _TRIVIAL.match(line) and _norm(line) not in allowed.get(f, set())
+                  and _norm(line).rstrip(",") not in old]
     return missing, extra
 
 

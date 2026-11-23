@@ -124,6 +124,24 @@ def _write(status_path, st):
     os.replace(tmp, status_path)
 
 
+def sync_before_push(wt, br, n):
+    """Ngay trước khi push: lấy bản mới nhất của nhánh đích. Có người push chen vào trong lúc gắp / gỡ / kiểm tra →
+    đặt lại n commit đã gắp lên trên (rebase). Trả "" (không đổi), mô tả đã rebase, hoặc chuỗi bắt đầu "không …"
+    khi rebase xung đột (đã abort, worktree về như trước)."""
+    git(wt, "fetch", "-q", "origin", br, timeout=120)
+    remote = "origin/" + br
+    if subprocess.run(["git", "merge-base", "--is-ancestor", remote, "HEAD"], cwd=wt).returncode == 0:
+        return ""
+    new = git(wt, "log", "--format=%h %s", "HEAD~%d..%s" % (n, remote), check=False).strip().splitlines()
+    out = git(wt, "rebase", "--onto", remote, "HEAD~%d" % n, check=False)
+    if subprocess.run(["git", "rev-parse", "-q", "--verify", "REBASE_HEAD"], cwd=wt, stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL).returncode == 0 or "CONFLICT" in out:
+        git(wt, "rebase", "--abort", check=False)
+        return "không đặt lại được lên %s mới (có %d commit mới: %s) — xung đột khi rebase" % (
+            remote, len(new), "; ".join(new)[:300])
+    return "nhánh đích có %d commit mới trong lúc gắp (%s) → đã đặt lại commit gắp lên trên" % (len(new), "; ".join(new)[:300])
+
+
 def run_pick(cfg, acfg, root, display_id, repo_key, branches, push=True, comment=True, wp_id="", name=None,
              auto_resolve=True):
     repo = R.find(acfg, repo_key)
@@ -208,6 +226,13 @@ def run_pick(cfg, acfg, root, display_id, repo_key, branches, push=True, comment
                     raise RuntimeError(out.strip()[-600:])
                 res["picked"] = git(wt, "log", "--format=%h", "%s..HEAD" % ref).split()[::-1]
                 if push:
+                    moved = sync_before_push(wt, br, len(res["picked"]))
+                    if moved:
+                        log("%s: %s" % (br, moved))
+                    if moved.startswith("không"):
+                        res.update(state="review", message=moved + " — chưa push, giữ worktree")
+                        continue
+                    res["picked"] = git(wt, "log", "--format=%h", "-n", str(len(res["picked"])), "HEAD").split()[::-1]
                     git(wt, "push", "origin", "HEAD:refs/heads/%s" % br, timeout=300)
                     res.update(state="ok", message="đã push %d commit%s" % (
                         len(res["picked"]), " (tự gỡ xung đột, kiểm tra đạt: %s)" % res["verify"] if res.get("verify") else ""))

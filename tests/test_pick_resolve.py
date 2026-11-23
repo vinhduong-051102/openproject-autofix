@@ -103,3 +103,71 @@ class PickTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyncBeforePushTest(unittest.TestCase):
+    """cherry.sync_before_push: nhánh đích có commit mới trong lúc gắp → rebase commit gắp lên trên; xung đột → không push."""
+
+    def setUp(self):
+        import cherry  # noqa: F401
+        self.cherry = cherry
+        self.tmp = tempfile.TemporaryDirectory()
+        t = self.tmp.name
+        self.origin, self.wt = os.path.join(t, "o.git"), os.path.join(t, "wt")
+        git(t, "init", "-q", "--bare", self.origin)
+        git(t, "clone", "-q", self.origin, self.wt)
+        for n in ("a", "b"):
+            write(self.wt, n, "1\n")
+        git(self.wt, "add", ".")
+        git(self.wt, "commit", "-qm", "base")
+        git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/br")
+        git(self.wt, "fetch", "-q", "origin")
+        git(self.wt, "checkout", "-q", "--detach", "origin/br")
+        write(self.wt, "a", "pick\n")
+        git(self.wt, "commit", "-qam", "[SOAR-1] pick")
+        self.other = os.path.join(t, "other")
+        git(t, "clone", "-q", "-b", "br", self.origin, self.other)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def push_other(self, name, text):
+        write(self.other, name, text)
+        git(self.other, "commit", "-qam", "người khác push")
+        git(self.other, "push", "-q", "origin", "br")
+
+    def test_unchanged(self):
+        self.assertEqual(self.cherry.sync_before_push(self.wt, "br", 1), "")
+
+    def test_rebased(self):
+        self.push_other("b", "2\n")
+        msg = self.cherry.sync_before_push(self.wt, "br", 1)
+        self.assertIn("đã đặt lại", msg)
+        self.assertEqual(git(self.wt, "log", "-1", "--format=%s", "HEAD~1"), "người khác push")
+        self.assertEqual(open(os.path.join(self.wt, "a")).read(), "pick\n")
+
+    def test_conflict(self):
+        self.push_other("a", "khác\n")
+        head = git(self.wt, "rev-parse", "HEAD")
+        msg = self.cherry.sync_before_push(self.wt, "br", 1)
+        self.assertTrue(msg.startswith("không"), msg)
+        self.assertEqual(git(self.wt, "rev-parse", "HEAD"), head)
+
+
+class CoverageCommaTest(PickTest):
+    def test_trailing_comma_not_extra(self):
+        write(self.r, "ws.ts", "const m = {\n  A: 1\n};\n")
+        git(self.r, "commit", "-qam", "dst map")
+        base = git(self.r, "rev-parse", "HEAD")
+        git(self.r, "checkout", "-q", "-b", "src2", self.base)
+        write(self.r, "ws.ts", "const m = {\n  B: 2,\n};\n")
+        git(self.r, "commit", "-qam", "src map")
+        write(self.r, "ws.ts", "const m = {\n  B: 2,\n  NEW: 3,\n};\n")
+        git(self.r, "commit", "-qam", "[SOAR-1] thêm NEW")
+        c = git(self.r, "rev-parse", "HEAD")
+        git(self.r, "checkout", "-q", "--detach", base)
+        write(self.r, "ws.ts", "const m = {\n  A: 1,\n  NEW: 3,\n};\n")
+        git(self.r, "commit", "-qam", "picked")
+        missing, extra = PR.coverage(self.r, base, [c])
+        self.assertEqual(missing, [])
+        self.assertEqual(extra, [])
