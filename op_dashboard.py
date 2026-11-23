@@ -120,6 +120,8 @@ def state():
             "limits": af.profile_limits(acfg, p), "own_limits": p.get("limits") or {},
         })
     wp_ids = inbox_wp_ids(cfg)
+    cpu = cpu_guard_state(root)
+    cpu_paused = {int(k): v for k, v in (cpu.get("paused") or {}).items()}
     runs = []
     for s in af.load_statuses(root):
         st = s.get("state")
@@ -127,7 +129,9 @@ def state():
         if st in ACTIVE_STATES and s.get("pid") and not af.status_alive(s):
             st = "stale"
         run_dir = s.get("run_dir") or ""
+        cp = cpu_paused.get(int(s.get("pid") or 0)) if st in ACTIVE_STATES else None
         runs.append(dict(s, state=st, wp_id=s.get("wp_id") or wp_ids.get(s["display_id"]),
+                         cpu_paused_since=cp and cp.get("since"),
                          files=[label for label, name in RUN_FILES
                                 if run_dir and os.path.exists(os.path.join(run_dir, name))]))
     active_runs = [r for r in runs if r["state"] in ACTIVE_STATES]
@@ -147,6 +151,8 @@ def state():
         "running_now": sum(1 for r in runs if r["state"] in ("preparing", "running", "shipping")),
         "projects": projects_brief(cfg),
         "picks": cherry.picks(root),
+        "cpu_guard": {"usage": cpu.get("usage"), "updated": cpu.get("updated"),
+                      "paused": [dict(v, pid=k) for k, v in cpu_paused.items()]},
     }
 
 
@@ -168,6 +174,11 @@ def _job_texts():
                   " cửa sổ hạn mức 5 giờ từ giờ này (vd 07:00 → làm mới 12:00, 17:00…) và cập nhật hạn mức 5 giờ / 7"
                   " ngày; lỡ giờ vì tắt máy thì chạy khi bật máy" % limits_at,
         "dashboard": "Trang này (http://127.0.0.1:%d)" % envconf.DASHBOARD_PORT,
+        "cpu": "CPU máy ≥ %s%% liên tục %ss → tạm dừng lượt chạy nặng mới nhất (luôn chừa ≥ %s lượt chạy); CPU ≤ %s%% →"
+               " chạy tiếp từng lượt; mỗi lượt dừng tối đa %ss" % (
+                   envconf.get("CPU_GUARD_HIGH", "90"), envconf.get("CPU_GUARD_SUSTAIN", "20"),
+                   envconf.get("CPU_GUARD_MIN_RUNNING", "1"), envconf.get("CPU_GUARD_LOW", "65"),
+                   envconf.get("CPU_GUARD_MAX_PAUSE", "300")),
     }
 
 
@@ -186,6 +197,7 @@ JOBS = (
      "desc": _TEXTS["limits"], "inbox": None},
     {"key": "dashboard", "name": "Dashboard", "unit": "op-dashboard.service",
      "desc": _TEXTS["dashboard"], "inbox": None},
+    {"key": "cpu", "name": "Giữ CPU", "unit": "op-cpu-guard.service", "desc": _TEXTS["cpu"], "inbox": None},
 )
 _JOB_CACHE = {"at": 0, "data": None}
 
@@ -625,6 +637,16 @@ def _running(pid):
         return False
 
 
+def cpu_guard_state(root):
+    """Trạng thái cpu_guard (<root>/.cpu-guard.json); cũ hơn 2 phút (dịch vụ không chạy) coi như không có."""
+    try:
+        with open(os.path.join(root, ".cpu-guard.json"), encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return st if time.time() - (st.get("updated") or 0) < 120 else {}
+
+
 def cancel_run(root, display_id):
     """Huỷ lượt autofix đang chạy: SIGTERM cả cây tiến trình (con trước), sau 8 giây còn sống thì SIGKILL; đánh dấu
     trạng thái "cancelled" (không nằm trong ACTIVE_STATES nên --recover không chạy lại). Worktree / commit giữ nguyên —
@@ -637,6 +659,11 @@ def cancel_run(root, display_id):
                       verdict="Đã huỷ (tiến trình đã dừng trước đó) · %s" % (s.get("verdict") or s.get("state")))
         return "Đã huỷ %s (tiến trình đã dừng trước đó)" % display_id
     procs = _proc_tree(s["pid"])
+    for p in procs:  # lượt đang bị cpu_guard tạm dừng (SIGSTOP) không nhận SIGTERM cho tới khi chạy tiếp
+        try:
+            os.kill(p, signal.SIGCONT)
+        except OSError:
+            pass
     for p in reversed(procs):  # con cháu trước: Claude / build không bị bỏ lại khi tiến trình cha chết
         try:
             os.kill(p, signal.SIGTERM)

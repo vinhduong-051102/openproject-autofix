@@ -386,6 +386,26 @@ gợi ý cải thiện cho từng loại + các lỗi khác nhau gần nhất.
 Trang theo dõi: tab Ticket → danh sách Hoạt động → bộ lọc **Sự cố QA** (30 ngày); bấm một sự cố để xem chi tiết
 (lỗi, gợi ý, traceback / rule) và bảng tổng hợp 14 ngày bên dưới.
 
+## Giữ CPU ổn định (cpu_guard.py — dịch vụ op-cpu-guard)
+
+Nhiều lượt autofix / QA cùng build (mvn, npm, tsc…) dễ ăn hết CPU. `cpu_guard.py` đo CPU toàn máy mỗi
+`CPU_GUARD_INTERVAL` giây:
+
+- CPU ≥ `CPU_GUARD_HIGH`% liên tục `CPU_GUARD_SUSTAIN` giây → **tạm dừng** (SIGSTOP cả cây tiến trình) một lượt
+  đang nặng (cây dùng ≥ `CPU_GUARD_TASK_MIN_CPU`% của 1 nhân): ưu tiên lượt có build chạy thẳng dưới script (verify /
+  test, timeout 30 phút), rồi lượt bắt đầu muộn nhất. Còn cao thì dừng thêm, luôn chừa ≥ `CPU_GUARD_MIN_RUNNING` lượt
+  nặng chạy. Không dừng cây đang `git push/fetch`, `ssh`, `rsync`…
+- CPU ≤ `CPU_GUARD_LOW`% liên tục `CPU_GUARD_RESUME_SUSTAIN` giây (lượt khác / build xong) → **chạy tiếp** (SIGCONT)
+  lượt dừng lâu nhất, từng lượt một.
+- Mỗi lượt dừng tối đa `CPU_GUARD_MAX_PAUSE` giây (build trong Bash của Claude / agy: `CPU_GUARD_MAX_PAUSE_AGENT`,
+  vì timeout lệnh của Claude vẫn tính thời gian bị dừng) rồi chạy tiếp và được miễn dừng `CPU_GUARD_PROTECT` giây.
+- Dừng dịch vụ / bị kill / khởi động lại → mọi lượt đã dừng được chạy tiếp (trạng thái `<root>/.cpu-guard.json`,
+  `ExecStopPost=… --resume-all`). Huỷ lượt từ trang theo dõi gửi SIGCONT trước SIGTERM.
+
+Trang theo dõi: chip "Giữ CPU" ở header; lượt bị dừng hiện nhãn **⏸ Tạm dừng (CPU)**. Lệnh:
+`./install.sh op-cpu-guard`, `cpu_guard.py --status`, `cpu_guard.py --resume-all`,
+`journalctl --user -u op-cpu-guard -f`.
+
 ## Nhiều gói Claude + trang theo dõi (op_dashboard.py)
 
 Mỗi gói Claude là một thư mục cấu hình đã đăng nhập riêng (`CLAUDE_CONFIG_DIR`). Khai báo trong config op-watch:

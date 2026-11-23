@@ -1,0 +1,14 @@
+[Unit]
+Description=op-cpu-guard - CPU qua tai thi tam dung bot luot chay (autofix / QA), CPU ranh thi chay tiep
+
+[Service]
+WorkingDirectory=@TOOL_DIR@
+Environment=PATH=@EXTRA_PATH@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@PYTHON@ -u @TOOL_DIR@/cpu_guard.py
+# Bị SIGKILL / lỗi mà chưa kịp SIGCONT thì lượt đã dừng vẫn được chạy tiếp.
+ExecStopPost=@PYTHON@ @TOOL_DIR@/cpu_guard.py --resume-all
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

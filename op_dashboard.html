@@ -1319,9 +1319,12 @@ function activities() {
   S.runs.forEach((r) => {
     const [label, cls] = STATE_LABEL[r.state] || [r.state, ""];
     const live = ["queued", "preparing", "running", "shipping"].includes(r.state);
-    out.push({kind: "run", key: r.display_id, id: r.display_id, badge: live && r.event === "ASSIST" ? "🤝 Đang hỗ trợ" : label, cls, live,
+    const cpuWait = live && r.cpu_paused_since;
+    out.push({kind: "run", key: r.display_id, id: r.display_id,
+      badge: cpuWait ? "⏸ Tạm dừng (CPU)" : live && r.event === "ASSIST" ? "🤝 Đang hỗ trợ" : label, cls: cpuWait ? "warn" : cls, live,
       at: ts(r.updated_at || r.started_at), when: live ? ago(r.started_at) : when(ts(r.updated_at || r.started_at)),
-      sub: r.verdict || r.event || "", extra: r.profile || ""});
+      sub: (cpuWait ? `CPU quá tải — tạm dừng từ ${when(r.cpu_paused_since)}, CPU rảnh sẽ chạy tiếp · ` : "") + (r.verdict || r.event || ""),
+      extra: r.profile || ""});
   });
   (S.qa_runs || []).forEach((r) => {
     // Nhãn chỉ giữ kết luận ("KHÔNG TỰ TEST ĐƯỢC"); ghi chú trong ngoặc / sau "→" xuống dòng mô tả.
