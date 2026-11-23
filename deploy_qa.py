@@ -7,7 +7,7 @@ Chạy sau mỗi lần merge_to_dev (12h / 18h), hoặc tay: deploy_qa.py [--dry
    chưa có trong origin/release-ss/lastest-k8s.
 2. FE: worktree dev-ss → ./build-and-deploy.sh dev (gắn git tag v<VERSION>) → commit "update version <VERSION>" lên dev-ss → soar-fe-ss-<VERSION>.tar lên
    ~/soar_v2.0/images → docker load → đổi image service soar-fe-nginx trong docker-compose.yml (có backup).
-3. BE: worktree release-ss/lastest-k8s → merge origin/develop-ss, push → docker build soar-be-ss-lastest-k8s:<ngày><a..z>
+3. BE: worktree release-ss/lastest-k8s → merge origin/develop-ss, push → SOAR/docker/dev/build-image.sh soar-be-ss-lastest-k8s:<ngày><a..z> (nhánh chưa có script → docker build)
    → tar lên images → docker load → đổi image service service-product-content (có backup).
 4. Đưa image mới vào chạy theo DEPLOY_STRATEGY (mặc định bluegreen: container tạm <tên>-next chạy bản mới, kiểm tra
    sống, nginx trỏ sang, tạo lại container chính, trỏ về, xoá tạm — bản mới không lên thì giữ bản cũ; xem rollout()),
@@ -1593,6 +1593,28 @@ def recover_fe(acfg, dcfg, root, logf, drift, changes=None):
     return version
 
 
+BE_BUILD_SCRIPT = os.path.join("docker", "dev", "build-image.sh")
+
+
+def be_build_cmd(module, image, tag, release, commit):
+    """Lệnh build image BE → (cmd, env). Có docker/dev/build-image.sh trên nhánh release thì gọi script đó (nó tự
+    lấy phiên bản từ tag image, commit + nhánh từ git rồi truyền SOAR_VERSION / GIT_COMMIT / GIT_BRANCH cho
+    GET /api/v1/system/version) để bản tự động luôn build giống bản build tay. Worktree deploy là detached nên
+    script đọc nhánh ra "HEAD" → truyền thêm --build-arg GIT_BRANCH=<nhánh release> ở cuối (docker lấy giá trị
+    sau cùng). DEPLOY_VERSION_ARG khác SOAR_VERSION thì truyền thêm arg đó. Nhánh cũ chưa có script → docker build
+    trực tiếp với cùng các build-arg."""
+    version_arg = envconf.get("DEPLOY_VERSION_ARG", "SOAR_VERSION")
+    script = os.path.join(module, BE_BUILD_SCRIPT)
+    if os.path.isfile(script):
+        extra = ["--build-arg", "GIT_BRANCH=" + release]
+        if version_arg != "SOAR_VERSION":
+            extra += ["--build-arg", version_arg + "=" + tag]
+        return ["bash", BE_BUILD_SCRIPT, image] + extra, dict(os.environ, SOAR_VERSION=tag)
+    return (["docker", "build", "-t", image, "-f", "docker/dev/Dockerfile",
+             "--build-arg", version_arg + "=" + tag, "--build-arg", "GIT_COMMIT=" + commit,
+             "--build-arg", "GIT_BRANCH=" + release, "."], None)
+
+
 def deploy_be(acfg, dcfg, root, logf, changes=None):
     repo, release = acfg["be_repo"], dcfg["be_release_branch"]
     work = os.path.join(root, "deploy-be")
@@ -1619,12 +1641,9 @@ def deploy_be(acfg, dcfg, root, logf, changes=None):
         with open(built, "w", encoding="utf-8") as f:
             json.dump(images, f, indent=1)
         module = os.path.join(work, acfg["be_subdir"])
-        # Thông tin bản build cho GET /api/v1/system/version (như docker/dev/build-image.sh): không truyền thì BE báo
-        # version "dev", commit / nhánh "unknown".
-        commit = af.run(["git", "rev-parse", "--short", "HEAD"], cwd=work).strip()
-        sh(["docker", "build", "-t", image, "-f", "docker/dev/Dockerfile",
-            "--build-arg", envconf.get("DEPLOY_VERSION_ARG", "SOAR_VERSION") + "=" + tag, "--build-arg", "GIT_COMMIT=" + commit,
-            "--build-arg", "GIT_BRANCH=" + release, "."], cwd=module, logf=logf, timeout=5400)
+        cmd, env = be_build_cmd(module, image, tag, release,
+                                af.run(["git", "rev-parse", "--short", "HEAD"], cwd=work).strip())
+        sh(cmd, cwd=module, logf=logf, timeout=5400, env=env)
         tar = os.path.join(root, "%s.tar" % dcfg["be_image"])
         sh(["docker", "save", "-o", tar, image], logf=logf)
         upload(dcfg, tar, "%s/images/%s.tar" % (dcfg["base"], dcfg["be_image"]), logf)
