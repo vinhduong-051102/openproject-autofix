@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-cleanup: dọn dữ liệu autofix / QA của các bug đã chuyển cho người QA (deploy.json qa_user_id).
+cleanup: dọn dữ liệu autofix / QA của các bug đã chuyển cho người QA (deploy.json qa_user_id) hoặc đã đóng
+(Closed / Rejected — CLEANUP_FINISHED_STATUSES). Commit được coi là đã push cả khi lên remote dưới hash khác (cùng nội
+dung / cùng tiêu đề). Ticket đã đóng mà lượt còn commit chưa push / sửa dở: lưu thành <root>/.archive/<lượt>-<repo>.patch
+rồi mới xoá.
 
 Một ticket được dọn khi trên OpenProject nó đang giao cho người QA và không có lượt autofix / QA nào đang chạy. Xoá:
   - thư mục lượt chạy ~/autofix/<SOAR-x>-* (fix, -qa-, -review-), kèm git worktree + nhánh local auto/<lượt>
@@ -253,24 +256,90 @@ def prune(acfg, root, dry=False):
     return freed
 
 
-def unpushed(acfg, root, run_name):
-    """Worktree / nhánh auto/<lượt> còn commit chưa nằm trên bất kỳ nhánh remote nào → không được xoá."""
+UPSTREAMS = ("origin/develop-ss", "origin/dev-ss", "origin/master", "origin/main", "origin/develop", "origin/dev")
+# Ticket đã đóng trên OpenProject: dọn kể cả còn commit chưa push / sửa dở — các phần đó được lưu thành .patch trước.
+FINISHED_STATUSES = {s.strip().lower() for s in (envconf.get("CLEANUP_FINISHED_STATUSES") or "Closed,Rejected").split(",")}
+
+
+def _git(path, *args):
+    return subprocess.run(["git", "-C", path] + list(args), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          universal_newlines=True)
+
+
+def on_remote(path, commit):
+    """Commit đã có trên remote dưới hash khác: autofix rebase / cherry-pick lại trước khi push nên hash đổi.
+    Cùng nội dung (git cherry → "-") hoặc cùng tiêu đề trên nhánh remote."""
+    subj = _git(path, "log", "-1", "--format=%s", commit).stdout.strip()
+    for up in UPSTREAMS:
+        if _git(path, "rev-parse", "-q", "--verify", up).returncode != 0:
+            continue
+        if _git(path, "cherry", up, commit, commit + "~1").stdout.startswith("-"):
+            return True
+        if subj and subj in _git(path, "log", up, "--since=120 days ago", "--format=%s", "-F", "--grep", subj[:80]).stdout.splitlines():
+            return True
+    return False
+
+
+def unpushed_commits(acfg, root, run_name):
+    """[(repo key, thư mục git, commit)] chưa nằm trên nhánh remote nào (kể cả dưới hash khác)."""
     import repos as R
+    found = []
     for r in R.repos(acfg):
         repo, wt = r["path"], os.path.join(root, run_name, r["key"])
         refs = []
         if os.path.isdir(wt):
-            refs.append(("-C", wt, "HEAD"))
+            refs.append((wt, "HEAD"))
         branch = "auto/" + run_name
-        if subprocess.run(["git", "-C", repo, "rev-parse", "-q", "--verify", "refs/heads/" + branch],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-            refs.append(("-C", repo, "refs/heads/" + branch))
-        for c, path, ref in refs:
-            out = subprocess.run(["git", c, path, "rev-list", "--no-merges", "--max-count=1", ref, "--not", "--remotes"],
-                                 capture_output=True, text=True)
-            if out.returncode != 0 or out.stdout.strip():
-                return True
-    return False
+        if _git(repo, "rev-parse", "-q", "--verify", "refs/heads/" + branch).returncode == 0:
+            refs.append((repo, "refs/heads/" + branch))
+        seen = set()
+        for path, ref in refs:
+            out = _git(path, "rev-list", "--no-merges", ref, "--not", "--remotes")
+            if out.returncode != 0:
+                found.append((r["key"], path, ref))
+                continue
+            for c in out.stdout.split():
+                if c not in seen and not on_remote(path, c):
+                    seen.add(c)
+                    found.append((r["key"], path, c))
+    return found
+
+
+def unpushed(acfg, root, run_name):
+    """Worktree / nhánh auto/<lượt> còn commit chưa có trên remote (so cả nội dung / tiêu đề) → không được xoá."""
+    return bool(unpushed_commits(acfg, root, run_name))
+
+
+def archive(acfg, root, run_name):
+    """Lưu commit chưa push + thay đổi chưa commit của lượt vào <root>/.archive/<lượt>-<repo>.patch trước khi xoá.
+    Trả danh sách file đã ghi."""
+    import repos as R
+    out_dir = os.path.join(root, ".archive")
+    os.makedirs(out_dir, exist_ok=True)
+    by_repo = {}
+    for key, path, c in unpushed_commits(acfg, root, run_name):
+        by_repo.setdefault((key, path), []).append(c)
+    written = []
+    for r, d in R.trees(acfg, os.path.join(root, run_name)):
+        if os.path.isdir(d) and _git(d, "status", "--porcelain").stdout.strip():
+            by_repo.setdefault((r["key"], d), [])
+    for (key, path), commits in by_repo.items():
+        parts = []
+        for c in reversed(commits):
+            parts.append(_git(path, "format-patch", "--stdout", "-1", c).stdout)
+        if os.path.join(root, run_name) in path:
+            diff = _git(path, "diff", "HEAD").stdout
+            if diff.strip():
+                parts.append("# ---- Thay đổi chưa commit (git diff HEAD) ----\n" + diff)
+            untracked = _git(path, "ls-files", "--others", "--exclude-standard").stdout.split()
+            if untracked:
+                parts.append("# ---- File mới chưa add (chỉ ghi tên) ----\n" + "\n".join(untracked) + "\n")
+        if parts:
+            fn = os.path.join(out_dir, "%s-%s.patch" % (run_name, key))
+            with open(fn, "w", encoding="utf-8") as f:
+                f.write("\n".join(parts))
+            written.append(fn)
+    return written
 
 
 def handed_over(api, display_id, qa_user_id):
@@ -362,20 +431,30 @@ def run(dry=False, only=None):
         if not qa_user:
             continue
         ok, status = handed_over(api, display_id, qa_user)
-        if not ok:
+        if ok is None:
+            print("%s: không đọc được ticket trên OpenProject (%s) — để lần sau" % (display_id, str(status)[:200]))
+            continue
+        finished = str(status or "").strip().lower() in FINISHED_STATUSES
+        if not ok and not finished:
             continue
         if busy(root, display_id):
             print("%s: đang chạy, để lần sau" % display_id)
             continue
         unsafe = [(r, keep_reason(acfg, root, r)) for r in runs]
         unsafe = [(r, why) for r, why in unsafe if why]
-        if unsafe:
+        if unsafe and not finished:
             print("%s: giữ lại — %s" % (display_id, ", ".join("%s: %s" % x for x in unsafe)))
             continue
+        if unsafe:  # ticket đã đóng: lưu phần chưa push / sửa dở thành .patch rồi dọn
+            saved = []
+            for r, _ in unsafe:
+                saved += archive(acfg, root, r) if not dry else ["(thử) %s" % r]
+            print("%s (%s): lưu %d file patch trước khi dọn — %s" % (
+                display_id, status, len(saved), ", ".join(os.path.basename(x) for x in saved)))
         dirs = [os.path.join(root, r) for r in runs]
         reports = glob.glob(os.path.join(report_dir, "%s-*.md" % display_id)) if report_dir else []
         size = du(dirs) + sum(os.path.getsize(p) for p in reports)
-        print("%s (%s, đã chuyển QA): %d lượt chạy, %d báo cáo, %.1f MB%s"
+        print("%s (%s, đã chuyển QA / đã đóng): %d lượt chạy, %d báo cáo, %.1f MB%s"
               % (display_id, status, len(runs), len(reports), size / 1e6, " — thử" if dry else ""))
         if dry:
             done.append(display_id)
