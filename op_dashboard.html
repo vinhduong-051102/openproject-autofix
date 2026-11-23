@@ -1885,7 +1885,7 @@ const LIVE_STATES = ["queued", "preparing", "running", "shipping"];
 // ---- Gắp commit của ticket sang nhánh khác (cherry.py) ----
 const PICK = {id: "", wp: "", data: null, repo: "", q: ""};
 const PICK_ST = {running: ["Đang gắp", "accent"], done: ["Xong", "ok"], error: ["Lỗi", "crit"], stale: ["Bị ngắt", "crit"]};
-const PICK_BR = {ok: "ok", skip: "", conflict: "crit", error: "crit", running: "accent"};
+const PICK_BR = {ok: "ok", skip: "", conflict: "crit", review: "warn", error: "crit", running: "accent"};
 function renderPicks(displayId) {
   const box = $("picks"); if (!box) return;
   const list = ((S && S.picks) || []).filter((p) => p.display_id === displayId).slice(0, 8);
@@ -1897,7 +1897,7 @@ function renderPicks(displayId) {
     return `<div class="pick"><span class="badge ${cls}">${esc(label)}</span> <b>${esc(p.label || p.repo)}</b>
       <span class="muted">${esc((p.started_at || "").slice(5, 16).replace("T", " "))}${p.commits && p.commits.length ? ` · ${p.commits.length} commit` : ""}${p.push === false ? " · không push" : ""}</span>
       <a class="ext" href="/api/pick/log?name=${encodeURIComponent(p.name)}" target="_blank" rel="noopener" title="Log lượt gắp">log ↗</a>
-      <div class="pick-br">${(p.results || []).map((r) => `<span class="badge ${PICK_BR[r.state] || ""}" title="${esc(r.message || r.state)}${r.worktree ? " · worktree " + esc(r.worktree) : ""}">${esc(r.branch)}: ${esc(r.state === "ok" ? "đã gắp" : r.state === "skip" ? "đã có" : r.state === "conflict" ? "xung đột" : r.state === "running" ? "đang gắp" : "lỗi")}${r.picked && r.picked.length ? " " + esc(r.picked.join(", ")) : ""}</span>`).join(" ")}
+      <div class="pick-br">${(p.results || []).map((r) => `<span class="badge ${PICK_BR[r.state] || ""}" title="${esc(r.message || r.state)}${r.worktree ? " · worktree " + esc(r.worktree) : ""}">${esc(r.branch)}: ${esc(r.state === "ok" ? "đã gắp" : r.state === "skip" ? "đã có" : r.state === "conflict" ? "xung đột" : r.state === "review" ? "cần xem" : r.state === "running" ? "đang gắp" : "lỗi")}${r.picked && r.picked.length ? " " + esc(r.picked.join(", ")) : ""}</span>`).join(" ")}
       ${p.state === "error" && !(p.results || []).length ? `<span class="crit">${esc(p.verdict || "")}</span>` : ""}
       ${p.comment_error ? `<span class="crit">comment OpenProject lỗi: ${esc(p.comment_error)}</span>` : ""}</div>`;
   }).join("") : "";
@@ -1992,7 +1992,7 @@ function markPickBadges() {
     let b = tags.querySelector(":scope > .pick-badge");
     if (!p) { if (b) b.remove(); return; }
     const [label, cls] = PICK_ST[p.state] || [p.state, ""];
-    const brs = (p.results || []).map((r) => r.branch + (r.state === "ok" ? "" : r.state === "skip" ? " (đã có)" : r.state === "conflict" ? " (xung đột)" : r.state === "running" ? "…" : " (lỗi)"));
+    const brs = (p.results || []).map((r) => r.branch + (r.state === "ok" ? "" : r.state === "skip" ? " (đã có)" : r.state === "conflict" ? " (xung đột)" : r.state === "review" ? " (cần xem)" : r.state === "running" ? "…" : " (lỗi)"));
     const text = "⤴ " + (p.state === "running" ? "Đang gắp " : p.state === "done" ? "Đã gắp → " : label + " · ") + (brs.join(", ") || (p.branches || []).join(", "));
     if (!b) {
       b = document.createElement("span"); b.className = "badge pick-badge run-badge"; b.dataset.opPickres = p.name;
@@ -2024,7 +2024,7 @@ async function openPickResult(name) {
   $("pickBody").innerHTML = `<div class="row"><span class="badge ${cls}">${esc(label)}</span><span class="muted">${esc((p.started_at || "").replace("T", " "))}${p.finished_at ? " → " + esc(p.finished_at.slice(11, 19)) : ""}${p.push === false ? " · không push" : ""}${p.commented ? " · đã comment OpenProject" : ""}</span></div>
     ${(p.commits || []).length ? `<div class="hint">Commit:</div><ul class="pick-commits">${p.commits.map((c) => `<li><code>${esc(c.short)}</code> ${esc(c.subject)}</li>`).join("")}</ul>` : ""}
     <div class="hint">Nhánh đích:</div>
-    <div class="pick-branches">${(p.results || []).map((r) => `<div><span class="badge ${PICK_BR[r.state] || ""}">${esc(r.state === "ok" ? "đã gắp" : r.state === "skip" ? "đã có" : r.state === "conflict" ? "xung đột" : r.state === "running" ? "đang gắp" : "lỗi")}</span> <code>${esc(r.branch)}</code> ${r.picked && r.picked.length ? "→ " + esc(r.picked.join(", ")) : ""} <span class="muted">${esc(r.message || "")}</span>${r.worktree ? `<div class="muted">worktree: <code>${esc(r.worktree)}</code></div>` : ""}</div>`).join("") || `<div class="crit">${esc(p.verdict || "")}</div>`}</div>
+    <div class="pick-branches">${(p.results || []).map((r) => `<div><span class="badge ${PICK_BR[r.state] || ""}">${esc(r.state === "ok" ? "đã gắp" : r.state === "skip" ? "đã có" : r.state === "conflict" ? "xung đột" : r.state === "review" ? "cần xem" : r.state === "running" ? "đang gắp" : "lỗi")}</span> <code>${esc(r.branch)}</code> ${r.picked && r.picked.length ? "→ " + esc(r.picked.join(", ")) : ""} <span class="muted">${esc(r.message || "")}</span>${r.worktree ? `<div class="muted">worktree: <code>${esc(r.worktree)}</code></div>` : ""}</div>`).join("") || `<div class="crit">${esc(p.verdict || "")}</div>`}</div>
     ${p.comment_error ? `<div class="crit">Comment OpenProject lỗi: ${esc(p.comment_error)}</div>` : ""}
     <pre class="log" id="pickLog" style="max-height:32vh;overflow:auto">Đang tải log…</pre>
     <div class="row"><button class="link" id="pickNo">Đóng</button><a class="ext" href="/api/pick/log?name=${encodeURIComponent(p.name)}" target="_blank" rel="noopener">Mở log ↗</a></div>`;

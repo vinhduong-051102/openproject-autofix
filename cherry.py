@@ -3,9 +3,12 @@
 
 Mỗi lượt gắp là một thư mục ~/autofix/.picks/<TICKET>-pick-<MMDD-HHMM>/ gồm status.json + log.txt. Với mỗi nhánh đích:
 worktree tạm (detached từ origin/<nhánh>) → cherry-pick -x các commit của ticket chưa có trên nhánh → push HEAD lên
-origin/<nhánh> → xoá worktree. Xung đột thì giữ nguyên worktree (đường dẫn ghi trong trạng thái) để gỡ tay, không push.
+origin/<nhánh> → xoá worktree. Xung đột → tự gỡ (pick_resolve: Claude gỡ theo đúng commit đang gắp) rồi kiểm tra lại
+(độ phủ dòng của commit gốc, build / kiểm tra kiểu so với nhánh đích, Claude review THIẾU / HỎNG): đạt mới push; không
+đạt hoặc không gỡ được → giữ worktree + báo cáo (trạng thái review / conflict) để xem tay, không push.
 
 CLI:  python3 cherry.py --ticket SOAR-2956 --repo fe --branches dev-ss-2.0.34.65-otp,dev-ss-2.0.33 [--no-push] [--no-comment]
+      [--no-auto-resolve]
 """
 import argparse
 import glob
@@ -23,6 +26,7 @@ import envconf  # noqa: E402
 import op_watch  # noqa: E402
 import op_autofix as af  # noqa: E402
 import repos as R  # noqa: E402
+import pick_resolve as PR  # noqa: E402
 
 PICKS = ".picks"
 BRANCH_RX = re.compile(r"^[\w][\w./-]{0,120}$")
@@ -120,7 +124,8 @@ def _write(status_path, st):
     os.replace(tmp, status_path)
 
 
-def run_pick(cfg, acfg, root, display_id, repo_key, branches, push=True, comment=True, wp_id="", name=None):
+def run_pick(cfg, acfg, root, display_id, repo_key, branches, push=True, comment=True, wp_id="", name=None,
+             auto_resolve=True):
     repo = R.find(acfg, repo_key)
     if not repo:
         raise ValueError("không có repo %s trong dự án" % repo_key)
@@ -176,18 +181,36 @@ def run_pick(cfg, acfg, root, display_id, repo_key, branches, push=True, comment
                 out = git(wt, "cherry-pick", "-x", *[c["sha"] for c in todo], check=False)
                 if "CONFLICT" in out or git(wt, "diff", "--name-only", "--diff-filter=U", check=False).strip():
                     files = git(wt, "diff", "--name-only", "--diff-filter=U", check=False).split()
-                    done = git(wt, "log", "--format=%h", "%s..HEAD" % ref, check=False).split()
-                    res.update(state="conflict", picked=done,
-                               message="xung đột %s — gỡ tay trong worktree rồi `git cherry-pick --continue` và push" % (
-                                   ", ".join(files)[:300] or "không rõ file"))
-                    log("%s: XUNG ĐỘT %s; giữ worktree %s" % (br, ", ".join(files), wt))
-                    continue
+                    rdir = os.path.join(pdir, "resolve-" + re.sub(r"[^\w.-]+", "_", br))
+                    ok, note = False, "tắt tự gỡ"
+                    if auto_resolve:
+                        log("%s: xung đột %s → tự gỡ" % (br, ", ".join(files)))
+                        ok, note, fixed = PR.resolve_all(acfg, wt, br, display_id, rdir, log)
+                    if not ok:
+                        done = git(wt, "log", "--format=%h", "%s..HEAD" % ref, check=False).split()
+                        res.update(state="conflict", picked=done, report=rdir if auto_resolve else "",
+                                   message="xung đột %s%s — gỡ tay trong worktree rồi `git cherry-pick --continue` và push" % (
+                                       ", ".join(files)[:300] or "không rõ file",
+                                       " (tự gỡ không được: %s)" % note[:300] if auto_resolve else ""))
+                        log("%s: XUNG ĐỘT %s; %s; giữ worktree %s" % (br, ", ".join(files), note, wt))
+                        continue
+                    log("%s: đã tự gỡ (%s) → kiểm tra lại" % (br, note))
+                    vok, vsum, vrep = PR.verify(acfg, repo, wt, br, ref, display_id, [c["sha"] for c in todo], fixed, rdir, log)
+                    res.update(auto_resolved=note, verify=vsum, report=vrep)
+                    log("%s: kiểm tra sau khi gỡ — %s" % (br, vsum))
+                    if not vok:
+                        res.update(state="review", picked=git(wt, "log", "--format=%h", "%s..HEAD" % ref).split()[::-1],
+                                   message="đã tự gỡ xung đột nhưng kiểm tra chưa đạt (%s) — xem %s, chưa push, giữ worktree"
+                                   % (vsum, vrep))
+                        continue
+                    out = ""
                 if "error" in out.lower() and "nothing to commit" not in out:
                     raise RuntimeError(out.strip()[-600:])
                 res["picked"] = git(wt, "log", "--format=%h", "%s..HEAD" % ref).split()[::-1]
                 if push:
                     git(wt, "push", "origin", "HEAD:refs/heads/%s" % br, timeout=300)
-                    res.update(state="ok", message="đã push %d commit" % len(res["picked"]))
+                    res.update(state="ok", message="đã push %d commit%s" % (
+                        len(res["picked"]), " (tự gỡ xung đột, kiểm tra đạt: %s)" % res["verify"] if res.get("verify") else ""))
                     log("%s: đã push %s" % (br, ", ".join(res["picked"])))
                 else:
                     res.update(state="ok", message="đã gắp %d commit, chưa push (worktree %s)" % (len(res["picked"]), wt))
@@ -198,13 +221,13 @@ def run_pick(cfg, acfg, root, display_id, repo_key, branches, push=True, comment
             except Exception as e:  # noqa: BLE001
                 res.update(state="error", message=str(e)[:600])
                 log("%s: LỖI %s" % (br, e))
-                if os.path.isdir(wt) and res["state"] == "error":
+                if os.path.isdir(wt) and res["state"] == "error" and not res.get("auto_resolved"):
                     git(path, "worktree", "remove", "--force", wt, check=False)
                     res["worktree"] = ""
             finally:
                 _write(status_path, st)
         git(path, "worktree", "prune", check=False)
-        bad = [r for r in st["results"] if r["state"] in ("conflict", "error")]
+        bad = [r for r in st["results"] if r["state"] in ("conflict", "error", "review")]
         st["state"] = "done" if not bad else "error"
         st["verdict"] = "; ".join("%s: %s" % (r["branch"], r["message"] or r["state"]) for r in st["results"])
         if comment and wp_id and any(r["state"] == "ok" and r["picked"] for r in st["results"]):
@@ -268,6 +291,7 @@ def main():
     ap.add_argument("--wp", default="", help="id work package để ghi comment")
     ap.add_argument("--no-push", action="store_true")
     ap.add_argument("--no-comment", action="store_true")
+    ap.add_argument("--no-auto-resolve", action="store_true", help="xung đột thì dừng để gỡ tay (không tự gỡ)")
     ap.add_argument("--name", help="tên thư mục lượt gắp (dashboard đặt trước)")
     ap.add_argument("--options", action="store_true", help="chỉ in repo / commit / nhánh (JSON) rồi thoát")
     a = ap.parse_args()
@@ -281,7 +305,7 @@ def main():
         print(json.dumps(options(acfg, a.ticket), ensure_ascii=False, indent=1))
         return
     st = run_pick(cfg, acfg, root, a.ticket, a.repo, a.branches.split(","), push=not a.no_push,
-                  comment=not a.no_comment, wp_id=a.wp, name=a.name)
+                  comment=not a.no_comment, wp_id=a.wp, name=a.name, auto_resolve=not a.no_auto_resolve)
     print(st.get("verdict") or st["state"])
     sys.exit(0 if st["state"] == "done" else 1)
 
