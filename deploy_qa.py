@@ -7,7 +7,7 @@ Chạy sau mỗi lần merge_to_dev (12h / 18h), hoặc tay: deploy_qa.py [--dry
    chưa có trong origin/release-ss/lastest-k8s.
 2. FE: worktree dev-ss → ./build-and-deploy.sh dev (gắn git tag v<VERSION>) → commit "update version <VERSION>" lên dev-ss → soar-fe-ss-<VERSION>.tar lên
    ~/soar_v2.0/images → docker load → đổi image service soar-fe-nginx trong docker-compose.yml (có backup).
-3. BE: worktree release-ss/lastest-k8s → merge origin/develop-ss, push → SOAR/docker/dev/build-image.sh soar-be-ss-lastest-k8s:<ngày><a..z> (nhánh chưa có script → docker build)
+3. BE: worktree release-ss/lastest-k8s → merge origin/develop-ss, push → SOAR/docker/dev/build-image.sh soar-be-ss-lastest-k8s:<X.Y.Z> (feat → tăng MINOR, còn lại PATCH; nhánh chưa có script → docker build)
    → tar lên images → docker load → đổi image service service-product-content (có backup).
 4. Đưa image mới vào chạy theo DEPLOY_STRATEGY (mặc định bluegreen: container tạm <tên>-next chạy bản mới, kiểm tra
    sống, nginx trỏ sang, tạo lại container chính, trỏ về, xoá tạm — bản mới không lên thì giữ bản cũ; xem rollout()),
@@ -76,6 +76,9 @@ DEFAULTS = {
     "fe_image": "soar-fe-ss",
     "be_image": "soar-be-ss-lastest-k8s",
     "be_release_branch": "release-ss/lastest-k8s",
+    # Version BE dạng MAJOR.MINOR.PATCH: chưa thấy bản X.Y.Z nào (image soar-be* trên server / be-images.json) thì
+    # tính tiếp từ số này (bản đầu = 2.1.5 hoặc 2.2.0).
+    "be_version_floor": "2.1.4",
     "qa_user_id": 0,           # id người QA trên OpenProject — đặt QA_USER_ID trong .env
     "qa_user_name": "QA",
     "wait_minutes": 15,
@@ -1593,6 +1596,55 @@ def recover_fe(acfg, dcfg, root, logf, drift, changes=None):
     return version
 
 
+SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+# "feat: …", "feat(ai-chat): …", "[SOAR-1] feat: …", "[SOAR-1] - feat(x): …" (kiểu commit của repo BE)
+FEAT_RE = re.compile(r"^(?:\[[^\]]*\]\s*-?\s*)?feat(?:\([^)]*\))?!?:", re.I)
+
+
+def parse_semver(tag):
+    m = SEMVER_RE.match(tag or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def be_known_versions(refs, images):
+    """Các version X.Y.Z BE đã có: tag image soar-be* trên server ("repo:tag", gồm cả image người khác build như
+    soar-be-ss-k8s) + key be-images.json (server có thể đã xoá image cũ). → {(x, y, z): [image, …]}"""
+    known = {}
+    for ref in list(refs) + list(images):
+        repo, _, tag = ref.rpartition(":")
+        ver = parse_semver(tag)
+        if ver and repo.rsplit("/", 1)[-1].startswith("soar-be"):
+            known.setdefault(ver, []).append(ref)
+    return known
+
+
+def bump_version(base, has_feat):
+    """Giống FE: có commit feat → tăng MINOR (2.1.4 → 2.2.0), còn lại tăng PATCH (2.1.4 → 2.1.5)."""
+    return (base[0], base[1] + 1, 0) if has_feat else (base[0], base[1], base[2] + 1)
+
+
+def has_feat_commit(work, base):
+    """Có commit feat (không tính merge) trong base..HEAD không."""
+    out = af.run(["git", "log", "--no-merges", "--format=%s", "%s..HEAD" % base], cwd=work, check=False)
+    return any(FEAT_RE.match(line.strip()) for line in out.splitlines())
+
+
+def next_be_version(work, dcfg, refs, images, pre_merge):
+    """Version BE kế tiếp dạng MAJOR.MINOR.PATCH (build-image.sh từ chối dạng khác). Gốc = version lớn nhất đã có
+    (be_known_versions), chưa có thì be_version_floor. feat tính trong các commit từ bản BE trước của tool
+    (commit ghi trong be-images.json của image mang version gốc; không có thì đầu nhánh release trước khi merge)."""
+    known = be_known_versions(refs, images)
+    base = max(known) if known else parse_semver(dcfg.get("be_version_floor") or DEFAULTS["be_version_floor"])
+    since = next((images[r] for r in known.get(base, []) if r in images), None) or pre_merge
+    if subprocess.run(["git", "cat-file", "-e", since + "^{commit}"], cwd=work,
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        since = pre_merge
+    ver = bump_version(base, has_feat_commit(work, since))
+    while ver in known:  # phòng trùng (người khác đã build đúng số đó)
+        ver = (ver[0], ver[1], ver[2] + 1)
+    return "%d.%d.%d" % ver
+
+
 BE_BUILD_SCRIPT = os.path.join("docker", "dev", "build-image.sh")
 
 
@@ -1619,6 +1671,7 @@ def deploy_be(acfg, dcfg, root, logf, changes=None):
     repo, release = acfg["be_repo"], dcfg["be_release_branch"]
     work = os.path.join(root, "deploy-be")
     fresh_worktree(repo, work, "origin/" + release)
+    pre_merge = af.run(["git", "rev-parse", "HEAD"], cwd=work).strip()
     try:
         res = subprocess.run(["git", "merge", "-q", "-m", "merge %s vào %s" % (acfg["be_upstream"], release.split("/")[-1]),
                               "origin/" + acfg["be_upstream"]], cwd=work, stdout=subprocess.PIPE,
@@ -1626,10 +1679,6 @@ def deploy_be(acfg, dcfg, root, logf, changes=None):
         if res.returncode != 0:
             af.resolve_conflicts(acfg, work, "merge %s vào %s" % (acfg["be_upstream"], release))
         af.push(work, release)
-        day = datetime.now().strftime("%Y%m%d")
-        used = set(remote(dcfg, "docker images --format '{{.Tag}}' %s" % dcfg["be_image"]).split())
-        tag = next(day + c for c in "abcdefghijklmnopqrstuvwxyz" if day + c not in used)
-        image = "%s:%s" % (dcfg["be_image"], tag)
         # Nhớ image này build từ commit nào (deploy-check so commit sửa với đúng bản đang chạy).
         built = os.path.join(os.path.expanduser(acfg["root"]), "be-images.json")
         try:
@@ -1637,6 +1686,9 @@ def deploy_be(acfg, dcfg, root, logf, changes=None):
                 images = json.load(f)
         except (OSError, ValueError):
             images = {}
+        refs = remote(dcfg, "docker images --format '{{.Repository}}:{{.Tag}}'").split()
+        tag = next_be_version(work, dcfg, refs, images, pre_merge)
+        image = "%s:%s" % (dcfg["be_image"], tag)
         images[image] = af.run(["git", "rev-parse", "HEAD"], cwd=work).strip()
         with open(built, "w", encoding="utf-8") as f:
             json.dump(images, f, indent=1)
