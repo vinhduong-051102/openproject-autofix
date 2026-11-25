@@ -148,27 +148,57 @@ def set_state(d, **fields):
     return data
 
 
+def _file_hash(path):
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
 def _save_files(d, files, existing=()):
     """Ghi file (base64 từ dashboard) vào <draft>/files/, tên không trùng file đã có. Giới hạn số file / tổng dung
-    lượng tính cả file đã đính kèm trước đó. Kiểm tra hết rồi mới ghi (lỗi thì không để lại file dở)."""
+    lượng tính cả file đã đính kèm trước đó. Kiểm tra hết rồi mới ghi (lỗi thì không để lại file dở).
+    File trùng nội dung với file đã có (hoặc file khác trong cùng lượt) thì KHÔNG lưu thêm bản mới — vd bấm "Soạn lại"
+    nhiều lần, form gửi lại cùng file → trước đây sinh a_1, a_2… và đính kèm trùng lên ticket.
+    Trả (saved, renamed): saved = các file mới thật sự ghi; renamed = tên gốc → tên đang lưu (file mới hoặc file cũ
+    trùng nội dung)."""
     import base64
+    import hashlib
     existing = list(existing or [])
-    if len(existing) + len(files) > MAX_FILES:
-        raise ValueError("tối đa %d file (đã có %d)" % (MAX_FILES, len(existing)))
-    used, total, items = {x["name"] for x in existing}, sum(int(x.get("size") or 0) for x in existing), []
+    used, total = {x["name"] for x in existing}, sum(int(x.get("size") or 0) for x in existing)
+    by_hash = {}
+    for x in existing:
+        h = _file_hash(os.path.join(d, "files", x["name"]))
+        if h:
+            by_hash.setdefault(h, x["name"])
+    items, renamed = [], {}
     for f in files:
         data = base64.b64decode(f.get("data") or "")
+        h = hashlib.sha256(data).hexdigest()
+        if h in by_hash:
+            renamed[f.get("name")] = by_hash[h]
+            continue
         total += len(data)
         if total > MAX_BYTES:
             raise ValueError("tổng dung lượng file vượt %d MB" % (MAX_BYTES // 1024 // 1024))
-        items.append((safe_name(f.get("name"), used), data, f.get("type") or ""))
+        name = safe_name(f.get("name"), used)
+        by_hash[h] = name
+        renamed[f.get("name")] = name
+        items.append((name, data, f.get("type") or ""))
+    if len(existing) + len(items) > MAX_FILES:
+        raise ValueError("tối đa %d file (đã có %d)" % (MAX_FILES, len(existing)))
     os.makedirs(os.path.join(d, "files"), exist_ok=True)
     saved = []
     for name, data, ctype in items:
         with open(os.path.join(d, "files", name), "wb") as out:
             out.write(data)
         saved.append({"name": name, "size": len(data), "type": ctype})
-    return saved
+    return saved, renamed
 
 
 def start_draft(prompt, files, opts=None):
@@ -182,7 +212,7 @@ def start_draft(prompt, files, opts=None):
     draft_id = datetime.now().strftime("%m%d-%H%M%S") + "-" + secrets.token_hex(2)
     d = os.path.join(drafts_root(acfg), draft_id)
     os.makedirs(os.path.join(d, "files"))
-    saved = _save_files(d, files)
+    saved, _ = _save_files(d, files)
     with open(os.path.join(d, "request.json"), "w", encoding="utf-8") as f:
         json.dump({"prompt": prompt, "files": saved, "opts": opts or {}}, f, ensure_ascii=False, indent=1)
     set_state(d, state="drafting", files=saved, prompt=prompt, opts=opts or {})
@@ -274,8 +304,7 @@ def refine_draft(draft_id, answers, subject="", description="", files=None):
     if files:
         rq_path = os.path.join(d, "request.json")
         req = json.load(open(rq_path, encoding="utf-8"))
-        saved = _save_files(d, files, req.get("files"))
-        renamed = {f.get("name"): x["name"] for f, x in zip(files, saved)}  # tên gốc → tên đã lưu (tránh trùng)
+        saved, renamed = _save_files(d, files, req.get("files"))  # tên gốc → tên đang lưu (file trùng nội dung: tên cũ)
         req["files"] = (req.get("files") or []) + saved
         with open(rq_path, "w", encoding="utf-8") as f:
             json.dump(req, f, ensure_ascii=False, indent=1)
@@ -295,7 +324,8 @@ def refine_draft(draft_id, answers, subject="", description="", files=None):
     path = os.path.join(d, "refine.json")
     data = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {"round": 0, "answers": []}
     data["round"] += 1
-    data["answers"] += answers
+    seen = {(x.get("q"), x.get("a")) for x in data["answers"]}  # bấm soạn lại nhiều lần: form gửi lại cùng câu trả lời
+    data["answers"] += [x for x in answers if (x["q"], x["a"]) not in seen and not seen.add((x["q"], x["a"]))]
     cur = st.get("draft") or {}
     data["subject"] = (subject or cur.get("subject") or "").strip()
     data["description"] = (description or cur.get("description") or "").strip()
@@ -419,11 +449,17 @@ def create(draft_id, subject, description, type_name="Bug", priority_name="High"
     wp = af.op_write(api, "POST", "/api/v3/projects/%s/work_packages" % cfg["project"], {
         "subject": subject, "description": {"format": "markdown", "raw": description or ""}, "_links": links})
     d = os.path.join(drafts_root(acfg), draft_id)
-    uploaded, errors = {}, []
+    uploaded, errors, by_hash = {}, [], {}
     for x in st.get("files") or []:
+        h = _file_hash(os.path.join(d, "files", x["name"]))
+        if h and h in by_hash:  # cùng nội dung với file đã đính kèm (bản nháp cũ còn a_1, a_2…) → không đính kèm lại
+            uploaded[x["name"]] = uploaded[by_hash[h]]
+            continue
         try:
             att = upload_attachment(api, wp["id"], os.path.join(d, "files", x["name"]), x["name"], x.get("type"))
             uploaded[x["name"]] = att["id"]
+            if h:
+                by_hash[h] = x["name"]
         except Exception as ex:  # noqa: BLE001
             errors.append("%s: %s" % (x["name"], ex))
     raw = description or ""
@@ -438,7 +474,7 @@ def create(draft_id, subject, description, type_name="Bug", priority_name="High"
     set_state(d, state="created", wp_id=wp["id"], display_id=display_id, upload_errors=errors)
     af.inbox(cfg, "**TẠO TASK** %s — %s" % (display_id, subject))
     return {"wp_id": wp["id"], "display_id": display_id, "url": "%s/work_packages/%s" % (cfg["url"], wp["id"]),
-            "attachments": len(uploaded), "errors": errors}
+            "attachments": len(set(uploaded.values())), "errors": errors}
 
 
 def list_drafts(limit=8):
