@@ -1454,6 +1454,51 @@ def drift_text(drift):
         drift["running"], drift.get("branch") or "dev-ss", drift["latest"])
 
 
+def be_drift(acfg, dcfg, fp=None):
+    """
+    BE 0 commit mới nhưng server chưa chạy image build cho đầu nhánh release → {"running", "image", "version",
+    "migrations", "destructive"}; khớp / không xác định được → None. Vd 25/11 11:14: deploy_be đã merge develop-ss vào
+    release + build 2.1.9, rollout lỗi (kiểm tra health 401) → server giữ 2.1.8 mà pending() thấy "BE 0 commit" mãi.
+    """
+    if not acfg.get("be_repo") or not soar_server(dcfg) or not dcfg.get("host"):
+        return None
+    try:
+        with open(os.path.join(os.path.expanduser(acfg["root"]), "be-images.json"), encoding="utf-8") as f:
+            images = json.load(f)
+    except (OSError, ValueError):
+        return None
+    head = git_lines(acfg["be_repo"], "rev-parse", "origin/" + dcfg["be_release_branch"])
+    if not head:
+        return None
+    built = [(parse_semver(img.rpartition(":")[2]), img) for img, sha in images.items()
+             if sha == head[0] and img.rpartition(":")[0] == dcfg["be_image"]]
+    built = [b for b in built if b[0]]
+    if not built:
+        return None
+    ver, image = max(built)
+    running = (fp if fp is not None else fingerprint(dcfg)).get("be")
+    if not running or running == image:
+        return None
+    rv = parse_semver(running.rpartition(":")[2])
+    if rv and rv > ver:
+        return None  # server chạy bản mới hơn (deploy tay?) — không tự hạ bản
+    try:
+        remote(dcfg, "docker image inspect %s >/dev/null" % q(image), timeout=60)
+    except (RuntimeError, subprocess.TimeoutExpired):
+        return None  # image không còn trên server → để lượt có commit mới build lại
+    mig = ""
+    old_sha = images.get(running)
+    if old_sha:
+        db_dir = os.path.join(acfg["be_subdir"], "src", "main", "resources", "db")
+        mig = af.run(["git", "diff", "%s..%s" % (old_sha, head[0]), "--", db_dir], cwd=acfg["be_repo"], check=False)
+    return {"running": running, "image": image, "version": image.rpartition(":")[2],
+            "migrations": bool(mig.strip()) if old_sha else True, "destructive": destructive_migrations(mig)}
+
+
+def be_drift_text(drift):
+    return "BE trên server (%s) chưa chạy bản build mới nhất %s — cần rollout lại BE" % (drift["running"], drift["image"])
+
+
 def fresh_worktree(repo, path, ref):
     if os.path.isdir(path):
         subprocess.run(["git", "worktree", "remove", "--force", path], cwd=repo, check=False)
@@ -1814,7 +1859,7 @@ def registry_preflight(dcfg):
     return out
 
 
-def deploy_parts(acfg, dcfg, root, logf, commits, drift=None):
+def deploy_parts(acfg, dcfg, root, logf, commits, drift=None, bdrift=None):
     """
     Build + đưa lên server từng phần, phần này lỗi không chặn phần kia: FE (commit mới → deploy_fe; FE lệch → recover_fe),
     BE (deploy_be), rồi rollout các image đã build xong (BE build lỗi vẫn rollout FE đã docker load), rồi repo tuỳ chỉnh.
@@ -1844,6 +1889,16 @@ def deploy_parts(acfg, dcfg, root, logf, commits, drift=None):
             built["be"] = "BE %s:%s" % (dcfg["be_image"], deploy_be(acfg, dcfg, root, logf, changes))
         except Exception as ex:  # noqa: BLE001 — BE lỗi vẫn rollout FE đã build + docker load
             errors.append(_part_error("BE build/deploy", ex, logf))
+    elif bdrift:
+        try:  # image đã build + docker load ở lượt trước, chỉ rollout lại
+            old_image = compose_image(dcfg, dcfg["be_service"])
+            set_compose_image(dcfg, dcfg["be_service"], bdrift["image"], logf)
+            changes.append({"part": "be", "service": dcfg["be_service"], "container": dcfg["be_container"],
+                            "old_image": old_image, "new_image": bdrift["image"], "version": bdrift["version"],
+                            "migrations": bdrift["migrations"], "destructive": bdrift["destructive"]})
+            built["be"] = "BE %s (rollout lại)" % bdrift["image"]
+        except Exception as ex:  # noqa: BLE001
+            errors.append(_part_error("BE rollout lại (%s)" % bdrift["image"], ex, logf))
     if changes:
         names = "+".join(ch["part"].upper() for ch in changes)
         try:
@@ -3576,15 +3631,18 @@ def deploy_only(cfg, acfg, dcfg, dry_run=False, qa_requested=False):
     os.makedirs(root, exist_ok=True)
     commits = pending(acfg, dcfg)
     drift = None if commits.get("FE") else fe_drift(acfg, dcfg)
+    bdrift = None if commits.get("BE") else be_drift(acfg, dcfg)
     log("chưa deploy: %s" % (", ".join("%s %d commit" % (k, len(v)) for k, v in commits.items()) or "không có repo deploy"))
     if drift:
         log(drift_text(drift))
-    if dry_run or not (any(commits.values()) or drift):
+    if bdrift:
+        log(be_drift_text(bdrift))
+    if dry_run or not (any(commits.values()) or drift or bdrift):
         return
     logf = open(os.path.join(root, "deploy-%s-%s.log" % (P.current(acfg)["key"], datetime.now().strftime("%m%d-%H%M"))),
                 "w", encoding="utf-8")
     dlock = deploy_lock(dcfg)  # noqa: F841 — giữ khoá tới hết hàm (đóng khi ra khỏi hàm)
-    parts, _, errors = deploy_parts(acfg, dcfg, root, logf, commits, drift)
+    parts, _, errors = deploy_parts(acfg, dcfg, root, logf, commits, drift, bdrift)
     if errors:
         msg = _deploy_error_msg(errors, parts, logf)
         log(msg)
@@ -3624,7 +3682,7 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
     me_id = api.me()["id"]
     deployed_parts, commits = [], pending(acfg, dcfg)
     waiting = load_pending()
-    drift = None
+    drift = bdrift = None
     auto = set()  # ticket lấy từ OpenProject (Resolved, giao cho mình) — chỉ QA khi bản đang chạy đã có bản sửa
     if only:
         tickets = list(only)
@@ -3647,17 +3705,24 @@ def run_one(proj, dry_run=False, only=None, auto_only=False, force=False, review
             log(drift_text(drift) + (" (dry-run: không đổi gì)" if dry_run else ""))
             if not dry_run:
                 qa_issues.record("fe_drift", drift_text(drift), build=drift.get("running"), latest=drift.get("latest"))
-        if dry_run or not (tickets or drift):
+        bdrift = None if commits.get("BE") else be_drift(acfg, dcfg)
+        if bdrift:
+            log(be_drift_text(bdrift) + (" (dry-run: không đổi gì)" if dry_run else ""))
+            if not dry_run:
+                qa_issues.record("be_drift", be_drift_text(bdrift), build=bdrift.get("running"), latest=bdrift.get("image"))
+        if dry_run or not (tickets or drift or bdrift):
             return
     fe_version, dlock = None, None
-    if not only and (any(commits.values()) or drift):
+    if not only and (any(commits.values()) or drift or bdrift):
         logf = open(os.path.join(root, "deploy-%s.log" % datetime.now().strftime("%m%d-%H%M")), "w", encoding="utf-8")
         what = ["%s %d commit" % (k, len(v)) for k, v in commits.items() if v]
         if drift:
             what.append("FE deploy lại bản %s (server đang %s)" % (drift["latest"], drift["running"]))
+        if bdrift:
+            what.append("BE rollout lại %s (server đang %s)" % (bdrift["image"], bdrift["running"]))
         dlock = deploy_lock(dcfg)
         notify("[DEPLOY 86]", "Bắt đầu deploy: " + ", ".join(what))
-        parts, fe_version, errors = deploy_parts(acfg, dcfg, root, logf, commits, drift)
+        parts, fe_version, errors = deploy_parts(acfg, dcfg, root, logf, commits, drift, bdrift)
         deployed_parts.extend(parts)
         if errors:
             msg = _deploy_error_msg(errors, parts, logf)
