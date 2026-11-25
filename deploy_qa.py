@@ -162,7 +162,7 @@ DEFAULTS = {
     "bg_next_suffix": "-next",
     "bg_health_minutes": 10,           # chờ container tạm / chính sống tối đa N phút
     "bg_drain_seconds": 15,            # sau khi trỏ nginx về chính: chờ request dở trên container tạm xong rồi mới xoá
-    "bg_be_health_path": "/actuator/health",
+    "bg_be_health_path": "/actuator/health/container",  # /actuator/health cần token từ BE 2.1.9 (SOAR-3050)
     # BE tạm nhận thêm alias mạng = be_container ("soar") để service nội bộ (playbook gọi http://soar:8888) không lỗi
     # trong lúc container chính tạo lại.
     "bg_be_aliases": True,
@@ -1991,7 +1991,7 @@ def _compose_retry(dcfg, logf=None):
 #   2. docker compose run -d --no-deps --name <container>-next <service>: cùng env_file / volume / mạng compose,
 #      KHÔNG publish cổng host → không đụng bản đang chạy.
 #   3. kiểm tra bản tạm qua mạng nội bộ (curl từ container nginx): FE trả index.html đúng version; BE
-#      /actuator/health = 200 và /api/v1/ping < 500. BE: gắn alias mạng "soar" cho bản tạm (service nội bộ gọi
+#      /actuator/health/container = 200 và /api/v1/ping < 500. BE: gắn alias mạng "soar" cho bản tạm (service nội bộ gọi
 #      http://soar:8888) rồi kiểm tra lại.
 #   4. ghi upstream → <container>-next, nginx -t, nginx -s reload (graceful); kiểm tra URL công khai.
 #      Lỗi ở 2-4: nginx về bản chính, xoá bản tạm, trả image cũ vào docker-compose.yml → trang giữ bản cũ.
@@ -2139,7 +2139,7 @@ def cmd_probe(dcfg, ch, host, container):
             "p=$(docker exec %s curl -s -o /dev/null -w '%%{http_code}' --max-time 10 %s 2>/dev/null); "
             "ok=0; [ \"$h\" = 200 ] && [ \"${p:-000}\" -ge 200 ] 2>/dev/null && [ \"$p\" -lt 500 ] && ok=1; "
             "echo \"PROBE state=$st ok=$ok detail=health-$h-ping-$p\""
-            % (n, q(base + dcfg.get("bg_be_health_path", "/actuator/health")), n, q(base + "/api/v1/ping")))
+            % (n, q(base + dcfg.get("bg_be_health_path", "/actuator/health/container")), n, q(base + "/api/v1/ping")))
 
 
 def parse_probe(out):
