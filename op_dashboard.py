@@ -1106,7 +1106,7 @@ def action(body):
     if kind == "task_refine":
         import task_create
         n = task_create.refine_draft(body.get("id"), body.get("answers") or [], body.get("subject") or "",
-                                     body.get("description") or "")
+                                     body.get("description") or "", body.get("files") or [])
         return {"message": "AI đang soạn lại mô tả (lần %d) với thông tin bạn nhập…" % n, "id": body.get("id")}
     if kind == "task_split":
         import task_split
@@ -1577,11 +1577,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, {"error": "forbidden"})
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            if length > 200000:
+            if length > MAX_UPLOAD_BODY:
                 raise ValueError("dữ liệu quá lớn")
             body = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("body phải là JSON object")
+            # Chỉ tạo / soạn lại task mang file (base64, tối đa 20 MB) mới được gửi body lớn.
+            if length > 200000 and body.get("action") not in UPLOAD_ACTIONS:
+                raise ValueError("dữ liệu quá lớn")
             if urlparse(self.path).path == "/api/op/status":
                 try:
                     res = op_set_status(body.get("id"), body.get("status_id"), body.get("lock_version"))
@@ -1623,6 +1626,9 @@ _OP_CACHE = {}
 
 # Thao tác từ trang có ghi lên OpenProject → xoá cache đọc OpenProject (danh sách ticket, trạng thái ticket trong mục
 # Telegram / Xin ý kiến) để lần tải ngay sau đó lấy dữ liệu mới.
+# task_create.MAX_BYTES (20 MB) base64 (+1/3) + JSON
+MAX_UPLOAD_BODY = 28 * 1024 * 1024
+UPLOAD_ACTIONS = ("task_draft", "task_refine")
 OP_WRITE_ACTIONS = {"task_create", "task_split_create", "pick_start", "rerun", "assist", "review", "followup_now", "review_qa_now", "review_qa_one", "job_start",
                     "tg_approve", "tg_link", "tg_retry", "tg_ask_reopen", "tg_ask_resolve", "tg_triage"}
 

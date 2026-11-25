@@ -601,6 +601,9 @@ table.tg-chats select { max-width: 220px; }
 .tm-qlist { display: grid; gap: 8px; margin: 8px 0; }
 .tm-qitem { display: grid; gap: 4px; font-size: 13px; }
 .tm-qitem textarea { width: 100%; min-height: 34px; resize: vertical; }
+.tm-qitem.over, .tm-drop.over { outline: 1px dashed var(--accent, #6aa0ff); background: var(--panel-2); }
+.tm-qfiles { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tm-qfiles .tm-files { margin-top: 0; }
 .tm-accs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .tg-pick.hl > div > .tg-msg { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
 .tg-pick.hl { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); border-radius: 8px; }
@@ -932,6 +935,7 @@ button.tg-reqlink { font-size: 11px; color: var(--accent); }
       <textarea id="tmPrompt" rows="6" placeholder="Ví dụ: Màn Quản trị > Giám sát kết nối, đăng nhập admint, cột STT quá rộng làm cột Kết nối bị rớt dòng. Mong muốn STT ~70px, cột Kết nối rộng hơn."></textarea>
       <div class="tm-drop" id="tmDrop" tabindex="0">Kéo thả file vào đây, dán ảnh (Ctrl+V) hoặc <button class="link plain" id="tmPick">chọn file</button>
         <input type="file" id="tmFiles" multiple hidden></div>
+      <input type="file" id="tmRFiles" multiple hidden>
       <div id="tmFileList" class="tm-files"></div>
       <div class="tm-actions"><button class="primary" id="tmDraft">AI soạn mô tả</button><span class="muted" id="tmStatus"></span></div>
       <div id="tmRecent"></div>
@@ -2172,6 +2176,35 @@ pollCompose(); setInterval(pollCompose, 3000);
 
 // ---- Tạo task: mô tả + file → AI soạn theo mẫu tester → xem / sửa → tạo trên OpenProject (New) ----
 let tmFiles = [], tmDraftId = null, tmPoll = null, TM_QS = [];
+// File bổ sung ở bước "AI gợi ý bổ sung": {chỉ số ý | "x" (chung): [File]}; TM_RF_BASE = số file bản nháp đã có.
+let TM_RF = {}, TM_RF_BASE = 0, tmRfTarget = "x";
+const tmRfAll = () => Object.values(TM_RF).flat();
+function tmRfRender() {
+  document.querySelectorAll("[data-tmqlist]").forEach((box) => {
+    const k = box.dataset.tmqlist;
+    box.innerHTML = (TM_RF[k] || []).map((f, j) => `<span class="tm-file">${esc(f.name)} <small>${tmFmt(f.size)}</small><button type="button" class="link ico" data-tmrdel="${esc(k)}:${j}" aria-label="Bỏ ${esc(f.name)}">✕</button></span>`).join("");
+  });
+  document.querySelectorAll("[data-tmrdel]").forEach((b) => b.onclick = () => {
+    const [k, j] = b.dataset.tmrdel.split(":"); TM_RF[k].splice(+j, 1); tmRfRender();
+  });
+}
+function tmRfAdd(key, list) {
+  for (const f of list) {
+    if (TM_RF_BASE + tmRfAll().length >= 10) { toast(`Tối đa 10 file cho một task (bản nháp đã có ${TM_RF_BASE})`, true); break; }
+    (TM_RF[key] = TM_RF[key] || []).push(f.name ? f : new File([f], `anh-dan-${Date.now()}.png`, {type: f.type}));
+  }
+  tmRfRender();
+}
+// Tên file gửi lên không trùng nhau (2 ý cùng dán "image.png") — BE đổi tiếp nếu trùng file đã có trong bản nháp.
+function tmRfPayload() {
+  const used = new Set(), names = new Map();
+  for (const f of tmRfAll()) {
+    let n = f.name, i = 1; const dot = n.lastIndexOf(".");
+    while (used.has(n)) n = dot > 0 ? `${f.name.slice(0, dot)}_${i++}${f.name.slice(dot)}` : `${f.name}_${i++}`;
+    used.add(n); names.set(f, n);
+  }
+  return names;
+}
 const tmFmt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
 function tmRenderFiles() {
   $("tmFileList").innerHTML = tmFiles.map((f, i) => `<span class="tm-file">${esc(f.name)} <small>${tmFmt(f.size)}</small><button class="link ico" data-tmdel="${i}" aria-label="Bỏ ${esc(f.name)}">✕</button></span>`).join("");
@@ -2241,21 +2274,38 @@ async function tmShowDraft(st) {
       ${TM_ACC_RX.test(q) && accs.length ? `<div class="tm-accs"><span class="muted">Chọn tài khoản đã khai báo (mật khẩu tự điền khi soạn lại):</span>
         ${accs.map((a) => `<button type="button" class="chip" data-tmacc="${i}" data-user="${esc(a.user)}"
           title="${a.source === "server" ? "Tài khoản server test" : "Tài khoản tester"}${a.has_password ? "" : " — chưa lưu mật khẩu"}">${esc(a.user)}<small>${a.source === "server" ? "server" : "tester"}${a.has_password ? "" : " · chưa có MK"}</small></button>`).join("")}</div>` : ""}
-      <textarea rows="1" data-tmq="${i}" placeholder="${TM_ACC_RX.test(q) && accs.length ? "Ghi chú thêm, vd: tài khoản nào có / không có quyền (bỏ trống nếu không cần)" : "Thông tin cho ý này (bỏ trống nếu chưa biết)"}"></textarea></div>`).join("")}</div>
+      <textarea rows="1" data-tmq="${i}" placeholder="${TM_ACC_RX.test(q) && accs.length ? "Ghi chú thêm, vd: tài khoản nào có / không có quyền (bỏ trống nếu không cần)" : "Thông tin cho ý này (bỏ trống nếu chưa biết)"}"></textarea>
+      <div class="tm-qfiles"><button type="button" class="link plain" data-tmqpick="${i}">📎 Đính kèm file cho ý này</button><div class="tm-files" data-tmqlist="${i}"></div></div></div>`).join("")}</div>
+    <div class="tm-drop" id="tmRDrop" tabindex="0">File bổ sung chung: kéo thả vào đây, dán ảnh (Ctrl+V) hoặc <button type="button" class="link plain" data-tmqpick="x">chọn file</button>
+      <span class="muted">— kéo thả / dán khi đang ở ô của một ý thì file gắn vào ý đó</span></div>
+    <div class="tm-files" data-tmqlist="x"></div>
     <div class="tm-actions"><button id="tmRefine">🤖 Soạn lại mô tả với thông tin đã nhập</button><span class="muted" id="tmRefineSt"></span></div>`
     : st.refine_round ? `<span class="badge ok">Đã đủ thông tin</span> <span class="muted">sau lần soạn lại ${st.refine_round}</span>` : "";
-  TM_QS = qs;
+  TM_QS = qs; TM_RF = {}; TM_RF_BASE = (st.files || []).length;
   const rb = $("tmRefine");
   if (rb) {
+    document.querySelectorAll("[data-tmqpick]").forEach((b) => b.onclick = () => { tmRfTarget = b.dataset.tmqpick; $("tmRFiles").click(); });
+    const dropOn = (el, key) => {
+      el.ondragover = (e) => { e.preventDefault(); e.stopPropagation(); el.classList.add("over"); };
+      el.ondragleave = () => el.classList.remove("over");
+      el.ondrop = (e) => { e.preventDefault(); e.stopPropagation(); el.classList.remove("over"); tmRfAdd(key(), e.dataTransfer.files); };
+    };
+    document.querySelectorAll(".tm-qitem").forEach((el) => dropOn(el, () => el.querySelector("[data-tmq]").dataset.tmq));
+    dropOn($("tmRDrop"), () => "x");
     document.querySelectorAll("[data-tmq]").forEach((t) => t.oninput = () => { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; });
     document.querySelectorAll("[data-tmacc]").forEach((b) => b.onclick = () => b.classList.toggle("sel"));
     rb.onclick = async () => {
       const picked = (i) => [...document.querySelectorAll(`[data-tmacc="${i}"].sel`)].map((b) => b.dataset.user);
+      const fname = tmRfPayload();
       const answers = [...document.querySelectorAll("[data-tmq]")].map((t) => ({q: TM_QS[+t.dataset.tmq], a: t.value.trim(),
-        accounts: picked(t.dataset.tmq)})).filter((x) => x.a || x.accounts.length);
-      if (!answers.length) return toast("Nhập thông tin cho ít nhất một ý", true);
+        accounts: picked(t.dataset.tmq), files: (TM_RF[t.dataset.tmq] || []).map((f) => fname.get(f))}))
+        .filter((x) => x.a || x.accounts.length || x.files.length);
+      if (!answers.length && !tmRfAll().length) return toast("Nhập thông tin hoặc đính kèm file cho ít nhất một ý", true);
       setBusy(rb, true);
-      const r = await post({action: "task_refine", id: tmDraftId, answers, subject: $("tmSubject").value, description: $("tmDesc").value}, null);
+      const files = [];
+      try { for (const f of tmRfAll()) files.push({name: fname.get(f), type: f.type, data: await tmB64(f)}); }
+      catch (e) { setBusy(rb, false); return toast("Không đọc được file: " + e, true); }
+      const r = await post({action: "task_refine", id: tmDraftId, answers, files, subject: $("tmSubject").value, description: $("tmDesc").value}, null);
       if (!r) { setBusy(rb, false); return; }
       const t0 = Date.now();
       if (tmPoll) clearInterval(tmPoll);
@@ -2276,11 +2326,19 @@ $("tmClose").onclick = tmCloseFn;
 $("taskModal").onclick = (e) => { if (e.target.id === "taskModal") tmCloseFn(); };
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("taskModal").hidden) tmCloseFn(); });
 $("tmPick").onclick = () => $("tmFiles").click();
+$("tmRFiles").onchange = (e) => { tmRfAdd(tmRfTarget, e.target.files); e.target.value = ""; };
 $("tmFiles").onchange = (e) => { tmAdd(e.target.files); e.target.value = ""; };
 $("tmDrop").ondragover = (e) => { e.preventDefault(); $("tmDrop").classList.add("over"); };
 $("tmDrop").ondragleave = () => $("tmDrop").classList.remove("over");
 $("tmDrop").ondrop = (e) => { e.preventDefault(); $("tmDrop").classList.remove("over"); tmAdd(e.dataTransfer.files); };
-$("taskModal").addEventListener("paste", (e) => { const fs = [...(e.clipboardData || {}).files || []]; if (fs.length) { e.preventDefault(); tmAdd(fs); } });
+$("taskModal").addEventListener("paste", (e) => {
+  const fs = [...(e.clipboardData || {}).files || []]; if (!fs.length) return;
+  e.preventDefault();
+  if ($("tmStep2").hidden) return tmAdd(fs);
+  if (!$("tmRefine")) return toast("Bản nháp không còn ý cần bổ sung — muốn thêm file thì tạo task xong đính kèm trên OpenProject", true);
+  const q = document.activeElement && document.activeElement.closest && document.activeElement.closest(".tm-qitem");
+  tmRfAdd(q ? q.querySelector("[data-tmq]").dataset.tmq : "x", fs);
+});
 $("tmDraft").onclick = async () => {
   const prompt = $("tmPrompt").value.trim();
   if (!prompt && !tmFiles.length) { toast("Nhập mô tả hoặc đính kèm file", true); return; }

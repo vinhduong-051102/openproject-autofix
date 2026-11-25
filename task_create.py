@@ -148,6 +148,29 @@ def set_state(d, **fields):
     return data
 
 
+def _save_files(d, files, existing=()):
+    """Ghi file (base64 từ dashboard) vào <draft>/files/, tên không trùng file đã có. Giới hạn số file / tổng dung
+    lượng tính cả file đã đính kèm trước đó. Kiểm tra hết rồi mới ghi (lỗi thì không để lại file dở)."""
+    import base64
+    existing = list(existing or [])
+    if len(existing) + len(files) > MAX_FILES:
+        raise ValueError("tối đa %d file (đã có %d)" % (MAX_FILES, len(existing)))
+    used, total, items = {x["name"] for x in existing}, sum(int(x.get("size") or 0) for x in existing), []
+    for f in files:
+        data = base64.b64decode(f.get("data") or "")
+        total += len(data)
+        if total > MAX_BYTES:
+            raise ValueError("tổng dung lượng file vượt %d MB" % (MAX_BYTES // 1024 // 1024))
+        items.append((safe_name(f.get("name"), used), data, f.get("type") or ""))
+    os.makedirs(os.path.join(d, "files"), exist_ok=True)
+    saved = []
+    for name, data, ctype in items:
+        with open(os.path.join(d, "files", name), "wb") as out:
+            out.write(data)
+        saved.append({"name": name, "size": len(data), "type": ctype})
+    return saved
+
+
 def start_draft(prompt, files, opts=None):
     """Lưu yêu cầu + file, chạy Claude soạn nền. Trả id bản nháp (theo dõi bằng get_draft)."""
     prompt = (prompt or "").strip()
@@ -159,17 +182,7 @@ def start_draft(prompt, files, opts=None):
     draft_id = datetime.now().strftime("%m%d-%H%M%S") + "-" + secrets.token_hex(2)
     d = os.path.join(drafts_root(acfg), draft_id)
     os.makedirs(os.path.join(d, "files"))
-    import base64
-    used, saved, total = set(), [], 0
-    for f in files:
-        data = base64.b64decode(f.get("data") or "")
-        total += len(data)
-        if total > MAX_BYTES:
-            raise ValueError("tổng dung lượng file vượt %d MB" % (MAX_BYTES // 1024 // 1024))
-        name = safe_name(f.get("name"), used)
-        with open(os.path.join(d, "files", name), "wb") as out:
-            out.write(data)
-        saved.append({"name": name, "size": len(data), "type": f.get("type") or ""})
+    saved = _save_files(d, files)
     with open(os.path.join(d, "request.json"), "w", encoding="utf-8") as f:
         json.dump({"prompt": prompt, "files": saved, "opts": opts or {}}, f, ensure_ascii=False, indent=1)
     set_state(d, state="drafting", files=saved, prompt=prompt, opts=opts or {})
@@ -239,21 +252,45 @@ def _expand_accounts(d, answers):
     return answers
 
 
-def refine_draft(draft_id, answers, subject="", description=""):
+def refine_draft(draft_id, answers, subject="", description="", files=None):
     """Người dùng trả lời các câu AI gợi ý bổ sung → AI soạn lại bản nháp (chạy nền, giữ file đính kèm).
-    answers: [{"q": câu hỏi, "a": trả lời}] — chỉ các câu có nhập; cộng dồn qua các lần soạn lại."""
+    answers: [{"q": câu hỏi, "a": trả lời, "files": [tên file trong files gửi kèm]}] — chỉ các câu có nhập; cộng dồn
+    qua các lần soạn lại. files: file bổ sung [{"name","type","data"(base64)}] — thêm vào danh sách file của bản nháp
+    (AI đọc khi soạn lại, đính kèm lên ticket khi tạo)."""
     st = get_draft(draft_id)
     if st.get("state") == "drafting":
         raise ValueError("AI đang soạn, chờ xong rồi soạn lại")
     if st.get("state") == "created":
         raise ValueError("bản nháp này đã tạo task")
+    files = list(files or [])
     answers = [{"q": str(x.get("q") or "").strip()[:500], "a": str(x.get("a") or "").strip()[:2000],
-                "accounts": [str(n) for n in (x.get("accounts") or [])][:20]}
-               for x in answers or [] if str(x.get("a") or "").strip() or x.get("accounts")]
-    if not answers:
-        raise ValueError("chưa nhập thông tin cho câu nào")
+                "accounts": [str(n) for n in (x.get("accounts") or [])][:20],
+                "files": [str(n) for n in (x.get("files") or [])][:MAX_FILES]}
+               for x in answers or [] if str(x.get("a") or "").strip() or x.get("accounts") or x.get("files")]
+    if not answers and not files:
+        raise ValueError("chưa nhập thông tin hoặc đính kèm file cho câu nào")
     _, acfg, _ = load()
     d = os.path.join(drafts_root(acfg), draft_id)
+    if files:
+        rq_path = os.path.join(d, "request.json")
+        req = json.load(open(rq_path, encoding="utf-8"))
+        saved = _save_files(d, files, req.get("files"))
+        renamed = {f.get("name"): x["name"] for f, x in zip(files, saved)}  # tên gốc → tên đã lưu (tránh trùng)
+        req["files"] = (req.get("files") or []) + saved
+        with open(rq_path, "w", encoding="utf-8") as f:
+            json.dump(req, f, ensure_ascii=False, indent=1)
+        set_state(d, files=req["files"])
+        claimed = set()
+        for x in answers:
+            names = [renamed[n] for n in x["files"] if n in renamed]
+            claimed.update(names)
+            if names:
+                x["a"] = (x["a"] + "\nFile bổ sung cho ý này (đã thêm vào danh sách file đính kèm, đọc kỹ): "
+                          + ", ".join(names)).strip()
+        rest = [x["name"] for x in saved if x["name"] not in claimed]
+        if rest:
+            answers.append({"q": "", "a": "Người dùng đính kèm thêm file (đã thêm vào danh sách file đính kèm, đọc "
+                                         "kỹ): " + ", ".join(rest), "accounts": []})
     answers = [{"q": x["q"], "a": x["a"]} for x in _expand_accounts(d, answers)]
     path = os.path.join(d, "refine.json")
     data = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {"round": 0, "answers": []}
