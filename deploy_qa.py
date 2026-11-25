@@ -169,6 +169,11 @@ DEFAULTS = {
     # BE có migration Liquibase phá cấu trúc (drop / rename cột, bảng…): fallback = dùng "service" cho BE (dừng bản
     # cũ trước khi bản mới migrate); ignore = vẫn bluegreen (bản cũ có thể lỗi SQL vài phút trong lúc chạy song song).
     "bg_be_destructive": "fallback",
+    # Bảng cấu hình chung của server test: chụp trước mỗi lượt QA, QA đổi gì (vd thời hạn mật khẩu = 1 giây để test
+    # SOAR-3062) thì trả lại sau — QA có thể tự khoá mình (token hết hạn) trước khi kịp hoàn trả bằng API.
+    "qa_db_container": "postgres_soar",
+    "qa_db_name": "soar_ss",
+    "qa_restore_tables": ["general_configuration"],
 }
 
 # Biến .env cho phần rollout (đọc thẳng ở đây, không cần sửa envconf.DEPLOY_ENV).
@@ -191,6 +196,9 @@ ROLLOUT_ENV = {
     "DEPLOY_BG_BE_ALIASES": ("bg_be_aliases", "bool"),
     "DEPLOY_BG_BE_DESTRUCTIVE": ("bg_be_destructive", "str"),
     "QA_BE_LOG_CHECK": ("qa_be_log_check", "bool"),
+    "QA_DB_CONTAINER": ("qa_db_container", "str"),
+    "QA_DB_NAME": ("qa_db_name", "str"),
+    "QA_RESTORE_TABLES": ("qa_restore_tables", "list"),
 }
 STRATEGIES = ("bluegreen", "service", "recreate")
 
@@ -3262,6 +3270,73 @@ def qa_waited(reqs, qa_dir):
     return False
 
 
+def _psql_cmd(dcfg, sql):
+    return "docker exec -i %s psql -U postgres -d %s -AtX -v ON_ERROR_STOP=1 -c %s" % (
+        shlex.quote(dcfg.get("qa_db_container") or "postgres_soar"), shlex.quote(dcfg.get("qa_db_name") or "soar_ss"),
+        shlex.quote(sql))
+
+
+def config_snapshot(dcfg, run=None):
+    """{bảng: {id: hàng(dict)}} của các bảng cấu hình (qa_restore_tables). Lỗi → None (không chặn QA)."""
+    run = run or (lambda cmd: remote(dcfg, cmd, timeout=60))
+    snap = {}
+    for table in dcfg.get("qa_restore_tables") or []:
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
+            continue
+        try:
+            out = run(_psql_cmd(dcfg, "select coalesce(json_agg(t), '[]') from %s t" % table)).strip()
+            snap[table] = {str(r["id"]): r for r in json.loads(out[out.index("["):])}
+        except Exception as ex:  # noqa: BLE001
+            log("chụp cấu hình %s lỗi: %s" % (table, ex))
+            return None
+    return snap
+
+
+def config_restore_sql(before, after):
+    """Lệnh SQL trả các cột QA đã đổi về giá trị trước QA + danh sách thay đổi [(bảng, id, cột, cũ, mới)].
+    Chỉ hàng có ở cả hai lần chụp (hàng QA tạo / xoá: không đụng)."""
+    stmts, changes = [], []
+    for table, rows in (before or {}).items():
+        for rid, old in rows.items():
+            new = ((after or {}).get(table) or {}).get(rid)
+            if new is None:
+                continue
+            cols = sorted(c for c in old if c != "id" and old.get(c) != new.get(c)
+                          and re.fullmatch(r"[a-z_][a-z0-9_]*", c))
+            if not cols:
+                continue
+            changes += [(table, rid, c, old.get(c), new.get(c)) for c in cols]
+            rec = json.dumps({c: old.get(c) for c in cols + ["id"]}, ensure_ascii=False).replace("$q$", "")
+            stmts.append("update %s g set %s from json_populate_record(null::%s, $q$%s$q$) r where g.id = r.id;" % (
+                table, ", ".join("%s = r.%s" % (c, c) for c in cols), table, rec))
+    return "\n".join(stmts), changes
+
+
+def restore_config(dcfg, before, display_id, deployed, qa_dir, run=None):
+    """Sau QA: cấu hình chung bị QA đổi → trả lại như trước, ghi qa_issues + log."""
+    if not before:
+        return []
+    run = run or (lambda cmd: remote(dcfg, cmd, timeout=60))
+    after = config_snapshot(dcfg, run)
+    if after is None:
+        return []
+    sql, changes = config_restore_sql(before, after)
+    if not changes:
+        return []
+    desc = ", ".join("%s#%s.%s %s→%s (trả %s)" % (t, i, c, json.dumps(o), json.dumps(n), json.dumps(o))
+                     for t, i, c, o, n in changes)[:1500]
+    try:
+        run(_psql_cmd(dcfg, "begin;\n%s\ncommit;" % sql))
+        log("%s: QA đã đổi cấu hình chung → đã trả lại: %s" % (display_id, desc))
+        qa_issues.record("qa_config_restored", desc, ticket=display_id, path=qa_dir, build=deployed)
+    except Exception as ex:  # noqa: BLE001
+        log("%s: QA đổi cấu hình chung, TRẢ LẠI LỖI (%s): %s" % (display_id, ex, desc))
+        qa_issues.record("qa_config_restore_failed", "%s — %s" % (ex, desc), ticket=display_id, path=qa_dir,
+                         build=deployed)
+        notify("[QA SERVER] %s" % display_id, "QA đổi cấu hình chung server test, trả lại LỖI: %s" % desc)
+    return changes
+
+
 def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=None, fix_missing=None):
     """Bọc _qa_ticket: ghi thời gian QA trên server lên ticket (Testing). Một ticket chỉ một lượt QA cùng lúc."""
     lk = open(runstate.ticket_lock_path(acfg["root"], display_id), "a")
@@ -3271,11 +3346,15 @@ def qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard=
         lk.close()
         log("%s: đang được QA ở lượt khác — bỏ qua" % display_id)
         return "", ""
+    before = config_snapshot(dcfg)
     try:
         t0 = time.time()
         verdict, path = _qa_ticket(api, cfg, acfg, dcfg, me_id, display_id, commits, deployed, guard, fix_missing)
     finally:
-        lk.close()
+        try:
+            restore_config(dcfg, before, display_id, deployed, "")
+        finally:
+            lk.close()
     if verdict:  # "" = không phải ticket của mình / không ở trạng thái QA → không ghi
         af.log_time(api, dict(af.AUTOFIX_DEFAULTS, **acfg), display_id, time.time() - t0, "test",
                     "[QA tự động] Gemini QA trên server test (%s) — %s" % (deployed, verdict[:120]))
