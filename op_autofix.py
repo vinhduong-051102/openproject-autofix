@@ -39,6 +39,7 @@ import envconf  # noqa: E402
 import repos as R  # noqa: E402  danh sách repo (cấu hình động; mặc định FE + BE như trước)  (nạp .env)
 import op_watch  # noqa: E402  (dùng chung cấu hình + client OpenProject)
 import runstate  # noqa: E402
+import fix_checklist as FC  # noqa: E402  sửa theo loại lỗi + checklist biến thể (rút từ các lần reopen)
 import projects as P  # noqa: E402  nhiều dự án: mỗi ticket dùng repo / quy ước của dự án mình (theo tiền tố mã)
 
 _CFG = {}  # cấu hình op-watch đầy đủ của tiến trình (main ghi) — để tra dự án của một ticket
@@ -194,6 +195,11 @@ Chỉ sửa trong {n_repos} thư mục này. Không tạo nhánh / worktree khá
    chuẩn: mô tả ticket chỉ tóm tắt; code hiện có khác đặc tả thì làm theo đặc tả (chỗ mâu thuẫn rõ → ghi Cần quyết định).
 1. Tìm nguyên nhân gốc trong code (không đoán). Ticket nhắc tới API/màn hình nào thì tìm đúng chỗ đó.
 2. Sửa tối thiểu, đúng phạm vi ticket, theo phong cách code xung quanh{repo_rules}.
+   """ + FC.esc(FC.FIX_SCOPE_RULES).replace("\n", "\n   ") + """
+   """ + FC.esc(FC.VARIANT_CHECKLIST).replace("\n", "\n   ") + """
+   Bug BE về phân quyền / validate / mã lỗi: thêm hoặc sửa test tự động (MockMvc / unit test controller) cho tài khoản
+   không quyền + các biến thể ở mục 1–2 của checklist (kỳ vọng 403), và cặp đối chứng tài khoản có quyền — để lần sau
+   sửa thiếu thì test báo đỏ.
 3. Kiểm tra: {repo_checks}.
    KHÔNG dùng `cd … && …` (bị chặn): git luôn dùng {git_dirs}, Maven dùng `-f`.
    {cwd_note}
@@ -231,6 +237,8 @@ Ghi {run_dir}/report.md bằng tiếng Việt:
   (mỗi phương án: đổi gì, ảnh hưởng), không có thì bỏ mục này. Các mục Nguyên nhân / Đã sửa / Commit / hồi quy ghi
   "Không (ticket dạng câu hỏi)".
 - Nguyên nhân; Đã sửa (file, cách sửa); Commit (repo + hash); Kiểm tra (lệnh + kết quả thật);
+  `## Biến thể đã kiểm` — bảng: biến thể (theo checklist, kể cả endpoint / màn hình cùng nhóm đã rà) → kết
+  quả mong đợi → đã đúng (bằng test / đọc code nào). Mục checklist không thuộc loại lỗi thì ghi "không áp dụng";
   `## Kiểm tra hồi quy` — các chỗ dùng đã rà (file / màn hình / API → còn đúng / đã sửa theo / cần quyết định) và test
   đã chạy cho phần bị ảnh hưởng (lệnh + kết quả);
   Cần quyết định / rủi ro;
@@ -285,6 +293,10 @@ Bản sửa trước của ticket đã deploy lên server test và QA tự độ
    - `LOẠI QA SAI: CHẤM SAI` — QA (Gemini) đã test ĐÚNG và ĐỦ kết quả mong đợi của ticket, các response trong báo
      cáo đủ chứng minh; chỉ bước chấm tự động sau QA của công cụ hạ kết luận ĐẠT xuống. Công cụ sẽ dùng luôn kết luận
      ĐẠT gốc và chuyển tester, nên CHỈ ghi khi chính bạn đã đối chiếu từng kết quả mong đợi với response thật.
+     BẮT BUỘC kèm mục `## Biến thể đã đối chiếu`: mỗi dòng một biến thể thuộc loại lỗi của ticket (theo checklist
+     ở phần Làm, gồm endpoint / màn hình cùng nhóm) → request QA đã gửi + response → `đạt`. Biến thể nào QA CHƯA gửi
+     hoặc chưa đạt thì KHÔNG được ghi CHẤM SAI (ghi TEST SAI, nêu biến thể cần test thêm trong Comment cho tester).
+     Thiếu mục này hoặc có dòng chưa đạt / chưa test → công cụ tự coi là TEST SAI và QA lại.
    - `LOẠI QA SAI: TEST SAI` — mọi trường hợp khác (QA test sai cách / thiếu bước / dựng request sai, công cụ gửi sai,
      server chưa có bản sửa…). Công cụ sẽ QA lại ngay ở lượt kiểm tra kế tiếp.
 6. Phần cần người quyết định → `KẾT QUẢ: CẦN QUYẾT ĐỊNH` như thường.
@@ -1582,6 +1594,25 @@ def _qa_engine_pass(qa_report):
     return text.lstrip().startswith("QA: ĐẠT"), text
 
 
+VARIANT_FAIL_RX = re.compile(r"❌|✗|chưa\s+(đạt|test|kiểm|gửi|đối chiếu)|không\s+đạt|\bFAIL\b", re.I)
+
+
+def variants_verified(report_text):
+    """Mục "## Biến thể đã đối chiếu" của báo cáo QA SAI / CHẤM SAI: có, ≥ 2 dòng, không dòng nào chưa đạt / chưa test.
+    → (đúng/sai, lý do). Chặn việc Claude đổi kết luận về ĐẠT khi QA mới test đúng ví dụ của ticket (SOAR-3086: QA chỉ
+    gửi -5 và {}, tester gửi thêm "abc", [] → reopen)."""
+    body = report_section(report_text, FC.VARIANT_SECTION)
+    lines = [l.strip() for l in (body or "").splitlines() if l.strip() and not _TABLE_SEP.match(l)]
+    if lines and _TABLE_ROW.match(lines[0]) and not VARIANT_FAIL_RX.search(lines[0]) and len(lines) > 1:
+        lines = lines[1:]  # dòng tiêu đề bảng
+    if len(lines) < 2:
+        return False, "báo cáo thiếu mục \"%s\" (cần ≥ 2 biến thể đã đối chiếu)" % FC.VARIANT_SECTION
+    bad = [l for l in lines if VARIANT_FAIL_RX.search(l)]
+    if bad:
+        return False, "còn biến thể chưa đạt / chưa test: %s" % bad[0][:160]
+    return True, ""
+
+
 def report_qa_wrong(api, wp_id, display_id, report_text, run_name, qa_report=None):
     """Claude kiểm chứng kết luận QA (chưa đạt) là sai:
     - CHẤM SAI + báo cáo gốc của Gemini là ĐẠT → dùng luôn kết luận ĐẠT: comment ĐẠT, chuyển người QA (Review → Resolved),
@@ -1592,6 +1623,13 @@ def report_qa_wrong(api, wp_id, display_id, report_text, run_name, qa_report=Non
     n = save_qa_rules(report_text, display_id)
     rules = ", thêm %d rule QA" % n if n else ""
     engine_ok, engine_text = _qa_engine_pass(qa_report)
+    downgrade = ""
+    if qa_wrong_kind(report_text) == "CHẤM SAI" and engine_ok:
+        ok, why = variants_verified(report_text)
+        if not ok:
+            engine_ok = False
+            downgrade = " (CHẤM SAI bị hạ thành TEST SAI: %s)" % why
+            log("%s: %s" % (display_id, downgrade.strip(" ()")))
     if qa_wrong_kind(report_text) == "CHẤM SAI" and engine_ok:
         dcfg = envconf.deploy_config()
         body = report_section(engine_text, "Kết quả") or "Đã kiểm tra đạt."
@@ -1635,7 +1673,7 @@ def report_qa_wrong(api, wp_id, display_id, report_text, run_name, qa_report=Non
         when = "QA lại ở lượt kiểm tra kế tiếp (~10 phút)"
     except (OSError, ValueError) as ex:
         when = "chưa đưa vào hàng chờ QA (%s) — QA lại ở đợt merge sau" % ex
-    return "đã comment cách test đúng%s, %s" % (rules, when)
+    return "đã comment cách test đúng%s, %s%s" % (rules, when, downgrade)
 
 
 def report_answer(api, acfg, wp_id, report_text, run_name, has_fix=False):
@@ -1675,7 +1713,12 @@ Có mục "# ĐẶC TẢ" bên dưới (SRS / mockup của ticket) thì đặc t
 cầu chi tiết của đặc tả thuộc phạm vi ticket (loại ô nhập, placeholder, giá trị mặc định, bắt buộc / không, câu báo
 lỗi, quy tắc xử lý…) với code. Bản sửa làm khác đặc tả (vd đặc tả là ô nhập mà code làm ô chọn, thiếu câu báo lỗi)
 → KHÔNG ĐẠT, kể cả khi Claude đã tự ghi đó là "rủi ro". Đoạn trích chưa đủ thì đọc thêm file đặc tả (đường dẫn kèm).
-KHÔNG rà hồi quy / ảnh hưởng tới chức năng khác (Claude đã tự kiểm tra — mục "Kiểm tra hồi quy" trong báo cáo), KHÔNG
+PHẠM VI LOẠI LỖI (bắt buộc, tester verify bằng nhiều biến thể hơn ví dụ trong ticket): bản sửa phải đúng cho mọi biến
+thể thuộc loại lỗi của ticket theo checklist dưới đây, và cho CÙNG loại lỗi ở endpoint / màn hình cùng nhóm (cùng
+controller / màn hình). Sửa vừa khít ví dụ của ticket (vd kiểm quyền đặt trong hàm controller nhưng body sai kiểu /
+mảng vẫn bị parse lỗi 400 trước đó; chỉ ẩn nút mà API vẫn cho làm; chỉ sửa tiếng Việt) → KHÔNG ĐẠT.
+""" + FC.esc(FC.VARIANT_CHECKLIST) + """
+Ngoài phạm vi loại lỗi đó: KHÔNG rà hồi quy / ảnh hưởng tới chức năng khác (Claude đã tự kiểm tra — mục "Kiểm tra hồi quy" trong báo cáo), KHÔNG
 đánh giá phong cách code, tối ưu, đặt tên, test tự động hay việc ngoài phạm vi ticket.
 Trả lời bằng tiếng Việt, markdown. Dòng đầu đúng một trong:
 `KẾT LUẬN: ĐẠT` | `KẾT LUẬN: KHÔNG ĐẠT` | `KẾT LUẬN: CẦN XEM`
@@ -1683,10 +1726,11 @@ Sau đó các mục:
 ## Tóm tắt lý do (chỉ khi KHÔNG ĐẠT / CẦN XEM: 1–3 gạch đầu dòng ngắn, đăng lên ticket cho TESTER đọc — nói theo màn
 hình / thao tác / kết quả nhìn thấy; KHÔNG tên file, class, hàm, biến, commit)
 ## Đối chiếu kết quả mong đợi (từng ý của ticket → đạt / chưa đạt, dẫn chứng file:dòng)
+## Biến thể cùng loại lỗi (các mục checklist thuộc loại lỗi + endpoint / màn hình cùng nhóm → đạt / chưa đạt, file:dòng)
 ## Đối chiếu đặc tả (chỉ khi có mục # ĐẶC TẢ: từng yêu cầu chi tiết → đạt / chưa đạt, dẫn chứng mục đặc tả + file:dòng)
 ## Lỗi (chỉ các ý của ticket CHƯA đạt: 1. <ý> — mức độ — hậu quả)
 ## Ca kiểm thử tester nên chạy lại (bước + kết quả mong đợi)
-KHÔNG ĐẠT chỉ khi có ít nhất một kết quả mong đợi của ticket / yêu cầu của đặc tả chưa đạt (hoặc luồng của ticket bị hỏng rõ ràng). Không
+KHÔNG ĐẠT chỉ khi có ít nhất một kết quả mong đợi của ticket / yêu cầu của đặc tả / biến thể cùng loại lỗi chưa đạt (hoặc luồng của ticket bị hỏng rõ ràng). Không
 xác nhận được từ code (cần dữ liệu / môi trường thật) thì CẦN XEM. Còn lại ĐẠT.
 """
 

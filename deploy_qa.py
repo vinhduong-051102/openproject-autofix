@@ -47,6 +47,7 @@ import op_watch  # noqa: E402
 import envconf  # noqa: E402
 import runstate  # noqa: E402
 import projects as P  # noqa: E402
+import fix_checklist as FC  # noqa: E402
 import qa_issues  # noqa: E402
 
 _PROJ = {}  # dự án đang deploy / QA (load ghi) — để ghi tên dự án vào thông báo khi có nhiều dự án
@@ -326,8 +327,10 @@ ANTI_FALSE_PASS = """# QUY TẮC CHỐNG PASS GIẢ / CHẤM SAI (BẮT BUỘC)
    trả 2xx (body đúng, tài khoản được phép) — để chứng minh 4xx / rỗng là do bản sửa chứ không do request sai. Bug phân
    quyền / cách ly: cặp tài khoản được thấy → 200 có dữ liệu, tài khoản không được thấy → 403/404 hoặc rỗng.
 3. Body: dựng theo đúng payload màn hình gửi (SEARCH chỗ FE dựng body); bug validate / payload thì thử thêm `{}`, `null`,
-   sai kiểu cho trường bug nêu — `{}` / `null` chỉ kỳ vọng 400 khi body / trường là bắt buộc; body tuỳ chọn mà trả 200 là
-   đúng (dùng làm đối chứng).
+   sai kiểu (`"abc"` thay số / boolean), body là mảng `[]` cho trường bug nêu — `{}` / `null` chỉ kỳ vọng 400 khi body /
+   trường là bắt buộc; body tuỳ chọn mà trả 200 là đúng (dùng làm đối chứng). Bug phân quyền / "kiểm quyền trước
+   validate": tài khoản KHÔNG quyền phải nhận 403 với MỌI biến thể body (hợp lệ, sai giá trị, `{}`, `null`, sai kiểu,
+   mảng `[]`) trên MỌI endpoint ghi cùng controller / nhóm, không chỉ endpoint ticket nêu.
 4. Dữ liệu trong ticket có thể đã đổi: GET trạng thái hiện tại của bản ghi ticket nêu TRƯỚC khi test; đã bị xoá / đổi
    trạng thái thì tìm bản ghi khác còn đúng ĐIỀU KIỆN BAN ĐẦU hoặc tự tạo QA_AUTO_* đúng điều kiện; dữ liệu sẵn có cho
    nhóm cần kiểm bằng 0 thì tự tạo dữ liệu dương tính — "200, 0 kết quả" không chứng minh được bản sửa.
@@ -337,10 +340,14 @@ ANTI_FALSE_PASS = """# QUY TẮC CHỐNG PASS GIẢ / CHẤM SAI (BẮT BUỘC)
 7. Thao tác chỉ được làm một lần (duyệt, tiếp nhận, tạo trùng…) → gửi 2 request đồng thời (parallel) và kiểm chỉ 1 thành công.
 8. Thay đổi cấu hình / phân quyền / phê duyệt → kiểm thêm nhật ký hoạt động (`log-actions`) có ghi đúng thao tác.
 9. Phạm vi kết luận: KHÔNG ĐẠT khi còn lỗi trên cùng endpoint / chức năng mà KẾT QUẢ MONG ĐỢI của ticket nêu (kể cả biến thể
-   payload ticket gọi chung như "payload không hợp lệ") hoặc trong phạm vi dev cam kết ở comment. Lỗi 4xx / sai logic ở
+   payload ticket gọi chung như "payload không hợp lệ") hoặc trong phạm vi dev cam kết ở comment, hoặc CÙNG LOẠI lỗi (cùng
+   nguyên nhân) còn ở endpoint / màn hình cùng nhóm (cùng controller, cùng màn hình) — tester verify cả nhóm. Lỗi 4xx / sai logic ở
    endpoint / chức năng KHÁC → ghi vào notes dạng `LỖI MỚI NGOÀI PHẠM VI: <endpoint> — <hiện tượng> — <request>` để
    tester tách bug mới, không làm đổi kết luận (riêng HTTP 5xx vẫn theo quy tắc 5xx ở trên).
-"""
+10. Test theo LOẠI lỗi, không chỉ ví dụ của ticket: ví dụ trong ticket là tối thiểu; tester verify bằng các biến thể trong
+   checklist dưới đây. Mỗi biến thể thuộc loại lỗi của ticket phải có ít nhất một request trong lần QA này; biến thể
+   nào chưa test được thì ghi rõ trong notes, không kết luận ĐẠT chỉ dựa vào ví dụ của ticket.
+""" + FC.VARIANT_CHECKLIST + "\n"
 
 
 GEMINI_QA_PROMPT = """KHÔNG dùng bất kỳ công cụ nào (không chạy lệnh, không đọc file, không gọi mạng). Một chương trình khác gọi

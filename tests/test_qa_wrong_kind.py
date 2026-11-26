@@ -63,8 +63,10 @@ class QaWrongKindTest(unittest.TestCase):
             msg = af.report_qa_wrong(api, 7, "SOAR-1", report, "run", qa_report=qa_path)
         return msg, writes, fc, root
 
+    VAR = "\n## Biến thể đã đối chiếu\n| Biến thể | Request | Kết quả |\n|---|---|---|\n| -5 | POST set | 403 đạt |\n| \"abc\" | POST set | 403 đạt |\n"
+
     def test_cham_sai_hands_to_tester(self):
-        msg, writes, fc, _ = self._run("KẾT QUẢ: QA SAI\nLOẠI QA SAI: CHẤM SAI\n", "QA: ĐẠT")
+        msg, writes, fc, _ = self._run("KẾT QUẢ: QA SAI\nLOẠI QA SAI: CHẤM SAI\n" + self.VAR, "QA: ĐẠT")
         self.assertIn("đã chuyển anh Tám", msg)
         patch = [w for w in writes if w[1] == "PATCH"][0]
         self.assertEqual(patch[3]["_links"]["assignee"]["href"], "/api/v3/users/59")
@@ -77,6 +79,26 @@ class QaWrongKindTest(unittest.TestCase):
         with open(os.path.join(root, "qa-pending.json"), encoding="utf-8") as f:
             self.assertIn("SOAR-1", json.load(f)["tickets"])
         self.assertIn("~10 phút", msg)
+
+    def test_cham_sai_without_variants_requeues(self):
+        msg, writes, fc, root = self._run("KẾT QUẢ: QA SAI\nLOẠI QA SAI: CHẤM SAI\n", "QA: ĐẠT")
+        self.assertFalse([w for w in writes if w[1] == "PATCH"])
+        with open(os.path.join(root, "qa-pending.json"), encoding="utf-8") as f:
+            self.assertIn("SOAR-1", json.load(f)["tickets"])
+        self.assertIn("hạ thành TEST SAI", msg)
+        fc.assert_not_called()
+
+    def test_cham_sai_with_untested_variant_requeues(self):
+        report = "KẾT QUẢ: QA SAI\nLOẠI QA SAI: CHẤM SAI\n" + self.VAR + '| mảng [] | — | chưa test |\n'
+        msg, writes, _, _ = self._run(report, "QA: ĐẠT")
+        self.assertFalse([w for w in writes if w[1] == "PATCH"])
+        self.assertIn("chưa test", msg)
+
+    def test_variants_verified(self):
+        self.assertTrue(af.variants_verified(self.VAR)[0])
+        self.assertFalse(af.variants_verified("## Biến thể đã đối chiếu\n- -5 → 403 đạt\n")[0])  # 1 dòng
+        self.assertFalse(af.variants_verified("## Biến thể đã đối chiếu\n- a đạt\n- b ❌ 400\n")[0])
+        self.assertTrue(af.variants_verified("## Biến thể đã đối chiếu\n- a → 403 đạt\n- b → 403 đạt\n")[0])
 
     def test_test_sai_requeues(self):
         msg, writes, fc, root = self._run("KẾT QUẢ: QA SAI\nLOẠI QA SAI: TEST SAI\n", "QA: ĐẠT")
